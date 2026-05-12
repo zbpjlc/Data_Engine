@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Engine - QA 抽检</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm border-b">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center py-4">
+                    <h1 class="text-2xl font-bold text-gray-900">QA 抽检</h1>
+                    <nav class="flex space-x-4">
+                        <a href="/" class="text-gray-600 hover:text-blue-600">数据地图</a>
+                        <a href="/hard-case-review" class="text-gray-600 hover:text-blue-600">Hard Case复核</a>
+                        <a href="/qa-sampling" class="text-blue-600 font-medium">QA抽检</a>
+                    </nav>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <!-- Sampling Controls -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4">抽检配置</h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">数据源</label>
+                        <select id="qa-source-select" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">全部数据源</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">抽检比例 (%)</label>
+                        <input type="number" id="sampling-rate" min="1" max="100" value="5" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">抽检类型</label>
+                        <select id="sampling-type" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="random">随机抽检</option>
+                            <option value="stratified">分层抽检</option>
+                            <option value="focused">重点抽检</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mt-4 flex space-x-3">
+                    <button onclick="startSampling()" class="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 transition-colors">
+                        开始抽检
+                    </button>
+                    <button onclick="exportResults()" class="bg-green-600 text-white px-6 py-2 rounded-md hover:bg-green-700 transition-colors">
+                        导出结果
+                    </button>
+                </div>
+            </div>
+
+            <!-- Sampling Progress -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-lg font-semibold text-gray-900 mb-4">抽检进度</h2>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div class="text-center">
+                        <div class="text-2xl font-bold text-blue-600" id="total-reviewed">0</div>
+                        <div class="text-sm text-gray-600">已抽检</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-2xl font-bold text-green-600" id="passed">0</div>
+                        <div class="text-sm text-gray-600">通过</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-2xl font-bold text-red-600" id="failed">0</div>
+                        <div class="text-sm text-gray-600">失败</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-2xl font-bold text-yellow-600" id="pending">0</div>
+                        <div class="text-sm text-gray-600">待处理</div>
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <div class="flex justify-between text-sm text-gray-600 mb-1">
+                        <span>完成进度</span>
+                        <span id="progress-text">0%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2">
+                        <div id="progress-bar" class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sample Review Area -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Sample Display -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                        <h2 class="text-lg font-semibold text-gray-900">当前样本</h2>
+                        <div class="flex space-x-2">
+                            <button onclick="previousSample()" class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors">
+                                ← 上一个
+                            </button>
+                            <button onclick="nextSample()" class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors">
+                                下一个 →
+                            </button>
+                        </div>
+                    </div>
+                    <div class="p-6">
+                        <div id="qa-sample-container" class="bg-gray-100 rounded-lg min-h-[400px] flex items-center justify-center">
+                            <p class="text-gray-500">点击"开始抽检"开始QA流程</p>
+                        </div>
+                        <div id="qa-sample-info" class="mt-4 text-sm text-gray-600 hidden">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div><strong>样本ID:</strong> <span id="qa-sample-id"></span></div>
+                                <div><strong>批次:</strong> <span id="qa-sample-batch"></span></div>
+                                <div><strong>类型:</strong> <span id="qa-sample-type"></span></div>
+                                <div><strong>难度:</strong> <span id="qa-sample-difficulty"></span></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- QA Evaluation Panel -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="px-6 py-4 border-b border-gray-200">
+                        <h2 class="text-lg font-semibold text-gray-900">QA评估</h2>
+                    </div>
+                    <div class="p-6">
+                        <div id="qa-evaluation-content" class="space-y-4">
+                            <div class="text-center text-gray-500 py-8">
+                                请先开始抽检流程
+                            </div>
+                        </div>
+                        
+                        <!-- QA Actions -->
+                        <div id="qa-actions" class="mt-6 space-y-4 hidden">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">质量评估</label>
+                                <div class="grid grid-cols-3 gap-3">
+                                    <button onclick="submitQA('excellent')" class="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition-colors">
+                                        优秀
+                                    </button>
+                                    <button onclick="submitQA('good')" class="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 transition-colors">
+                                        良好
+                                    </button>
+                                    <button onclick="submitQA('poor')" class="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 transition-colors">
+                                        较差
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">问题类型</label>
+                                <div class="space-y-2">
+                                    <label class="flex items-center">
+                                        <input type="checkbox" class="qa-issue-type" value="layout_error" class="mr-2">
+                                        <span>布局错误</span>
+                                    </label>
+                                    <label class="flex items-center">
+                                        <input type="checkbox" class="qa-issue-type" value="text_error" class="mr-2">
+                                        <span>文本错误</span>
+                                    </label>
+                                    <label class="flex items-center">
+                                        <input type="checkbox" class="qa-issue-type" value="formula_error" class="mr-2">
+                                        <span>公式错误</span>
+                                    </label>
+                                    <label class="flex items-center">
+                                        <input type="checkbox" class="qa-issue-type" value="table_error" class="mr-2">
+                                        <span>表格错误</span>
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-2">详细评价</label>
+                                <textarea id="qa-comment" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="请输入详细的QA评价..."></textarea>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- QA Results Table -->
+            <div class="bg-white rounded-lg shadow mt-6">
+                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                    <h2 class="text-lg font-semibold text-gray-900">QA结果记录</h2>
+                    <div class="flex space-x-3">
+                        <button onclick="filterResults('all')" class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors">
+                            全部
+                        </button>
+                        <button onclick="filterResults('passed')" class="px-3 py-1 text-sm bg-green-100 text-green-700 rounded hover:bg-green-200 transition-colors">
+                            通过
+                        </button>
+                        <button onclick="filterResults('failed')" class="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 transition-colors">
+                            失败
+                        </button>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">样本ID</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">批次</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类型</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">难度</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">QA结果</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">问题类型</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">评估时间</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200" id="qa-results-table">
+                            <tr>
+                                <td colspan="7" class="px-6 py-8 text-center text-gray-500">
+                                    暂无QA记录，请开始抽检流程
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let currentQASamples = [];
+        let currentQAIndex = 0;
+        let qaResults = [];
+
+        // 页面加载时初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadQASources();
+        });
+
+        async function loadQASources() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                const sourceSelect = document.getElementById('qa-source-select');
+                
+                data.sources.forEach(source => {
+                    const option = document.createElement('option');
+                    option.value = source.source_id;
+                    option.textContent = `${source.source_id} (${source.category})`;
+                    sourceSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('加载数据源失败:', error);
+            }
+        }
+
+        async function startSampling() {
+            const sourceId = document.getElementById('qa-source-select').value;
+            const samplingRate = document.getElementById('sampling-rate').value;
+            const samplingType = document.getElementById('sampling-type').value;
+            
+            try {
+                // 这里应该调用实际的API进行抽检
+                // 暂时使用模拟数据
+                currentQASamples = await getMockQASamples(sourceId, samplingRate, samplingType);
+                currentQAIndex = 0;
+                
+                if (currentQASamples.length > 0) {
+                    displayCurrentSample();
+                    updateQAProgress();
+                } else {
+                    alert('没有找到符合条件的样本');
+                }
+            } catch (error) {
+                console.error('开始抽检失败:', error);
+            }
+        }
+
+        function displayCurrentSample() {
+            if (currentQAIndex >= currentQASamples.length) {
+                alert('所有样本已完成QA评估');
+                return;
+            }
+            
+            const sample = currentQASamples[currentQAIndex];
+            
+            // 显示样本信息
+            document.getElementById('qa-sample-info').classList.remove('hidden');
+            document.getElementById('qa-sample-id').textContent = sample.id;
+            document.getElementById('qa-sample-batch').textContent = sample.batch_id;
+            document.getElementById('qa-sample-type').textContent = sample.task_type;
+            document.getElementById('qa-sample-difficulty').textContent = sample.difficulty;
+            
+            // 显示图像
+            document.getElementById('qa-sample-container').innerHTML = `
+                <img src="/api/samples/${sample.id}/image" alt="Sample ${sample.id}" class="max-w-full max-h-[400px] object-contain" onerror="this.onerror=null; this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZTVlN2ViIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzlhOWU5ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuWbvueJh+WKoOi9veWksei0pTwvdGV4dD48L3N2Zz4=';">
+            `;
+            
+            // 显示QA评估面板
+            document.getElementById('qa-actions').classList.remove('hidden');
+            document.getElementById('qa-evaluation-content').innerHTML = `
+                <div class="space-y-3">
+                    <div class="p-3 bg-blue-50 rounded">
+                        <strong>标注结果:</strong>
+                        <p class="mt-1 text-sm">${sample.annotation || '暂无标注结果'}</p>
+                    </div>
+                    <div class="p-3 bg-gray-50 rounded">
+                        <strong>模型预测:</strong>
+                        <p class="mt-1 text-sm">${sample.prediction || '暂无预测结果'}</p>
+                    </div>
+                </div>
+            `;
+            
+            // 重置表单
+            document.querySelectorAll('.qa-issue-type').forEach(checkbox => checkbox.checked = false);
+            document.getElementById('qa-comment').value = '';
+        }
+
+        function previousSample() {
+            if (currentQAIndex > 0) {
+                currentQAIndex--;
+                displayCurrentSample();
+            }
+        }
+
+        function nextSample() {
+            if (currentQAIndex < currentQASamples.length - 1) {
+                currentQAIndex++;
+                displayCurrentSample();
+            }
+        }
+
+        async function submitQA(rating) {
+            const sample = currentQASamples[currentQAIndex];
+            const issueTypes = Array.from(document.querySelectorAll('.qa-issue-type:checked')).map(cb => cb.value);
+            const comment = document.getElementById('qa-comment').value;
+            
+            const qaResult = {
+                sample_id: sample.id,
+                batch_id: sample.batch_id,
+                task_type: sample.task_type,
+                difficulty: sample.difficulty,
+                rating: rating,
+                issue_types: issueTypes,
+                comment: comment,
+                timestamp: new Date().toISOString()
+            };
+            
+            qaResults.push(qaResult);
+            
+            // 更新表格
+            renderQAResultsTable();
+            updateQAProgress();
+            
+            // 移动到下一个样本
+            currentQAIndex++;
+            if (currentQAIndex < currentQASamples.length) {
+                displayCurrentSample();
+            } else {
+                alert('所有样本已完成QA评估');
+                document.getElementById('qa-actions').classList.add('hidden');
+                document.getElementById('qa-evaluation-content').innerHTML = '<div class="text-center text-gray-500 py-8">QA评估完成</div>';
+            }
+        }
+
+        function renderQAResultsTable(filter = 'all') {
+            const tbody = document.getElementById('qa-results-table');
+            let filteredResults = qaResults;
+            
+            if (filter === 'passed') {
+                filteredResults = qaResults.filter(r => r.rating === 'excellent' || r.rating === 'good');
+            } else if (filter === 'failed') {
+                filteredResults = qaResults.filter(r => r.rating === 'poor');
+            }
+            
+            if (filteredResults.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="px-6 py-8 text-center text-gray-500">暂无数据</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = filteredResults.map(result => `
+                <tr>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${result.sample_id}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${result.batch_id}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${result.task_type}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${result.difficulty}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getQARatingClass(result.rating)}">${getQARatingText(result.rating)}</span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${result.issue_types.join(', ') || '-'}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${new Date(result.timestamp).toLocaleString()}</td>
+                </tr>
+            `).join('');
+        }
+
+        function filterResults(filter) {
+            renderQAResultsTable(filter);
+        }
+
+        function updateQAProgress() {
+            const total = currentQASamples.length;
+            const reviewed = qaResults.length;
+            const passed = qaResults.filter(r => r.rating === 'excellent' || r.rating === 'good').length;
+            const failed = qaResults.filter(r => r.rating === 'poor').length;
+            const pending = total - reviewed;
+            
+            document.getElementById('total-reviewed').textContent = reviewed;
+            document.getElementById('passed').textContent = passed;
+            document.getElementById('failed').textContent = failed;
+            document.getElementById('pending').textContent = pending;
+            
+            const progress = total > 0 ? Math.round((reviewed / total) * 100) : 0;
+            document.getElementById('progress-text').textContent = `${progress}%`;
+            document.getElementById('progress-bar').style.width = `${progress}%`;
+        }
+
+        function getQARatingClass(rating) {
+            switch (rating) {
+                case 'excellent': return 'bg-green-100 text-green-800';
+                case 'good': return 'bg-blue-100 text-blue-800';
+                case 'poor': return 'bg-red-100 text-red-800';
+                default: return 'bg-gray-100 text-gray-800';
+            }
+        }
+
+        function getQARatingText(rating) {
+            switch (rating) {
+                case 'excellent': return '优秀';
+                case 'good': return '良好';
+                case 'poor': return '较差';
+                default: return '未知';
+            }
+        }
+
+        function exportResults() {
+            if (qaResults.length === 0) {
+                alert('暂无QA结果可导出');
+                return;
+            }
+            
+            const dataStr = JSON.stringify(qaResults, null, 2);
+            const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+            
+            const exportFileDefaultName = `qa_results_${new Date().toISOString().split('T')[0]}.json`;
+            
+            const linkElement = document.createElement('a');
+            linkElement.setAttribute('href', dataUri);
+            linkElement.setAttribute('download', exportFileDefaultName);
+            linkElement.click();
+        }
+
+        // 模拟数据
+        async function getMockQASamples(sourceId, samplingRate, samplingType) {
+            return [
+                {
+                    id: 'qa_sample_001',
+                    batch_id: 'batch_001',
+                    task_type: 'formula',
+                    difficulty: 'medium',
+                    annotation: 'E=mc²',
+                    prediction: 'E=mc²'
+                },
+                {
+                    id: 'qa_sample_002',
+                    batch_id: 'batch_001',
+                    task_type: 'table',
+                    difficulty: 'easy',
+                    annotation: '2x2表格',
+                    prediction: '2x2表格'
+                }
+            ];
+        }
+    </script>
+</body>
+</html>

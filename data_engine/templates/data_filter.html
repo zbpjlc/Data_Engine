@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Engine - 数据筛选</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="bg-white shadow-sm border-b">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center py-4">
+                    <h1 class="text-2xl font-bold text-gray-900">Data Engine Console</h1>
+                    <nav class="flex space-x-4">
+                        <a href="/" class="text-gray-600 hover:text-blue-600">数据地图</a>
+                        <a href="/data-filter" class="text-blue-600 font-medium">数据筛选</a>
+                        <a href="/hard-case-review" class="text-gray-600 hover:text-blue-600">Hard Case复核</a>
+                        <a href="/qa-sampling" class="text-gray-600 hover:text-blue-600">QA抽检</a>
+                    </nav>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <!-- 高级筛选器 -->
+            <div class="bg-white rounded-lg shadow p-6 mb-8">
+                <h2 class="text-lg font-semibold text-gray-900 mb-6">数据筛选</h2>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- 数据源筛选 -->
+                    <div class="space-y-4">
+                        <h3 class="text-md font-medium text-gray-700">数据源</h3>
+                        <div class="space-y-2">
+                            {% for source in sources %}
+                            <label class="flex items-center">
+                                <input type="checkbox" value="{{ source.source_id }}" class="source-checkbox mr-2">
+                                <span class="text-sm text-gray-700">{{ source.source_id }}</span>
+                                <span class="text-xs text-gray-500 ml-2">({{ source.batch_count }} 批次)</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- 批次筛选 -->
+                    <div class="space-y-4">
+                        <h3 class="text-md font-medium text-gray-700">批次</h3>
+                        <div class="space-y-2 max-h-48 overflow-y-auto">
+                            {% for batch in batches %}
+                            <label class="flex items-center">
+                                <input type="checkbox" value="{{ batch.batch_id }}" class="batch-checkbox mr-2">
+                                <span class="text-sm text-gray-700">{{ batch.batch_id }}</span>
+                                <span class="text-xs text-gray-500 ml-2">({{ batch.sample_count }} 样本)</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- 处理状态筛选 -->
+                    <div class="space-y-4">
+                        <h3 class="text-md font-medium text-gray-700">数据状态</h3>
+                        <div class="space-y-2">
+                            <label class="flex items-center">
+                                <input type="checkbox" value="has_embedding" class="status-checkbox mr-2">
+                                <span class="text-sm text-gray-700">已有向量</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" value="has_cluster" class="status-checkbox mr-2">
+                                <span class="text-sm text-gray-700">已聚类</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" value="no_cluster" class="status-checkbox mr-2">
+                                <span class="text-sm text-gray-700">未聚类</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="flex justify-between items-center mt-6 pt-6 border-t border-gray-200">
+                    <div class="space-x-4">
+                        <button id="select-all" class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700">
+                            全选
+                        </button>
+                        <button id="clear-all" class="px-4 py-2 bg-gray-400 text-white rounded-md hover:bg-gray-500">
+                            清空
+                        </button>
+                    </div>
+                    <div class="space-x-4">
+                        <button id="apply-filter" class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                            应用筛选
+                        </button>
+                        <button id="export-data" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">
+                            导出数据
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 筛选结果 -->
+            <div class="bg-white rounded-lg shadow">
+                <div class="px-6 py-4 border-b border-gray-200">
+                    <h2 class="text-lg font-semibold text-gray-900">筛选结果</h2>
+                </div>
+                <div class="p-6">
+                    <div id="filter-summary" class="mb-4 text-sm text-gray-600">
+                        请选择筛选条件后点击"应用筛选"
+                    </div>
+                    
+                    <!-- 数据表格 -->
+                    <div id="results-table" class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">样本ID</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">数据源</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">批次</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类型</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">聚类ID</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">难度</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="results-body" class="bg-white divide-y divide-gray-200">
+                                <tr>
+                                    <td colspan="8" class="px-6 py-12 text-center text-gray-500">
+                                        暂无数据
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // 全选/清空功能
+        document.getElementById('select-all').addEventListener('click', function() {
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+        });
+
+        document.getElementById('clear-all').addEventListener('click', function() {
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+        });
+
+        // 应用筛选
+        document.getElementById('apply-filter').addEventListener('click', function() {
+            const selectedSources = Array.from(document.querySelectorAll('.source-checkbox:checked')).map(cb => cb.value);
+            const selectedBatches = Array.from(document.querySelectorAll('.batch-checkbox:checked')).map(cb => cb.value);
+            const selectedStatuses = Array.from(document.querySelectorAll('.status-checkbox:checked')).map(cb => cb.value);
+
+            if (selectedSources.length === 0 && selectedBatches.length === 0 && selectedStatuses.length === 0) {
+                alert('请至少选择一个筛选条件');
+                return;
+            }
+
+            // 构建筛选参数
+            const params = new URLSearchParams();
+            if (selectedSources.length > 0) params.set('sources', selectedSources.join(','));
+            if (selectedBatches.length > 0) params.set('batches', selectedBatches.join(','));
+            if (selectedStatuses.length > 0) params.set('statuses', selectedStatuses.join(','));
+            params.set('page', '1');
+            params.set('page_size', '10');
+
+            // 发送筛选请求
+            fetch(`/api/filter-data?${params.toString()}`)
+                .then(response => response.json())
+                .then(data => {
+                    displayResults(data);
+                })
+                .catch(error => {
+                    console.error('筛选失败:', error);
+                    alert('筛选失败，请检查控制台');
+                });
+        });
+
+        // 导出数据
+        document.getElementById('export-data').addEventListener('click', function() {
+            const table = document.getElementById('results-table');
+            const rows = table.querySelectorAll('tbody tr');
+            
+            if (rows.length === 0 || rows[0].querySelector('td[colspan]')) {
+                alert('没有数据可导出');
+                return;
+            }
+
+            let csv = 'Sample ID,Source ID,Batch ID,Type,Cluster ID,Difficulty\\n';
+            rows.forEach(row => {
+                const cells = row.querySelectorAll('td');
+                csv += Array.from(cells).map(cell => cell.textContent.trim()).join(',') + '\\n';
+            });
+
+            // 下载CSV文件
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = 'filtered_data.csv';
+            link.click();
+        });
+
+        // 显示结果
+        let currentPage = 1;
+        let currentFilters = {};
+        
+        function displayResults(data) {
+            currentPage = data.page;
+            currentFilters = data;
+            
+            const summary = document.getElementById('filter-summary');
+            const tbody = document.getElementById('results-body');
+            
+            // 更新摘要
+            summary.innerHTML = `找到 <strong>${data.total}</strong> 个样本，显示第 <strong>${data.page}</strong> 页，共 <strong>${data.total_pages}</strong> 页`;
+            
+            // 清空并填充表格
+            tbody.innerHTML = '';
+            data.samples.forEach(sample => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${sample.sample_id}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${sample.source_id}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${sample.batch_id}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${sample.input_type}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${sample.cluster_id || 'N/A'}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${sample.difficulty || 'N/A'}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <button onclick="viewSample('${sample.sample_id}')" class="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700">
+                            查看
+                        </button>
+                    </td>
+                `;
+                tbody.appendChild(row);
+            });
+            
+            // 添加分页控件
+            addPaginationControls(data);
+        }
+        
+        function addPaginationControls(data) {
+            const existingControls = document.getElementById('pagination-controls');
+            if (existingControls) {
+                existingControls.remove();
+            }
+            
+            if (data.total_pages <= 1) return;
+            
+            const paginationDiv = document.createElement('div');
+            paginationDiv.id = 'pagination-controls';
+            paginationDiv.className = 'flex justify-between items-center mt-4 pt-4 border-t border-gray-200';
+            
+            const prevButton = `<button onclick="changePage(${data.page - 1})" ${data.page <= 1 ? 'disabled' : ''} class="px-4 py-2 bg-gray-300 text-gray-700 rounded ${data.page <= 1 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-400'}">上一页</button>`;
+            const nextButton = `<button onclick="changePage(${data.page + 1})" ${data.page >= data.total_pages ? 'disabled' : ''} class="px-4 py-2 bg-gray-300 text-gray-700 rounded ${data.page >= data.total_pages ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-400'}">下一页</button>`;
+            
+            paginationDiv.innerHTML = `
+                <div class="text-sm text-gray-700">
+                    第 ${data.page} 页，共 ${data.total_pages} 页
+                </div>
+                <div class="flex space-x-2">
+                    ${prevButton}
+                    ${nextButton}
+                </div>
+            `;
+            
+            document.getElementById('results-table').appendChild(paginationDiv);
+        }
+        
+        function changePage(page) {
+            const params = new URLSearchParams();
+            if (currentFilters.sources) params.set('sources', currentFilters.sources);
+            if (currentFilters.batches) params.set('batches', currentFilters.batches);
+            if (currentFilters.statuses) params.set('statuses', currentFilters.statuses);
+            params.set('page', page);
+            params.set('page_size', '10');
+            
+            fetch(`/api/filter-data?${params.toString()}`)
+                .then(response => response.json())
+                .then(data => {
+                    displayResults(data);
+                })
+                .catch(error => {
+                    console.error('翻页失败:', error);
+                    alert('翻页失败，请检查控制台');
+                });
+        }
+
+        // 查看样本详情
+        function viewSample(sampleId) {
+            window.open(`/sample/${sampleId}`, '_blank');
+        }
+    </script>
+</body>
+</html>

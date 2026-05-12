@@ -1,0 +1,9 @@
+sources:
+  - id: "disk_01"
+    root_path: "/mnt/external_sata_1/finance_data"
+    category: "finance"
+    enabled: true
+  - id: "disk_02"
+    root_path: "/media/user/backup_disk/japanese_news"
+    category: "japanese_news"
+    enabled: true
