@@ -2,3 +2,13 @@ sources:
 - id: base_disk
   root_path: /home/ubuntu/Data1
   enabled: true
+- id: data_disk
+  root_path: /media/ubuntu/Data/金融数据
+  enabled: true
+
+# sources:
+# - id: base_disk
+#   root_path:
+#     - /home/ubuntu/Data1
+#     - /media/ubuntu/Data/金融数据
+#   enabled: true

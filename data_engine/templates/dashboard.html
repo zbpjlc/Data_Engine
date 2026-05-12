@@ -5,11 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Data Engine - 数据地图</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
-        <!-- Header -->
         <header class="bg-white shadow-sm border-b">
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div class="flex justify-between items-center py-4">
@@ -24,69 +22,56 @@
             </div>
         </header>
 
-        
-        <!-- Main Content -->
         <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <!-- Summary Cards -->
             <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center">
                         <div class="p-2 bg-blue-100 rounded-lg">
-                            <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
-                            </svg>
+                            <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
                         </div>
                         <div class="ml-4">
                             <p class="text-sm text-gray-600">数据源</p>
-                            <p class="text-2xl font-semibold text-gray-900" id="total-sources">{{ total_sources }}</p>
+                            <p class="text-2xl font-semibold text-gray-900">{{ sources | length }}</p>
                         </div>
                     </div>
                 </div>
-
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center">
                         <div class="p-2 bg-green-100 rounded-lg">
-                            <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                            </svg>
+                            <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                         </div>
                         <div class="ml-4">
                             <p class="text-sm text-gray-600">批次</p>
-                            <p class="text-2xl font-semibold text-gray-900" id="total-batches">{{ total_batches }}</p>
+                            <p class="text-2xl font-semibold text-gray-900">{{ batches | length }}</p>
                         </div>
                     </div>
                 </div>
-
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center">
                         <div class="p-2 bg-purple-100 rounded-lg">
-                            <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                            </svg>
+                            <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                         </div>
                         <div class="ml-4">
                             <p class="text-sm text-gray-600">样本总数</p>
-                            <p class="text-2xl font-semibold text-gray-900" id="total-samples">{{ total_samples }}</p>
+                            <p class="text-2xl font-semibold text-gray-900">{{ batches | sum(attribute='sample_count') }}</p>
                         </div>
                     </div>
                 </div>
-
                 <div class="bg-white rounded-lg shadow p-6">
                     <div class="flex items-center">
                         <div class="p-2 bg-red-100 rounded-lg">
-                            <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                            </svg>
+                            <svg class="w-6 h-6 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                         </div>
                         <div class="ml-4">
                             <p class="text-sm text-gray-600">困难样本</p>
-                            <p class="text-2xl font-semibold text-gray-900" id="hard-cases">0</p>
+                            <p class="text-2xl font-semibold text-gray-900">{{ batches | sum(attribute='failed_count') }}</p>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- Sources Table -->
+            <!-- 数据源状态 -->
             <div class="bg-white rounded-lg shadow mb-8">
                 <div class="px-6 py-4 border-b border-gray-200">
                     <h2 class="text-lg font-semibold text-gray-900">数据源状态</h2>
@@ -95,64 +80,76 @@
                     <table class="min-w-full divide-y divide-gray-200">
                         <thead class="bg-gray-50">
                             <tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">数据源ID</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类别</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">路径</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">批次</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Manifest</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">当前进度</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">数据源ID</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">类别</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">路径</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">状态</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">批次</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Manifest</th>
                             </tr>
                         </thead>
-                        <tbody class="bg-white divide-y divide-gray-200" id="sources-table">
+                        <tbody class="bg-white divide-y divide-gray-200">
                             {% for source in sources %}
-                            <tr data-progress-row data-source-id="{{ source.source_id }}">
+                            <tr>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ source.source_id }}</td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ source.category }}</td>
                                 <td class="px-6 py-4 text-sm text-gray-500 truncate max-w-xs">{{ source.root_path }}</td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    {% if source.online %}
-                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">在线</span>
-                                    {% else %}
-                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">离线</span>
-                                    {% endif %}
+                                    {% if source.online %}<span class="px-2 text-xs rounded-full bg-green-100 text-green-800">在线</span>
+                                    {% else %}<span class="px-2 text-xs rounded-full bg-red-100 text-red-800">离线</span>{% endif %}
                                 </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ source.batch_count }}</td><td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ source.manifest_count }}</td><td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" data-progress-cell>
-                                    {% if progress_info.get(source.source_id) %}
-                                        {% set progress = progress_info[source.source_id] %}
-                                        {% if progress.task_type != 'cluster' %}
-                                        <div class="text-xs">
-                                            <div class="font-medium text-gray-700">{{ progress.task_type.upper() }} - 
-                                                {% if progress.status == 'completed' %}<span class="text-green-600">完成</span>
-                                                {% elif progress.status == 'failed' %}<span class="text-red-600">失败</span>
-                                                {% else %}<span class="text-blue-600">进行中</span>{% endif %}
-                                            </div>
-                                            <div class="text-gray-600">{{ progress.current }}/{{ progress.total }} ({{ "%.1f"|format(progress.progress_percentage) }}%)</div>
-                                            <div class="w-full bg-gray-200 rounded-full h-1 mt-1">
-                                                <div class="{% if progress.status == 'completed' %}bg-green-600{% elif progress.status == 'failed' %}bg-red-600{% else %}bg-blue-600{% endif %} h-1 rounded-full" style="width: {{ progress.progress_percentage }}%"></div>
-                                            </div>
-                                            <div class="text-gray-500 truncate max-w-xs" title="{{ progress.message }}">{{ progress.message }}</div>
-                                            {% if progress.error_message %}
-                                            <div class="text-red-500 truncate max-w-xs" title="{{ progress.error_message }}">错误: {{ progress.error_message }}</div>
-                                            {% endif %}
-                                        </div>
-                                        {% endif %}
-                                    {% else %}
-                                        <div class="text-xs text-gray-400">无活跃任务</div>
-                                    {% endif %}
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ source.batch_count }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ source.manifest_count }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 批次管理（含进度和操作） -->
+            <div class="bg-white rounded-lg shadow mb-8">
+                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                    <h2 class="text-lg font-semibold text-gray-900">批次管理</h2>
+                    <div class="flex items-center space-x-3">
+                        <select id="source-select" class="px-3 py-1.5 border border-gray-300 rounded-md text-sm">
+                            <option value="">全部数据源</option>
+                            {% for source in sources %}
+                            <option value="{{ source.source_id }}">{{ source.source_id }}</option>
+                            {% endfor %}
+                        </select>
+                        <button onclick="location.reload()" class="px-3 py-1.5 bg-gray-600 text-white text-sm rounded-md hover:bg-gray-700">刷新</button>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">数据源</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">批次</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">类别</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">阶段</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">样本数</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">当前进度</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="batch-tbody" class="bg-white divide-y divide-gray-200">
+                            {% for batch in batches %}
+                            <tr data-source-id="{{ batch.source_id }}" data-batch-id="{{ batch.batch_id }}">
+                                <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-900">{{ batch.source_id }}</td>
+                                <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">{{ batch.batch_id }}</td>
+                                <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">{{ batch.category }}</td>
+                                <td class="px-4 py-3 whitespace-nowrap"><span class="px-2 text-xs rounded-full bg-blue-100 text-blue-800">{{ batch.stage_status }}</span></td>
+                                <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">{{ batch.sample_count }}</td>
+                                <td class="px-4 py-3 text-sm" data-progress-cell data-source="{{ batch.source_id }}" data-batch="{{ batch.batch_id }}">
+                                    <div class="text-xs text-gray-400">无任务</div>
                                 </td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="flex space-x-2">
-                                        <button onclick="startIngest('{{ source.source_id }}')" class="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700">
-                                            执行
-                                        </button>
-                                        <button onclick="clearIngest('{{ source.source_id }}')" class="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700">
-                                            清除
-                                        </button>
-                                        <button onclick="restartIngest('{{ source.source_id }}')" class="px-3 py-1 bg-purple-600 text-white text-xs rounded hover:bg-purple-700">
-                                            生成Embedding
-                                        </button>
+                                <td class="px-4 py-3 whitespace-nowrap">
+                                    <div class="flex space-x-1">
+                                        <button onclick="doAction('ingest','{{ batch.source_id }}','{{ batch.batch_id }}')" class="px-2 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700">执行</button>
+                                        <button onclick="doAction('clear','{{ batch.source_id }}','{{ batch.batch_id }}')" class="px-2 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700">清除</button>
+                                        <button onclick="doAction('embed','{{ batch.source_id }}','{{ batch.batch_id }}')" class="px-2 py-1 bg-purple-600 text-white text-xs rounded hover:bg-purple-700">Embedding</button>
                                     </div>
                                 </td>
                             </tr>
@@ -162,7 +159,7 @@
                 </div>
             </div>
 
-            <!-- Batches Table -->
+            <!-- 批次处理状态 -->
             <div class="bg-white rounded-lg shadow">
                 <div class="px-6 py-4 border-b border-gray-200">
                     <h2 class="text-lg font-semibold text-gray-900">批次处理状态</h2>
@@ -171,25 +168,23 @@
                     <table class="min-w-full divide-y divide-gray-200">
                         <thead class="bg-gray-50">
                             <tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">批次ID</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">数据源</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类别</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">当前阶段</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">样本数</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">难度分布</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">批次ID</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">数据源</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">类别</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">当前阶段</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">样本数</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">难度分布</th>
                             </tr>
                         </thead>
-                        <tbody class="bg-white divide-y divide-gray-200" id="batches-table">
+                        <tbody class="bg-white divide-y divide-gray-200">
                             {% for batch in batches %}
-                            <tr data-batch-row data-source-id="{{ batch.source_id }}" data-batch-id="{{ batch.batch_id }}">
+                            <tr data-source-id="{{ batch.source_id }}">
                                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ batch.batch_id }}</td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ batch.source_id }}</td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ batch.category }}</td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">{{ batch.stage_status }}</span>
-                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap"><span class="px-2 text-xs rounded-full bg-blue-100 text-blue-800">{{ batch.stage_status }}</span></td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ batch.sample_count }}</td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                <td class="px-6 py-4 whitespace-nowrap">
                                     <div class="flex space-x-2 text-xs">
                                         <span class="px-2 py-1 bg-green-100 text-green-800 rounded">E: {{ batch.difficulty_histogram.easy }}</span>
                                         <span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded">M: {{ batch.difficulty_histogram.medium }}</span>
@@ -207,215 +202,84 @@
     </div>
 
     <script>
-        // ========== 进度实时更新函数 ==========
-        let progressUpdateIntervalId = null;
-        
-        function updateProgressDisplay() {
-            console.log('[进度轮询] 正在获取最新进度...');
-            fetch('/api/progress')
-                .then(response => response.json())
-                .then(data => {
-                    const tasks = data.tasks || {};
-                    console.log(`[进度轮询] 获取 ${Object.keys(tasks).length} 个任务`);
-                    
-                    // 更新每行的进度显示
-                    const sourceRows = document.querySelectorAll('[data-progress-row]');
-                    sourceRows.forEach(row => {
-                        const sourceId = row.getAttribute('data-source-id');
-                        
-                        // 找这个source_id的所有任务
-                        const sourceTasks = Object.values(tasks).filter(t => t.source_id === sourceId);
-                        
-                        // 优先级：running > pending > completed/failed
-                        let displayTask = null;
-                        
-                        // 1. 优先找 running 或 pending 的任务
-                        displayTask = sourceTasks.find(t => ['running', 'pending'].includes(t.status));
-                        
-                        // 2. 如果没有进行中的任务，找最新的 completed 或 failed（按 start_time 排序）
-                        if (!displayTask && sourceTasks.length > 0) {
-                            displayTask = sourceTasks.reduce((latest, current) => {
-                                return (current.start_time || 0) > (latest.start_time || 0) ? current : latest;
-                            });
-                        }
-                        
-                        // 找到进度列的td
-                        const progressCell = row.querySelector('[data-progress-cell]');
-                        if (!progressCell) {
-                            console.warn(`[进度轮询] 未找到 ${sourceId} 的进度单元格`);
-                            return;
-                        }
-                        
-                        if (displayTask) {
-                            console.log(`[进度轮询] ${sourceId}: 显示任务=${displayTask.task_id} 状态=${displayTask.status} 进度=${displayTask.progress_percentage.toFixed(1)}%`);
-                            
-                            // 构建进度HTML
-                            let statusColor = {
-                                'completed': 'text-green-600',
-                                'failed': 'text-red-600',
-                                'running': 'text-blue-600',
-                                'pending': 'text-yellow-600'
-                            }[displayTask.status] || 'text-blue-600';
-                            
-                            let progressBarColor = {
-                                'completed': 'bg-green-600',
-                                'failed': 'bg-red-600',
-                                'running': 'bg-blue-600',
-                                'pending': 'bg-yellow-600'
-                            }[displayTask.status] || 'bg-blue-600';
-                            
-                            const statusText = {
-                                'completed': '完成',
-                                'failed': '失败',
-                                'running': '进行中',
-                                'pending': '待处理'
-                            }[displayTask.status] || displayTask.status;
-                            
-                            progressCell.innerHTML = `
-                                <div class="text-xs">
-                                    <div class="font-medium text-gray-700">${displayTask.task_type.toUpperCase()} - <span class="${statusColor}">${statusText}</span></div>
-                                    <div class="text-gray-600">${displayTask.current}/${displayTask.total} (${displayTask.progress_percentage.toFixed(1)}%)</div>
-                                    <div class="w-full bg-gray-200 rounded-full h-1 mt-1">
-                                        <div class="${progressBarColor} h-1 rounded-full" style="width: ${displayTask.progress_percentage}%"></div>
-                                    </div>
-                                    <div class="text-gray-500 truncate max-w-xs text-xs" title="${displayTask.message}">${displayTask.message}</div>
-                                    ${displayTask.error_message ? `<div class="text-red-500 truncate max-w-xs text-xs">错误: ${displayTask.error_message}</div>` : ''}
-                                </div>
-                            `;
-                        } else {
-                            if (sourceTasks.length > 0) {
-                                console.log(`[进度轮询] ${sourceId}: 找到 ${sourceTasks.length} 个任务，但都不符合显示条件`);
-                            }
-                            progressCell.innerHTML = '<div class="text-xs text-gray-400">无活跃任务</div>';
-                        }
-                    });
-                    
-                })
-                .catch(error => {
-                    console.error('[进度轮询] 获取进度失败:', error);
-                });
-        }
-        
-        // 启动进度轮询（每2秒更新一次）
-        function startProgressPolling() {
-            console.log('[进度轮询] 启动定时更新 (间隔: 2秒)');
-            if (progressUpdateIntervalId) {
-                clearInterval(progressUpdateIntervalId);
-            }
-            progressUpdateIntervalId = setInterval(updateProgressDisplay, 2000);
-            // 立即执行一次
-            updateProgressDisplay();
-        }
-        
-        // 停止进度轮询
-        function stopProgressPolling() {
-            console.log('[进度轮询] 停止定时更新');
-            if (progressUpdateIntervalId) {
-                clearInterval(progressUpdateIntervalId);
-                progressUpdateIntervalId = null;
-            }
-        }
-        
-        // ========== 页面初始化 ==========
-        document.addEventListener('DOMContentLoaded', function() {
-            // 启动进度轮询
-            startProgressPolling();
-            
-            // 筛选功能
-            const applyFiltersBtn = document.getElementById('apply-filters');
-            if (applyFiltersBtn) {
-                applyFiltersBtn.addEventListener('click', function() {
-                    const sourceFilter = document.getElementById('source-filter').value;
-                    const batchFilter = document.getElementById('batch-filter').value;
-                    const taskFilter = document.getElementById('task-filter').value;
-                    
-                    // 筛选进度信息
-                    const progressRows = document.querySelectorAll('[data-progress-row]');
-                    progressRows.forEach(row => {
-                        const sourceId = row.getAttribute('data-source-id');
-                        const batchId = row.getAttribute('data-batch-id');
-                        const taskType = row.getAttribute('data-task-type');
-                        
-                        let show = true;
-                        if (sourceFilter && sourceId !== sourceFilter) show = false;
-                        if (batchFilter && batchId !== batchFilter) show = false;
-                        if (taskFilter && taskType !== taskFilter) show = false;
-                        
-                        row.style.display = show ? '' : 'none';
-                    });
-                    
-                    // 筛选批次表格
-                    const batchRows = document.querySelectorAll('[data-batch-row]');
-                    batchRows.forEach(row => {
-                        const sourceId = row.getAttribute('data-source-id');
-                        const batchId = row.getAttribute('data-batch-id');
-                        
-                        let show = true;
-                        if (sourceFilter && sourceId !== sourceFilter) show = false;
-                        if (batchFilter && batchId !== batchFilter) show = false;
-                        
-                        row.style.display = show ? '' : 'none';
-                    });
-                });
-            }
-            
-            // 重置筛选器
-            function resetFilters() {
-                const sourceFilter = document.getElementById('source-filter');
-                const batchFilter = document.getElementById('batch-filter');
-                const taskFilter = document.getElementById('task-filter');
-                
-                if (sourceFilter) sourceFilter.value = '';
-                if (batchFilter) batchFilter.value = '';
-                if (taskFilter) taskFilter.value = '';
-                
-                if (applyFiltersBtn) applyFiltersBtn.click();
-            }
-            
-            // INGEST控制函数
-            window.startIngest = function(sourceId) {
-                console.log(`[指令] 启动INGEST: ${sourceId}`);
-                fetch(`/api/ingest/${sourceId}`, { method: 'POST' })
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log('[指令] API响应:', data);
-                        startProgressPolling();
-                    })
-                    .catch(error => {
-                        console.error('[指令] 启动INGEST失败:', error);
-                        alert('启动INGEST失败: ' + error.message);
-                    });
-            }
-            
-            window.clearIngest = function(sourceId) {
-                if (!confirm(`确定要清除 ${sourceId} 的数据吗？`)) return;
-                console.log(`[指令] 清除INGEST: ${sourceId}`);
-                fetch(`/api/ingest/${sourceId}`, { method: 'DELETE' })
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log('[指令] API响应:', data);
-                        updateProgressDisplay();
-                    })
-                    .catch(error => {
-                        console.error('[指令] 清除INGEST失败:', error);
-                        alert('清除失败: ' + error.message);
-                    });
-            }
-            
-            window.restartIngest = function(sourceId) {
-                console.log(`[指令] 启动Embedding: ${sourceId}`);
-                fetch(`/api/embed/${sourceId}`, { method: 'POST' })
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log('[指令] API响应:', data);
-                        startProgressPolling();
-                    })
-                    .catch(error => {
-                        console.error('[指令] 启动Embedding失败:', error);
-                        alert('启动Embedding失败: ' + error.message);
-                    });
-            }
+        // 数据源筛选
+        document.getElementById('source-select').addEventListener('change', function() {
+            const sid = this.value;
+            document.querySelectorAll('#batch-tbody tr').forEach(row => {
+                row.style.display = (!sid || row.dataset.sourceId === sid) ? '' : 'none';
+            });
+            document.querySelectorAll('.divide-y:last-child tr[data-source-id]').forEach(row => {
+                row.style.display = (!sid || row.dataset.sourceId === sid) ? '' : 'none';
+            });
         });
+
+        // 操作
+        function doAction(action, sourceId, batchId) {
+            if (action === 'clear' && !confirm(`确定清除 ${sourceId}/${batchId}？`)) return;
+            const urls = {
+                ingest: `/api/ingest/${sourceId}?batch_id=${batchId}`,
+                clear: `/api/ingest/${sourceId}?batch_id=${batchId}`,
+                embed: `/api/embed/${sourceId}?batch_id=${batchId}`,
+            };
+            const methods = { ingest: 'POST', clear: 'DELETE', embed: 'POST' };
+            fetch(urls[action], { method: methods[action] })
+                .then(r => r.json())
+                .then(d => { if (action !== 'clear') startPolling(); else pollOnce(); })
+                .catch(e => alert('失败: ' + e.message));
+        }
+
+        // 进度轮询
+        let pollTimer = null;
+        let prevTaskStates = {};
+
+        function startPolling() {
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(pollOnce, 1500);
+            pollOnce();
+        }
+
+        function pollOnce() {
+            fetch('/api/progress').then(r => r.json()).then(data => {
+                const tasks = Object.values(data.tasks || {});
+                document.querySelectorAll('[data-progress-cell]').forEach(cell => {
+                    const sid = cell.dataset.source;
+                    const bid = cell.dataset.batch;
+                    const batchTasks = tasks.filter(t => t.source_id === sid && t.batch_id === bid);
+                    if (!batchTasks.length) { cell.innerHTML = '<div class="text-xs text-gray-400">无任务</div>'; return; }
+
+                    let task = batchTasks.find(t => ['running','pending'].includes(t.status));
+                    if (!task) task = batchTasks.reduce((a, b) => (b.start_time||0) > (a.start_time||0) ? b : a);
+
+                    const key = sid + '/' + bid;
+                    const prevState = prevTaskStates[key];
+                    if (prevState === 'running' && (task.status === 'completed' || task.status === 'failed')) {
+                        location.reload();
+                        return;
+                    }
+                    prevTaskStates[key] = task.status;
+
+                    const colors = { completed: 'green', failed: 'red', running: 'blue', pending: 'yellow' };
+                    const c = colors[task.status] || 'blue';
+                    const labels = { completed: '完成', failed: '失败', running: '进行中', pending: '待处理' };
+                    const pct = task.total > 0 ? (task.current / task.total * 100).toFixed(1) : 0;
+
+                    cell.innerHTML = `<div class="text-xs">
+                        <div class="flex items-center space-x-2 mb-1">
+                            <span class="px-1.5 py-0.5 rounded bg-${c}-100 text-${c}-800 font-medium">${task.task_type.toUpperCase()}</span>
+                            <span class="text-${c}-600">${labels[task.status]}</span>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-${c}-600 h-1.5 rounded-full" style="width:${pct}%"></div></div>
+                            <span class="text-gray-600">${task.current}/${task.total}</span>
+                        </div>
+                        ${task.message ? `<div class="text-gray-500 truncate mt-1" title="${task.message}">${task.message}</div>` : ''}
+                        ${task.error_message ? `<div class="text-red-500 truncate" title="${task.error_message}">${task.error_message}</div>` : ''}
+                    </div>`;
+                });
+            }).catch(() => {});
+        }
+
+        document.addEventListener('DOMContentLoaded', startPolling);
     </script>
 </body>
 </html>

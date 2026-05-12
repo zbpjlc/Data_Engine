@@ -32,7 +32,7 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
     from data_engine.models import BatchMetadata
     
     source = registry.get(source_id)
-    batch_dir = Path(source.root_path) / batch_id
+    batch_dir = source.resolve_batch_dir(batch_id)
     
     # 去中心化元数据管理：从批次目录读取元数据
     try:

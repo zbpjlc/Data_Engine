@@ -24,9 +24,11 @@ class SourceRegistry:
         dump_yaml(self.model.model_dump(mode="json"), self.path)
 
     def list_sources(self) -> list[SourceConfig]:
+        self.model = self._load()
         return list(self.model.sources)
 
     def get(self, source_id: str) -> SourceConfig:
+        self.model = self._load()
         for source in self.model.sources:
             if source.id == source_id:
                 return source
@@ -52,37 +54,44 @@ class SourceRegistry:
         return source
 
     def scan(self) -> list[SourceScanSummary]:
+        self.model = self._load()
         summaries: list[SourceScanSummary] = []
         for source in self.model.sources:
-            root = Path(source.root_path)
-            online = root.exists()
+            online = False
             batch_count = 0
             manifest_count = 0
             categories = set()
-            
-            if online:
-                for batch_dir in sorted(p for p in root.iterdir() if p.is_dir() and (p.name.startswith("batch_") or (p / ".engine_meta.yaml").exists())):
+            roots = source.root_paths()
+            root_display = roots[0] if len(roots) == 1 else str(roots)
+
+            for root_path in roots:
+                root = Path(root_path)
+                if not root.exists():
+                    continue
+                online = True
+                has_meta = (root / ".engine_meta.yaml").exists()
+                subdirs = list(root.iterdir()) if root.is_dir() else []
+                batch_dirs = [root] if has_meta else sorted(
+                    p for p in subdirs
+                    if p.is_dir() and (p.name.startswith("batch_") or (p / ".engine_meta.yaml").exists())
+                )
+                for batch_dir in batch_dirs:
                     batch_count += 1
                     manifests_dir = batch_dir / "manifests"
                     if manifests_dir.exists():
                         manifest_count += len([p for p in manifests_dir.iterdir() if p.is_file()])
-                    
-                    # 去中心化元数据：从.engine_meta.yaml读取category
                     try:
                         batch_meta = BatchMetadata.from_batch_dir(batch_dir)
                         categories.add(batch_meta.category)
                     except FileNotFoundError:
-                        # 如果没有.engine_meta.yaml，使用默认category
                         pass
-            
-            # 使用找到的categories，如果没有则使用默认值
+
             category = categories.pop() if categories else "unknown"
-            
             summaries.append(
                 SourceScanSummary(
                     source_id=source.id,
                     category=category,
-                    root_path=source.root_path,
+                    root_path=root_display,
                     enabled=source.enabled,
                     online=online,
                     batch_count=batch_count,

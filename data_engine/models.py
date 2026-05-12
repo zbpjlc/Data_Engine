@@ -32,8 +32,22 @@ class StageStatus(str, Enum):
 class SourceConfig(BaseModel):
     """全局导航图配置 - 只负责物理路径"""
     id: str
-    root_path: str
+    root_path: str | list[str]
     enabled: bool = True
+
+    def root_paths(self) -> list[str]:
+        if isinstance(self.root_path, list):
+            return self.root_path
+        return [self.root_path]
+
+    def resolve_batch_dir(self, batch_id: str) -> Path:
+        for rp in self.root_paths():
+            candidate = Path(rp) / batch_id
+            if candidate.is_dir():
+                return candidate
+            if Path(rp).name == batch_id and Path(rp).is_dir():
+                return Path(rp)
+        raise FileNotFoundError(f"Batch '{batch_id}' not found under any root_path of source '{self.id}'")
 
 
 class BatchMetadata(BaseModel):

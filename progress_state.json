@@ -153,8 +153,21 @@
       "total": 9,
       "message": "成功处理 55 个样本",
       "error_message": "",
-      "start_time": 1778573289.4736207,
-      "end_time": 1778573303.339751
+      "start_time": 1778584009.7430954,
+      "end_time": 1778584023.5975888
+    },
+    "ingest_base_disk_金融数据": {
+      "task_id": "ingest_base_disk_金融数据",
+      "task_type": "ingest",
+      "source_id": "base_disk",
+      "batch_id": "金融数据",
+      "status": "running",
+      "current": 149,
+      "total": 11588,
+      "message": "正在处理: 2020-03-20__永兴特种材料科技股份有限公司__002756__永兴材料__2019年__年度报告.pdf",
+      "error_message": "",
+      "start_time": 1778584014.3308902,
+      "end_time": null
     },
     "embed_base_disk_abc": {
       "task_id": "embed_base_disk_abc",
@@ -166,8 +179,34 @@
       "total": 55,
       "message": "成功提取 55 个样本的embedding",
       "error_message": "",
-      "start_time": 1778573309.081228,
-      "end_time": 1778573315.689764
+      "start_time": 1778584045.1750412,
+      "end_time": 1778584053.6261253
+    },
+    "ingest_data_disk_金融数据": {
+      "task_id": "ingest_data_disk_金融数据",
+      "task_type": "ingest",
+      "source_id": "data_disk",
+      "batch_id": "金融数据",
+      "status": "running",
+      "current": 144,
+      "total": 11588,
+      "message": "正在处理: 2020-03-20__太龙电子股份有限公司__300650__太龙股份__2019年__年度报告.pdf",
+      "error_message": "",
+      "start_time": 1778584776.6739674,
+      "end_time": null
+    },
+    "cluster_base_disk_abc": {
+      "task_id": "cluster_base_disk_abc",
+      "task_type": "cluster",
+      "source_id": "base_disk",
+      "batch_id": "abc",
+      "status": "completed",
+      "current": 55,
+      "total": 55,
+      "message": "聚类完成: 4 簇, 轮廓系数 0.273",
+      "error_message": "",
+      "start_time": 1778586003.5505664,
+      "end_time": 1778586003.7073543
     }
   }
 }

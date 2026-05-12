@@ -26,9 +26,16 @@ def collect_global_status(registry: SourceRegistry) -> GlobalStatus:
     for source_summary in source_summaries:
         if not source_summary.online:
             continue
-        root = Path(source_summary.root_path)
-        for batch_dir in sorted(p for p in root.iterdir() if p.is_dir() and (p.name.startswith("batch_") or (p / ".engine_meta.yaml").exists())):
-            batch_summaries.append(_summarize_batch(source_summary.source_id, source_summary.category, batch_dir))
+        source_config = registry.get(source_summary.source_id)
+        for root_path in source_config.root_paths():
+            root = Path(root_path)
+            if not root.exists():
+                continue
+            if (root / ".engine_meta.yaml").exists():
+                batch_summaries.append(_summarize_batch(source_summary.source_id, source_summary.category, root))
+            else:
+                for batch_dir in sorted(p for p in root.iterdir() if p.is_dir() and (p.name.startswith("batch_") or (p / ".engine_meta.yaml").exists())):
+                    batch_summaries.append(_summarize_batch(source_summary.source_id, source_summary.category, batch_dir))
     return GlobalStatus(sources=source_summaries, batches=batch_summaries)
 
 
@@ -63,6 +70,17 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
 
 
 def _detect_stage_status(manifests_dir: Path) -> str:
+    ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
+    if ingest_manifest and ingest_manifest.suffix == ".jsonl":
+        records = read_jsonl(ingest_manifest)
+        if records:
+            has_cluster = any(r.get("cluster_id") for r in records)
+            if has_cluster:
+                return "clustered"
+            has_embedding = any(r.get("embedding") is not None for r in records)
+            if has_embedding:
+                return "embedded"
+        return "ingested"
     for stage in STAGES_IN_ORDER:
         if find_stage_manifest(manifests_dir, stage):
             return _stage_name_to_status(stage)
@@ -81,7 +99,7 @@ def _stage_name_to_status(stage: str) -> str:
 
 
 def _completed_count(stage_status: str, sample_count: int) -> int:
-    return sample_count if stage_status in {"released", "annotated", "bucketed", "scored", "ingested"} else 0
+    return sample_count if stage_status in {"released", "annotated", "bucketed", "scored", "ingested", "embedded", "clustered"} else 0
 
 
 def _parse_time(value: Any) -> datetime | None:

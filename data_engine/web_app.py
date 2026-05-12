@@ -34,38 +34,12 @@ async def dashboard(request: Request):
     try:
         global_status = collect_global_status(registry)
         
-        # 获取每个数据源的进度信息
-        all_tasks = progress_tracker.get_all_tasks()
-        progress_info = {}
-        for source in global_status.sources:
-            # 获取该数据源的所有任务（包括completed和failed）
-            source_tasks = [task for task in all_tasks.values() if task.source_id == source.source_id]
-            if source_tasks:
-                # 按开始时间排序，获取最新的任务（包括已完成的和失败的）
-                latest_task = sorted(source_tasks, key=lambda x: x.start_time or 0, reverse=True)[0]
-                progress_info[source.source_id] = {
-                    "task_id": latest_task.task_id,
-                    "task_type": latest_task.task_type,
-                    "status": latest_task.status.value,
-                    "current": latest_task.current,
-                    "total": latest_task.total,
-                    "progress_percentage": latest_task.progress_percentage,
-                    "message": latest_task.message,
-                    "error_message": latest_task.error_message
-                }
-            else:
-                progress_info[source.source_id] = None
-        
         return templates.TemplateResponse(
             "dashboard.html",
             {
                 "request": request,
                 "sources": global_status.sources,
                 "batches": global_status.batches,
-                "total_sources": len(global_status.sources),
-                "total_batches": len(global_status.batches),
-                "total_samples": sum(b.sample_count for b in global_status.batches),
-                "progress_info": progress_info
             }
         )
     except Exception as e:
@@ -119,12 +93,17 @@ async def data_filter(request: Request):
     """数据筛选页面"""
     try:
         global_status = collect_global_status(registry)
+        batches_json = [
+            {"source_id": b.source_id, "batch_id": b.batch_id, "sample_count": b.sample_count}
+            for b in global_status.batches
+        ]
         return templates.TemplateResponse(
             "data_filter.html",
             {
                 "request": request,
                 "sources": global_status.sources,
                 "batches": global_status.batches,
+                "batches_json": batches_json,
             }
         )
     except Exception as e:
@@ -159,10 +138,11 @@ async def filter_data(
             
             # 读取批次manifest
             batch_dir = None
-            for source in global_status.sources:
-                if source.source_id == batch.source_id:
-                    batch_dir = Path(source.root_path) / batch.batch_id
-                    break
+            try:
+                source_config = registry.get(batch.source_id)
+                batch_dir = source_config.resolve_batch_dir(batch.batch_id)
+            except (KeyError, FileNotFoundError):
+                pass
             
             if not batch_dir:
                 continue
@@ -225,7 +205,7 @@ async def get_hard_cases(batch_id: str):
 
 
 @app.post("/api/ingest/{source_id}")
-async def start_ingest(source_id: str):
+async def start_ingest(source_id: str, batch_id: str = None):
     """启动INGEST任务"""
     try:
         import threading
@@ -244,6 +224,8 @@ async def start_ingest(source_id: str):
                 print(f"[INGEST后台线程] 系统中total batches: {len(global_status.batches)}")
                 
                 source_batches = [b for b in global_status.batches if b.source_id == source_id]
+                if batch_id:
+                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
                 print(f"[INGEST后台线程] 找到 {len(source_batches)} 个source_id='{source_id}'的批次")
                 
                 if not source_batches:
@@ -290,7 +272,7 @@ async def start_ingest(source_id: str):
 
 
 @app.delete("/api/ingest/{source_id}")
-async def clear_ingest(source_id: str):
+async def clear_ingest(source_id: str, batch_id: str = None):
     """清除INGEST数据"""
     try:
         print(f"\n========== 开始清除INGEST数据 ==========")
@@ -308,31 +290,38 @@ async def clear_ingest(source_id: str):
         print(f"[调试] 系统中存在的所有source_id: {all_source_ids}")
         
         source_batches = [b for b in global_status.batches if b.source_id == source_id]
+        if batch_id:
+            source_batches = [b for b in source_batches if b.batch_id == batch_id]
         
         print(f"找到 {len(source_batches)} 个批次 (source_id='{source_id}')")
         
         cleared_count = 0
         for batch in source_batches:
             print(f"处理批次: {batch.batch_id}")
-            for source in global_status.sources:
-                if source.source_id == source_id:
-                    batch_dir = Path(source.root_path) / batch.batch_id
-                    
-                    for fname in ["ingest.jsonl", "input_files.json"]:
-                        fpath = batch_dir / "manifests" / fname
-                        if fpath.exists():
-                            fpath.unlink()
-                            cleared_count += 1
-                            print(f"已删除: {fpath}")
-                    
-                    page_images_dir = batch_dir / "page_images"
-                    if page_images_dir.exists():
-                        import shutil
-                        shutil.rmtree(page_images_dir)
-                        page_images_dir.mkdir(parents=True, exist_ok=True)
-                        print(f"已清空: {page_images_dir}")
-                    
-                    break
+            try:
+                source_config = registry.get(source_id)
+                batch_dir = source_config.resolve_batch_dir(batch.batch_id)
+                
+                for fname in ["ingest.jsonl", "input_files.json"]:
+                    fpath = batch_dir / "manifests" / fname
+                    if fpath.exists():
+                        fpath.unlink()
+                        cleared_count += 1
+                        print(f"已删除: {fpath}")
+                
+                stats_path = batch_dir / "artifacts" / "stats.json"
+                if stats_path.exists():
+                    stats_path.unlink()
+                    print(f"已删除: {stats_path}")
+                
+                page_images_dir = batch_dir / "page_images"
+                if page_images_dir.exists():
+                    import shutil
+                    shutil.rmtree(page_images_dir)
+                    page_images_dir.mkdir(parents=True, exist_ok=True)
+                    print(f"已清空: {page_images_dir}")
+            except Exception as e:
+                print(f"清除批次 {batch.batch_id} 失败: {e}")
         
         # 无论是否找到批次，都要清除进度跟踪器中的相关任务
         removed_tasks_info = []
@@ -347,19 +336,20 @@ async def clear_ingest(source_id: str):
             related_tasks = []
             for task_id, task in tasks.items():
                 if task.source_id == source_id:
+                    if batch_id and task.batch_id != batch_id:
+                        continue
                     related_tasks.append((task_id, task))
                     print(f"[清除进度] 找到相关任务: {task_id} | 类型: {task.task_type} | 状态: {task.status.value} | 批次: {task.batch_id}")
             
-            print(f"[清除进度] 找到 {len(related_tasks)} 个source_id为'{source_id}'的相关任务")
+            print(f"[清除进度] 找到 {len(related_tasks)} 个相关任务")
             
             # 第3步：移除匹配条件的任务
             removed_tasks = 0
             for task_id, task in related_tasks:
-                # 检查task_type是否为'ingest'或'embed'
                 task_type_value = task.task_type.value if hasattr(task.task_type, 'value') else str(task.task_type)
-                print(f"[清除进度] 检查任务: {task_id} | task_type: {task_type_value} | 是否移除: {task_type_value in ['ingest', 'embed']}")
+                print(f"[清除进度] 检查任务: {task_id} | task_type: {task_type_value}")
                 
-                if task_type_value in ['ingest', 'embed']:
+                if task_type_value in ['ingest', 'embed', 'cluster']:
                     progress_tracker.remove_task(task_id)
                     removed_tasks += 1
                     task_info = {
@@ -375,8 +365,8 @@ async def clear_ingest(source_id: str):
             
             # 第4步：验证是否真的被移除
             updated_tasks = progress_tracker.get_all_tasks()
-            remaining_related = [t for tid, t in updated_tasks.items() if t.source_id == source_id]
-            print(f"[清除进度] 验证：清除后仍有 {len(remaining_related)} 个该source_id的任务")
+            remaining_related = {tid: t for tid, t in updated_tasks.items() if t.source_id == source_id and (not batch_id or t.batch_id == batch_id)}
+            print(f"[清除进度] 验证：清除后仍有 {len(remaining_related)} 个相关任务")
             
             if remaining_related:
                 for task_id, task in remaining_related.items():
@@ -418,7 +408,7 @@ async def restart_ingest(source_id: str):
 
 
 @app.post("/api/embed/{source_id}")
-async def start_embed(source_id: str):
+async def start_embed(source_id: str, batch_id: str = None):
     """启动embedding生成任务"""
     try:
         import threading
@@ -438,6 +428,8 @@ async def start_embed(source_id: str):
                 print(f"[Embedding后台线程] 系统中total batches: {len(global_status.batches)}")
                 
                 source_batches = [b for b in global_status.batches if b.source_id == source_id]
+                if batch_id:
+                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
                 print(f"[Embedding后台线程] 找到 {len(source_batches)} 个source_id='{source_id}'的批次")
                 
                 if not source_batches:
@@ -451,7 +443,7 @@ async def start_embed(source_id: str):
                     try:
                         # 获取source信息
                         source = registry.get(source_id)
-                        batch_dir = Path(source.root_path) / batch.batch_id
+                        batch_dir = source.resolve_batch_dir(batch.batch_id)
                         manifests_dir = batch_dir / "manifests"
                         manifest_path = manifests_dir / "ingest.jsonl"
                         
@@ -518,6 +510,76 @@ async def start_embed(source_id: str):
         print(f"启动Embedding API错误: {e}")
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/cluster/{source_id}")
+async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 5, auto_optimize: bool = True):
+    """启动聚类任务"""
+    try:
+        import threading
+
+        def execute_cluster_task():
+            try:
+                from data_engine.clustering import cluster_records
+                from data_engine.manifests import read_jsonl, write_jsonl
+
+                global_status = collect_global_status(registry)
+                source_batches = [b for b in global_status.batches if b.source_id == source_id]
+                if batch_id:
+                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
+
+                for batch in source_batches:
+                    try:
+                        source = registry.get(source_id)
+                        batch_dir = source.resolve_batch_dir(batch.batch_id)
+                        manifest_path = batch_dir / "manifests" / "ingest.jsonl"
+
+                        if not manifest_path.exists():
+                            continue
+
+                        records = read_jsonl(manifest_path)
+                        task_id = f"cluster_{source_id}_{batch.batch_id}"
+
+                        progress_tracker.start_task(
+                            task_id=task_id,
+                            task_type="cluster",
+                            source_id=source_id,
+                            batch_id=batch.batch_id,
+                            total=len(records),
+                            message=f"开始对 {len(records)} 个样本聚类"
+                        )
+
+                        updated_records, stats = cluster_records(
+                            records, n_clusters=n_clusters, auto_optimize=auto_optimize)
+
+                        write_jsonl(manifest_path, updated_records)
+
+                        progress_tracker.complete_task(
+                            task_id=task_id,
+                            message=f"聚类完成: {stats.get('n_clusters', '?')} 簇, 轮廓系数 {stats.get('silhouette_score', 0):.3f}"
+                        )
+
+                    except Exception as e:
+                        print(f"[聚类后台线程] ✗ 批次 {batch.batch_id} 聚类失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        progress_tracker.fail_task(
+                            task_id=f"cluster_{source_id}_{batch.batch_id}",
+                            error_message=str(e)
+                        )
+
+            except Exception as e:
+                print(f"[聚类后台线程] ✗ 聚类任务执行失败: {e}")
+                import traceback
+                traceback.print_exc()
+
+        thread = threading.Thread(target=execute_cluster_task)
+        thread.daemon = True
+        thread.start()
+
+        return {"message": f"已启动 {source_id} 的聚类任务", "status": "started"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
