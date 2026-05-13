@@ -34,12 +34,18 @@ async def dashboard(request: Request):
     try:
         global_status = collect_global_status(registry)
         
+        batches_json = [
+            {"source_id": b.source_id, "batch_id": b.batch_id, "sample_count": b.sample_count,
+             "category": b.category, "stage_status": b.stage_status}
+            for b in global_status.batches
+        ]
         return templates.TemplateResponse(
             "dashboard.html",
             {
                 "request": request,
                 "sources": global_status.sources,
                 "batches": global_status.batches,
+                "batches_json": batches_json,
             }
         )
     except Exception as e:
@@ -209,6 +215,13 @@ async def start_ingest(source_id: str, batch_id: str = None):
     """启动INGEST任务"""
     try:
         import threading
+        
+        # 检查是否已有运行中的任务
+        if batch_id:
+            task_id = f"ingest_{source_id}_{batch_id}"
+            existing = progress_tracker.get_task(task_id)
+            if existing and existing.status.value in ["running", "pending"]:
+                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
         
         print(f"\n========== 启动INGEST任务请求 ==========")
         print(f"source_id: '{source_id}' (类型: {type(source_id).__name__})")
@@ -413,6 +426,13 @@ async def start_embed(source_id: str, batch_id: str = None):
     try:
         import threading
         
+        # 检查是否已有运行中的任务
+        if batch_id:
+            task_id = f"embed_{source_id}_{batch_id}"
+            existing = progress_tracker.get_task(task_id)
+            if existing and existing.status.value in ["running", "pending"]:
+                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+        
         print(f"\n========== 启动Embedding任务请求 ==========")
         print(f"source_id: '{source_id}' (类型: {type(source_id).__name__})")
         
@@ -469,14 +489,16 @@ async def start_embed(source_id: str, batch_id: str = None):
                         print(f"[Embedding后台线程] 开始提取 {len(records)} 个样本的embedding...")
                         updated_records = extract_embeddings_for_records(records, batch_dir, task_id=task_id)
                         
-                        # 写入更新后的记录
                         write_jsonl(manifest_path, updated_records)
                         
-                        # 完成任务
-                        progress_tracker.complete_task(
-                            task_id=task_id,
-                            message=f"成功提取 {len(updated_records)} 个样本的embedding"
-                        )
+                        task_obj = progress_tracker.get_task(task_id)
+                        if task_obj and task_obj.status.value == "stopped":
+                            print(f"[Embedding] 任务已停止，不标记完成", file=__import__("sys").stderr)
+                        else:
+                            progress_tracker.complete_task(
+                                task_id=task_id,
+                                message=f"成功提取 {len(updated_records)} 个样本的embedding"
+                            )
                         
                         print(f"[Embedding后台线程] ✓ 批次 {batch.batch_id} embedding生成成功")
                         print(f"[Embedding后台线程]   - 已处理记录数: {len(updated_records)}")
@@ -511,6 +533,25 @@ async def start_embed(source_id: str, batch_id: str = None):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/stop/{source_id}")
+async def stop_task(source_id: str, batch_id: str = None):
+    """停止运行中的任务"""
+    if not batch_id:
+        raise HTTPException(status_code=400, detail="batch_id is required")
+    
+    stopped = []
+    for task_type in ["ingest", "embed", "cluster"]:
+        task_id = f"{task_type}_{source_id}_{batch_id}"
+        task = progress_tracker.get_task(task_id)
+        if task and task.status.value in ["running", "pending"]:
+            progress_tracker.request_stop(task_id)
+            stopped.append(task_id)
+    
+    if stopped:
+        return {"message": f"已发送停止信号: {', '.join(stopped)}", "status": "stopping"}
+    return {"message": "没有运行中的任务", "status": "idle"}
 
 
 @app.post("/api/cluster/{source_id}")

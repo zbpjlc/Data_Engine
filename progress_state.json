@@ -10,8 +10,9 @@
       "total": 18693,
       "message": "正在处理: pdf_38a32cff_page_0008.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778469678.675965,
-      "end_time": 1778478106.1976068
+      "start_time": "2026-05-11 11:21:18",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 8428.0
     },
     "ingest_batch0001_batch_0001_1778470241": {
       "task_id": "ingest_batch0001_batch_0001_1778470241",
@@ -23,8 +24,9 @@
       "total": 18693,
       "message": "正在处理: images__pdf_763afb6a_page_0007.png",
       "error_message": "任务被中断",
-      "start_time": 1778470241.528335,
-      "end_time": 1778478106.1978083
+      "start_time": "2026-05-11 11:30:41",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 7865.0
     },
     "ingest_batch0001_batch_0001_1778473727": {
       "task_id": "ingest_batch0001_batch_0001_1778473727",
@@ -36,8 +38,9 @@
       "total": 29393,
       "message": "正在处理: pdf_2a4b068b_page_0005.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778473727.8863277,
-      "end_time": 1778478106.199324
+      "start_time": "2026-05-11 12:28:47",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 4379.0
     },
     "ingest_batch0001_batch_0001_1778474118": {
       "task_id": "ingest_batch0001_batch_0001_1778474118",
@@ -49,8 +52,9 @@
       "total": 29393,
       "message": "正在处理: pdf_01aeefc1_page_0010.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778474118.316137,
-      "end_time": 1778478106.1994379
+      "start_time": "2026-05-11 12:35:18",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 3988.0
     },
     "ingest_batch0001_batch_0001_1778474156": {
       "task_id": "ingest_batch0001_batch_0001_1778474156",
@@ -62,8 +66,9 @@
       "total": 29393,
       "message": "正在处理: pdf_0280b1e9_page_0001.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778474156.6522815,
-      "end_time": 1778478106.1995385
+      "start_time": "2026-05-11 12:35:56",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 3950.0
     },
     "ingest_batch0001_batch_0001_1778474399": {
       "task_id": "ingest_batch0001_batch_0001_1778474399",
@@ -75,8 +80,9 @@
       "total": 11944,
       "message": "正在处理: pdf_098c2153_page_0013.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778474399.5660527,
-      "end_time": 1778478106.1996427
+      "start_time": "2026-05-11 12:39:59",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 3707.0
     },
     "ingest_batch0001_batch_0001_1778474491": {
       "task_id": "ingest_batch0001_batch_0001_1778474491",
@@ -88,8 +94,9 @@
       "total": 12007,
       "message": "正在处理: pdf_0da21260_page_0001.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778474491.3952336,
-      "end_time": 1778478106.1997576
+      "start_time": "2026-05-11 12:41:31",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 3615.0
     },
     "ingest_batch0001_batch_0001_1778474533": {
       "task_id": "ingest_batch0001_batch_0001_1778474533",
@@ -101,8 +108,9 @@
       "total": 11957,
       "message": "正在处理: pdf_0f9d073b_page_0003.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778474533.2092276,
-      "end_time": 1778478106.199854
+      "start_time": "2026-05-11 12:42:13",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 3573.0
     },
     "ingest_batch0001_batch_0001_1778474600": {
       "task_id": "ingest_batch0001_batch_0001_1778474600",
@@ -114,8 +122,9 @@
       "total": 11944,
       "message": "正在处理: pdf_042df7ba_page_0003.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778474600.010012,
-      "end_time": 1778478106.199952
+      "start_time": "2026-05-11 12:43:20",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 3506.0
     },
     "ingest_batch0001_batch_0001_1778474643": {
       "task_id": "ingest_batch0001_batch_0001_1778474643",
@@ -127,8 +136,9 @@
       "total": 12154,
       "message": "正在处理: pdf_04e54637_page_0008.jpg",
       "error_message": "任务被中断",
-      "start_time": 1778474643.1306782,
-      "end_time": 1778478106.2000508
+      "start_time": "2026-05-11 12:44:03",
+      "end_time": "2026-05-11 13:41:46",
+      "elapsed_seconds": 3463.0
     },
     "ingest_batch0001_batch_0001": {
       "task_id": "ingest_batch0001_batch_0001",
@@ -140,73 +150,37 @@
       "total": 11944,
       "message": "成功处理 11944 个样本",
       "error_message": "",
-      "start_time": 1778478152.3525903,
-      "end_time": 1778480453.3630433
-    },
-    "ingest_base_disk_abc": {
-      "task_id": "ingest_base_disk_abc",
-      "task_type": "ingest",
-      "source_id": "base_disk",
-      "batch_id": "abc",
-      "status": "completed",
-      "current": 9,
-      "total": 9,
-      "message": "成功处理 55 个样本",
-      "error_message": "",
-      "start_time": 1778584009.7430954,
-      "end_time": 1778584023.5975888
+      "start_time": "2026-05-11 13:42:32",
+      "end_time": "2026-05-11 14:20:53",
+      "elapsed_seconds": 2301.0
     },
     "ingest_base_disk_金融数据": {
       "task_id": "ingest_base_disk_金融数据",
       "task_type": "ingest",
       "source_id": "base_disk",
       "batch_id": "金融数据",
-      "status": "running",
-      "current": 149,
-      "total": 11588,
-      "message": "正在处理: 2020-03-20__永兴特种材料科技股份有限公司__002756__永兴材料__2019年__年度报告.pdf",
-      "error_message": "",
-      "start_time": 1778584014.3308902,
-      "end_time": null
-    },
-    "embed_base_disk_abc": {
-      "task_id": "embed_base_disk_abc",
-      "task_type": "embed",
-      "source_id": "base_disk",
-      "batch_id": "abc",
       "status": "completed",
-      "current": 55,
-      "total": 55,
-      "message": "成功提取 55 个样本的embedding",
+      "current": 11588,
+      "total": 11588,
+      "message": "成功处理 259226 个样本",
       "error_message": "",
-      "start_time": 1778584045.1750412,
-      "end_time": 1778584053.6261253
+      "start_time": "2026-05-12 19:06:54",
+      "end_time": "2026-05-13 07:03:36",
+      "elapsed_seconds": 43002.0
     },
     "ingest_data_disk_金融数据": {
       "task_id": "ingest_data_disk_金融数据",
       "task_type": "ingest",
       "source_id": "data_disk",
       "batch_id": "金融数据",
-      "status": "running",
-      "current": 144,
+      "status": "stopped",
+      "current": 1,
       "total": 11588,
-      "message": "正在处理: 2020-03-20__太龙电子股份有限公司__300650__太龙股份__2019年__年度报告.pdf",
+      "message": "用户停止，已处理 516 个样本",
       "error_message": "",
-      "start_time": 1778584776.6739674,
-      "end_time": null
-    },
-    "cluster_base_disk_abc": {
-      "task_id": "cluster_base_disk_abc",
-      "task_type": "cluster",
-      "source_id": "base_disk",
-      "batch_id": "abc",
-      "status": "completed",
-      "current": 55,
-      "total": 55,
-      "message": "聚类完成: 4 簇, 轮廓系数 0.273",
-      "error_message": "",
-      "start_time": 1778586003.5505664,
-      "end_time": 1778586003.7073543
+      "start_time": "2026-05-13 10:20:17",
+      "end_time": "2026-05-13 10:20:30",
+      "elapsed_seconds": 12.5
     }
   }
 }

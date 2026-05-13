@@ -71,6 +71,11 @@ def extract_embeddings_for_records(
 
     updated_records = []
     for idx, record in enumerate(records):
+        if progress_tracker and task_id and progress_tracker.is_stopped(task_id):
+            print(f"[Embedding] 收到停止信号，中断处理", file=__import__("sys").stderr)
+            progress_tracker.stop_task(task_id, f"用户停止，已处理 {idx}/{len(records)} 个样本")
+            break
+        
         try:
             image_path = batch_dir / record["page_image"]
 

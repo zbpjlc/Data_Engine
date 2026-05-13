@@ -176,7 +176,7 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
     
     try:
         new_records: list[UnifiedSampleRecord] = []
-        # 实时更新manifest，支持断点续跑
+        was_stopped = False
         batch_update_interval = 100  # 每处理100个文件更新一次manifest
         with tqdm(files_to_process, desc="处理文件", unit="file", total=len(input_files), initial=skipped_count) as pbar:
             for i, input_path in enumerate(pbar):
@@ -186,7 +186,7 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
                 # 更新进度
                 progress_tracker.update_progress(
                     task_id=task_id,
-                    current=skipped_count + i,  # 使用已跳过文件数 + 当前处理索引
+                    current=skipped_count + i,
                     message=f"正在处理: {input_path.name}"
                 )
                 
@@ -198,21 +198,33 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
                         record = _ingest_image(input_path, batch_dir, page_images_dir, source_id, category, batch_id)
                         new_records.append(record)
                     
-                    # 定期更新manifest，支持断点续跑
                     if len(new_records) > 0 and len(new_records) % batch_update_interval == 0:
                         current_all_records = existing_records + new_records
                         write_jsonl(manifest_path, current_all_records)
                         print(f"已处理 {len(new_records)} 个样本，更新manifest", file=sys.stderr)
                         
+                        if progress_tracker.is_stopped(task_id):
+                            print(f"[INGEST] 定期检查：收到停止信号", file=sys.stderr)
+                            was_stopped = True
+                            break
+                        
                 except Exception as e:
                     print(f"处理文件 {input_path} 时出错: {e}", file=sys.stderr)
                     continue
+                
+                if progress_tracker.is_stopped(task_id):
+                    print(f"[INGEST] 收到停止信号，当前文件处理完毕后停止", file=sys.stderr)
+                    was_stopped = True
+                    break
         
-        # 完成任务
-        progress_tracker.complete_task(
-            task_id=task_id,
-            message=f"成功处理 {len(new_records)} 个样本"
-        )
+        # 完成任务（停止的不标记完成）
+        if was_stopped:
+            progress_tracker.stop_task(task_id, f"用户停止，已处理 {len(new_records)} 个样本")
+        else:
+            progress_tracker.complete_task(
+                task_id=task_id,
+                message=f"成功处理 {len(new_records)} 个样本"
+            )
         
     except Exception as e:
         progress_tracker.fail_task(
@@ -250,13 +262,15 @@ def _ingest_pdf(
 
     command = [
         "pdftoppm",
-        "-png",
+        "-jpeg",
+        "-r", "150",
+        "-scale-to", "2000",
         str(pdf_path),
         str(prefix),
     ]
     subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    rendered_pages = sorted(stem_dir.glob("page-*.png"))
+    rendered_pages = sorted(stem_dir.glob("page-*.jpg"))
     records: list[UnifiedSampleRecord] = []
     for index, page_path in enumerate(rendered_pages, start=1):
         page_id = _hash_text(f"{pdf_hash}:{index}")
@@ -292,7 +306,7 @@ def _ingest_image(
     image_hash = sha256_file(image_path)
     page_id = image_hash
     relative_input = image_path.relative_to(raw_input_dir).as_posix()
-    output_name = relative_input.replace("/", "__").rsplit(".", 1)[0] + ".png"
+    output_name = relative_input.replace("/", "__").rsplit(".", 1)[0] + ".jpg"
     output_path = page_images_dir / output_name
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -302,6 +316,7 @@ def _ingest_image(
         "-y",
         "-i",
         str(image_path),
+        "-vf", "scale='if(gt(iw,ih),2000,-2)':'if(gt(ih,iw),2000,-2)'",
         "-frames:v",
         "1",
         str(output_path),

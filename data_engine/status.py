@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,7 +54,11 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
 
     ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
     if sample_count == 0 and ingest_manifest and ingest_manifest.suffix == ".jsonl":
-        sample_count = len(read_jsonl(ingest_manifest))
+        try:
+            with ingest_manifest.open("r", encoding="utf-8") as f:
+                sample_count = sum(1 for line in f if line.strip())
+        except Exception:
+            sample_count = 0
         pending_count = max(sample_count - _completed_count(stage_status, sample_count), 0)
 
     return BatchStatusSummary(
@@ -72,12 +77,25 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
 def _detect_stage_status(manifests_dir: Path) -> str:
     ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
     if ingest_manifest and ingest_manifest.suffix == ".jsonl":
-        records = read_jsonl(ingest_manifest)
-        if records:
-            has_cluster = any(r.get("cluster_id") for r in records)
+        try:
+            sample_records = []
+            with ingest_manifest.open("r", encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i >= 20:
+                        break
+                    line = line.strip()
+                    if line:
+                        try:
+                            sample_records.append(json.loads(line))
+                        except Exception:
+                            continue
+        except Exception:
+            return "ingested"
+        if sample_records:
+            has_cluster = any(r.get("cluster_id") for r in sample_records)
             if has_cluster:
                 return "clustered"
-            has_embedding = any(r.get("embedding") is not None for r in records)
+            has_embedding = any(r.get("embedding") is not None for r in sample_records)
             if has_embedding:
                 return "embedded"
         return "ingested"

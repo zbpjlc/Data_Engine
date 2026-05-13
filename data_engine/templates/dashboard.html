@@ -150,6 +150,7 @@
                                         <button onclick="doAction('ingest','{{ batch.source_id }}','{{ batch.batch_id }}')" class="px-2 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700">执行</button>
                                         <button onclick="doAction('clear','{{ batch.source_id }}','{{ batch.batch_id }}')" class="px-2 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700">清除</button>
                                         <button onclick="doAction('embed','{{ batch.source_id }}','{{ batch.batch_id }}')" class="px-2 py-1 bg-purple-600 text-white text-xs rounded hover:bg-purple-700">Embedding</button>
+                                        <button onclick="doStop('{{ batch.source_id }}','{{ batch.batch_id }}')" class="px-2 py-1 bg-yellow-600 text-white text-xs rounded hover:bg-yellow-700">停止</button>
                                     </div>
                                 </td>
                             </tr>
@@ -202,6 +203,26 @@
     </div>
 
     <script>
+        // 停止任务
+        function doStop(sourceId, batchId) {
+            if (!confirm(`确定停止 ${sourceId}/${batchId} 的任务？`)) return;
+            const btn = event.target;
+            btn.disabled = true;
+            btn.classList.add('opacity-50');
+            const cell = document.querySelector(`[data-progress-cell][data-source="${sourceId}"][data-batch="${batchId}"]`);
+            fetch(`/api/stop/${sourceId}?batch_id=${batchId}`, { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    if (cell) cell.innerHTML = '<div class="text-xs text-yellow-600">正在停止...</div>';
+                    setTimeout(() => { btn.disabled = false; btn.classList.remove('opacity-50'); }, 3000);
+                })
+                .catch(e => {
+                    alert('停止失败: ' + e.message);
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50');
+                });
+        }
+
         // 数据源筛选
         document.getElementById('source-select').addEventListener('change', function() {
             const sid = this.value;
@@ -216,16 +237,49 @@
         // 操作
         function doAction(action, sourceId, batchId) {
             if (action === 'clear' && !confirm(`确定清除 ${sourceId}/${batchId}？`)) return;
+            
+            // 立即在进度格显示反馈
+            const cell = document.querySelector(`[data-progress-cell][data-source="${sourceId}"][data-batch="${batchId}"]`);
+            if (cell) {
+                const actionLabels = { ingest: '执行中...', clear: '清除中...', embed: '生成Embedding中...' };
+                cell.innerHTML = `<div class="text-xs"><div class="flex items-center space-x-2">
+                    <svg class="animate-spin h-3 w-3 text-blue-600" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                    <span class="text-blue-600 font-medium">${actionLabels[action] || '处理中...'}</span>
+                </div></div>`;
+            }
+
+            // 禁用对应按钮
+            const btn = event.target;
+            btn.disabled = true;
+            btn.classList.add('opacity-50');
+
             const urls = {
                 ingest: `/api/ingest/${sourceId}?batch_id=${batchId}`,
                 clear: `/api/ingest/${sourceId}?batch_id=${batchId}`,
                 embed: `/api/embed/${sourceId}?batch_id=${batchId}`,
             };
             const methods = { ingest: 'POST', clear: 'DELETE', embed: 'POST' };
+
             fetch(urls[action], { method: methods[action] })
                 .then(r => r.json())
-                .then(d => { if (action !== 'clear') startPolling(); else pollOnce(); })
-                .catch(e => alert('失败: ' + e.message));
+                .then(d => {
+                    if (d.status === 'already_running') {
+                        if (cell) cell.innerHTML = '<div class="text-xs text-yellow-600">任务已在运行中</div>';
+                        btn.disabled = false;
+                        btn.classList.remove('opacity-50');
+                        startPolling();
+                    } else if (action === 'clear') {
+                        if (cell) cell.innerHTML = '<div class="text-xs text-green-600">清除完成</div>';
+                        setTimeout(() => location.reload(), 800);
+                    } else {
+                        startPolling();
+                    }
+                })
+                .catch(e => {
+                    if (cell) cell.innerHTML = `<div class="text-xs text-red-600">失败: ${e.message}</div>`;
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50');
+                });
         }
 
         // 进度轮询
@@ -252,15 +306,15 @@
 
                     const key = sid + '/' + bid;
                     const prevState = prevTaskStates[key];
-                    if (prevState === 'running' && (task.status === 'completed' || task.status === 'failed')) {
+                    if (prevState === 'running' && (task.status === 'completed' || task.status === 'failed' || task.status === 'stopped')) {
                         location.reload();
                         return;
                     }
                     prevTaskStates[key] = task.status;
 
-                    const colors = { completed: 'green', failed: 'red', running: 'blue', pending: 'yellow' };
+                    const colors = { completed: 'green', failed: 'red', running: 'blue', pending: 'yellow', stopped: 'yellow' };
                     const c = colors[task.status] || 'blue';
-                    const labels = { completed: '完成', failed: '失败', running: '进行中', pending: '待处理' };
+                    const labels = { completed: '完成', failed: '失败', running: '进行中', pending: '待处理', stopped: '已停止' };
                     const pct = task.total > 0 ? (task.current / task.total * 100).toFixed(1) : 0;
 
                     cell.innerHTML = `<div class="text-xs">
@@ -272,8 +326,8 @@
                             <div class="flex-1 bg-gray-200 rounded-full h-1.5"><div class="bg-${c}-600 h-1.5 rounded-full" style="width:${pct}%"></div></div>
                             <span class="text-gray-600">${task.current}/${task.total}</span>
                         </div>
-                        ${task.message ? `<div class="text-gray-500 truncate mt-1" title="${task.message}">${task.message}</div>` : ''}
-                        ${task.error_message ? `<div class="text-red-500 truncate" title="${task.error_message}">${task.error_message}</div>` : ''}
+                        ${task.message ? `<div class="text-gray-500 truncate max-w-[300px] mt-1" title="${task.message}">${task.message}</div>` : ''}
+                        ${task.error_message ? `<div class="text-red-500 truncate max-w-[300px]" title="${task.error_message}">${task.error_message}</div>` : ''}
                     </div>`;
                 });
             }).catch(() => {});

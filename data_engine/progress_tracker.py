@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 from enum import Enum
@@ -14,6 +15,7 @@ class TaskStatus(Enum):
     RUNNING = "running" 
     COMPLETED = "completed"
     FAILED = "failed"
+    STOPPED = "stopped"
 
 
 @dataclass
@@ -54,6 +56,7 @@ class ProgressTracker:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance.tasks: Dict[str, TaskProgress] = {}
+                    cls._instance._stop_flags: set = set()
                     cls._instance._file_path = Path("progress_state.json")
                     cls._instance._file_lock = threading.Lock()
         return cls._instance
@@ -61,6 +64,7 @@ class ProgressTracker:
     def start_task(self, task_id: str, task_type: str, source_id: str, batch_id: str, total: int = 0, message: str = "") -> None:
         """开始一个新任务"""
         with self._lock:
+            self._stop_flags.discard(task_id)
             self.tasks[task_id] = TaskProgress(
                 task_id=task_id,
                 task_type=task_type,
@@ -88,6 +92,7 @@ class ProgressTracker:
     def complete_task(self, task_id: str, message: str = "") -> None:
         """完成任务"""
         with self._lock:
+            self._stop_flags.discard(task_id)
             if task_id in self.tasks:
                 task = self.tasks[task_id]
                 task.status = TaskStatus.COMPLETED
@@ -107,11 +112,33 @@ class ProgressTracker:
     def fail_task(self, task_id: str, error_message: str = "") -> None:
         """任务失败"""
         with self._lock:
+            self._stop_flags.discard(task_id)
             if task_id in self.tasks:
                 task = self.tasks[task_id]
                 task.status = TaskStatus.FAILED
                 task.end_time = time.time()
                 task.error_message = error_message
+                self._save_state()
+    
+    def request_stop(self, task_id: str) -> None:
+        """请求停止任务"""
+        with self._lock:
+            self._stop_flags.add(task_id)
+    
+    def is_stopped(self, task_id: str) -> bool:
+        """检查任务是否被请求停止"""
+        with self._lock:
+            return task_id in self._stop_flags
+    
+    def stop_task(self, task_id: str, message: str = "用户手动停止") -> None:
+        """停止任务"""
+        with self._lock:
+            self._stop_flags.discard(task_id)
+            if task_id in self.tasks:
+                task = self.tasks[task_id]
+                task.status = TaskStatus.STOPPED
+                task.end_time = time.time()
+                task.message = message
                 self._save_state()
     
     def get_task(self, task_id: str) -> Optional[TaskProgress]:
@@ -152,17 +179,34 @@ class ProgressTracker:
                 self._save_state()
     
     def _save_state(self) -> None:
-        """保存状态到文件"""
+        """保存状态到文件（原子写入，避免损坏）"""
         try:
+            def _fmt_time(ts):
+                if ts is None:
+                    return None
+                return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
             state = {
                 "tasks": {
                     task_id: {
                         **asdict(task),
-                        "status": task.status.value  # 保存枚举值而不是枚举对象
+                        "status": task.status.value,
+                        "start_time": _fmt_time(task.start_time),
+                        "end_time": _fmt_time(task.end_time),
+                        "elapsed_seconds": round(task.elapsed_time, 1),
                     }
                     for task_id, task in self.tasks.items()
                 }
             }
+            tmp_path = self._file_path.with_suffix('.tmp')
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2, default=str)
+                f.flush()
+                import os
+                os.fsync(f.fileno())
+            tmp_path.replace(self._file_path)
+        except Exception:
+            pass
             with open(self._file_path, 'w', encoding='utf-8') as f:
                 json.dump(state, f, ensure_ascii=False, indent=2, default=str)
         except Exception:
@@ -175,34 +219,33 @@ class ProgressTracker:
                 with open(self._file_path, 'r', encoding='utf-8') as f:
                     state = json.load(f)
                 
-                # 清空当前任务
                 self.tasks.clear()
                 
                 for task_id, task_data in state.get("tasks", {}).items():
-                    # 转换状态枚举
                     if "status" in task_data:
                         status_value = task_data["status"]
                         if isinstance(status_value, str):
-                            # 如果是字符串，转换为枚举
                             try:
                                 task_data["status"] = TaskStatus(status_value)
                             except ValueError:
-                                # 如果枚举值无效，跳过这个任务
-                                print(f"Invalid status value '{status_value}' for task {task_id}, skipping")
                                 continue
-                        else:
-                            # 如果已经是枚举，直接使用
-                            task_data["status"] = status_value
+                    
+                    for ts_field in ["start_time", "end_time"]:
+                        v = task_data.get(ts_field)
+                        if isinstance(v, str):
+                            try:
+                                task_data[ts_field] = datetime.strptime(v, "%Y-%m-%d %H:%M:%S").timestamp()
+                            except ValueError:
+                                task_data[ts_field] = None
+                    
+                    task_data.pop("elapsed_seconds", None)
                     
                     try:
                         self.tasks[task_id] = TaskProgress(**task_data)
-                        print(f"Loaded task: {task_id}, status: {self.tasks[task_id].status}")
-                    except Exception as e:
-                        print(f"Error creating task {task_id}: {e}")
+                    except Exception:
                         continue
-        except Exception as e:
-            print(f"Error loading state: {e}")
-            pass  # 忽略加载错误
+        except Exception:
+            pass
 
 
 # 全局实例
