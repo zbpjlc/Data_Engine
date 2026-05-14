@@ -1,0 +1,12 @@
+progress_state.json
+.vscode/
+.idea/
+*.log
+*.tmp
+*.bak
+*.swp
+.DS_Store
+.claude/
+.codex/
+.kilo/
+data_engine/__pycache__/

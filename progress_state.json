@@ -173,14 +173,14 @@
       "task_type": "ingest",
       "source_id": "data_disk",
       "batch_id": "金融数据",
-      "status": "stopped",
-      "current": 1,
+      "status": "completed",
+      "current": 11588,
       "total": 11588,
-      "message": "用户停止，已处理 516 个样本",
+      "message": "成功处理 2208513 个样本",
       "error_message": "",
-      "start_time": "2026-05-13 10:20:17",
-      "end_time": "2026-05-13 10:20:30",
-      "elapsed_seconds": 12.5
+      "start_time": "2026-05-13 10:22:46",
+      "end_time": "2026-05-14 01:21:04",
+      "elapsed_seconds": 53897.9
     }
   }
 }
