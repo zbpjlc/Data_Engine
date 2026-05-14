@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-from data_engine.manifests import read_jsonl
+from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report
 from data_engine.progress_tracker import progress_tracker
@@ -152,10 +152,11 @@ async def filter_data(
             
             if not batch_dir:
                 continue
-                
-            manifest_path = batch_dir / "manifests" / "ingest.jsonl"
-            if manifest_path.exists():
-                records = read_jsonl(manifest_path)
+
+            manifests_dir = batch_dir / "manifests"
+            manifest_path = find_stage_manifest(manifests_dir, "ingest")
+            if manifest_path:
+                records = read_manifest(manifest_path)
                 for record in records:
                     # 应用数据状态筛选
                     if status_list:
@@ -315,10 +316,14 @@ async def clear_ingest(source_id: str, batch_id: str = None):
                 source_config = registry.get(source_id)
                 batch_dir = source_config.resolve_batch_dir(batch.batch_id)
                 
-                for fname in ["ingest.jsonl", "input_files.json"]:
+                for fname in ["ingest.lance", "ingest.jsonl", "input_files.json"]:
                     fpath = batch_dir / "manifests" / fname
                     if fpath.exists():
-                        fpath.unlink()
+                        if fpath.is_dir():
+                            import shutil
+                            shutil.rmtree(fpath)
+                        else:
+                            fpath.unlink()
                         cleared_count += 1
                         print(f"已删除: {fpath}")
                 
@@ -441,7 +446,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                 print(f"[Embedding后台线程] 开始执行Embedding任务: {source_id}")
                 # 导入embedding函数
                 from data_engine.embedding import extract_embeddings_for_records
-                from data_engine.manifests import read_jsonl, write_jsonl
+                from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
                 
                 # 获取该数据源的所有批次
                 global_status = collect_global_status(registry)
@@ -465,14 +470,14 @@ async def start_embed(source_id: str, batch_id: str = None):
                         source = registry.get(source_id)
                         batch_dir = source.resolve_batch_dir(batch.batch_id)
                         manifests_dir = batch_dir / "manifests"
-                        manifest_path = manifests_dir / "ingest.jsonl"
+                        manifest_path = find_stage_manifest(manifests_dir, "ingest")
                         
-                        if not manifest_path.exists():
-                            print(f"[Embedding后台线程] ⚠ manifest文件不存在: {manifest_path}")
+                        if not manifest_path or not manifest_path.exists():
+                            print(f"[Embedding后台线程] ⚠ manifest文件不存在")
                             continue
                         
                         # 读取现有记录
-                        records = read_jsonl(manifest_path)
+                        records = read_manifest(manifest_path)
                         task_id = f"embed_{source_id}_{batch.batch_id}"
                         
                         # 开始任务
@@ -489,7 +494,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                         print(f"[Embedding后台线程] 开始提取 {len(records)} 个样本的embedding...")
                         updated_records = extract_embeddings_for_records(records, batch_dir, task_id=task_id)
                         
-                        write_jsonl(manifest_path, updated_records)
+                        write_manifest(manifest_path, updated_records)
                         
                         task_obj = progress_tracker.get_task(task_id)
                         if task_obj and task_obj.status.value == "stopped":
@@ -563,7 +568,7 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
         def execute_cluster_task():
             try:
                 from data_engine.clustering import cluster_records
-                from data_engine.manifests import read_jsonl, write_jsonl
+                from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
 
                 global_status = collect_global_status(registry)
                 source_batches = [b for b in global_status.batches if b.source_id == source_id]
@@ -574,12 +579,13 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                     try:
                         source = registry.get(source_id)
                         batch_dir = source.resolve_batch_dir(batch.batch_id)
-                        manifest_path = batch_dir / "manifests" / "ingest.jsonl"
+                        manifests_dir = batch_dir / "manifests"
+                        manifest_path = find_stage_manifest(manifests_dir, "ingest")
 
-                        if not manifest_path.exists():
+                        if not manifest_path or not manifest_path.exists():
                             continue
 
-                        records = read_jsonl(manifest_path)
+                        records = read_manifest(manifest_path)
                         task_id = f"cluster_{source_id}_{batch.batch_id}"
 
                         progress_tracker.start_task(
@@ -594,7 +600,7 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                         updated_records, stats = cluster_records(
                             records, n_clusters=n_clusters, auto_optimize=auto_optimize)
 
-                        write_jsonl(manifest_path, updated_records)
+                        write_manifest(manifest_path, updated_records)
 
                         progress_tracker.complete_task(
                             task_id=task_id,

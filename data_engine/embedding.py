@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -5,12 +6,14 @@ from PIL import Image
 import torch
 from modelscope import AutoModel, AutoProcessor
 
+from data_engine.config import get_config
+
 
 class CLIPEmbeddingExtractor:
     """SigLIP2图像embedding提取器"""
 
-    def __init__(self, model_name: str = "google/siglip2-base-patch16-224"):
-        self.model_name = model_name
+    def __init__(self, model_name: str | None = None):
+        self.model_name = model_name or get_config("embedding", "model_name", default="google/siglip2-base-patch16-224")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.processor = None
@@ -27,8 +30,23 @@ class CLIPEmbeddingExtractor:
         print(f"模型已加载到: {self.device}", file=sys.stderr)
 
     def extract_embedding(self, image_path: Path) -> list[float]:
-        """提取图像embedding"""
+        """从文件路径提取图像embedding"""
         image = Image.open(image_path).convert("RGB")
+        inputs = self.processor(images=[image], return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model.get_image_features(**inputs)
+        if hasattr(outputs, "pooler_output"):
+            embedding = outputs.pooler_output
+        elif hasattr(outputs, "cpu"):
+            embedding = outputs
+        else:
+            embedding = outputs[0]
+        embedding = embedding.cpu().numpy().flatten().tolist()
+        return embedding
+
+    def extract_embedding_from_bytes(self, image_bytes: bytes) -> list[float]:
+        """从二进制数据提取图像embedding"""
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         inputs = self.processor(images=[image], return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.model.get_image_features(**inputs)
@@ -77,7 +95,8 @@ def extract_embeddings_for_records(
             break
         
         try:
-            image_path = batch_dir / record["page_image"]
+            # 优先从 Lance 记录的 image_data 读取，否则从文件路径读取
+            image_data = record.get("image_data")
 
             if progress_tracker and task_id:
                 progress_tracker.update_progress(
@@ -86,14 +105,22 @@ def extract_embeddings_for_records(
                     message=f"开始处理第 {idx + 1}/{len(records)} 个样本"
                 )
 
-            if not image_path.exists():
-                print(f"图像文件不存在: {image_path}", file=__import__("sys").stderr)
-                record["embedding"] = None
-                updated_records.append(record)
-            else:
-                embedding = extractor.extract_embedding(image_path)
+            if image_data:
+                # 从二进制数据提取 embedding
+                embedding = extractor.extract_embedding_from_bytes(image_data)
                 record["embedding"] = embedding
                 updated_records.append(record)
+            else:
+                # 回退到文件路径
+                image_path = batch_dir / record["page_image"]
+                if not image_path.exists():
+                    print(f"图像文件不存在: {image_path}", file=__import__("sys").stderr)
+                    record["embedding"] = None
+                    updated_records.append(record)
+                else:
+                    embedding = extractor.extract_embedding(image_path)
+                    record["embedding"] = embedding
+                    updated_records.append(record)
 
             if progress_tracker and task_id:
                 progress_tracker.update_progress(

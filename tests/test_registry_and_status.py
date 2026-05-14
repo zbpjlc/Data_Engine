@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from data_engine.hashing import sample_id_for_page
-from data_engine.manifests import write_json, write_jsonl
+from data_engine.manifests import write_json, write_manifest
 from data_engine.models import InputType, SourceMetadata, StageStatus, UnifiedSampleRecord
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status
@@ -25,7 +25,7 @@ class RegistryStatusTests(unittest.TestCase):
             self.assertTrue(scanned[0].online)
             self.assertEqual(scanned[0].batch_count, 1)
 
-    def test_status_aggregates_jsonl_and_stats(self) -> None:
+    def test_status_aggregates_lance_and_stats(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_dir = root / "source_a"
@@ -49,7 +49,7 @@ class RegistryStatusTests(unittest.TestCase):
                 page_image_sha256="b" * 64,
                 source_metadata=SourceMetadata(normalized_width=10, normalized_height=20),
             )
-            write_jsonl(batch_dir / "manifests" / "ingest.jsonl", [record])
+            write_manifest(batch_dir / "manifests" / "ingest.lance", [record.model_dump(mode="json")])
             write_json(
                 batch_dir / "artifacts" / "stats.json",
                 {

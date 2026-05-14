@@ -3,7 +3,7 @@ sources:
   root_path: /home/ubuntu/Data1
   enabled: true
 - id: data_disk
-  root_path: /media/ubuntu/Data/金融数据
+  root_path: /media/ubuntu/U盘/金融数据
   enabled: true
 
 # sources:

@@ -173,14 +173,14 @@
       "task_type": "ingest",
       "source_id": "data_disk",
       "batch_id": "金融数据",
-      "status": "completed",
-      "current": 11588,
+      "status": "running",
+      "current": 13,
       "total": 11588,
-      "message": "成功处理 2208513 个样本",
+      "message": "正在处理: 2020-02-28__方大特钢科技股份有限公司__600507__方大特钢__2019年__年度报告.pdf",
       "error_message": "",
-      "start_time": "2026-05-13 10:22:46",
-      "end_time": "2026-05-14 01:21:04",
-      "elapsed_seconds": 53897.9
+      "start_time": "2026-05-14 20:47:02",
+      "end_time": null,
+      "elapsed_seconds": 534.9
     }
   }
 }

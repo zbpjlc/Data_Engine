@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from data_engine.manifests import find_stage_manifest, read_json, read_jsonl
+from data_engine.manifests import find_stage_manifest, read_json, read_manifest, manifest_count
 from data_engine.models import BatchStatusSummary, SourceScanSummary
 from data_engine.registry import SourceRegistry
 
@@ -53,12 +53,12 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
     updated_at = _parse_time(stats.get("updated_at"))
 
     ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
-    if sample_count == 0 and ingest_manifest and ingest_manifest.suffix == ".jsonl":
-        try:
-            with ingest_manifest.open("r", encoding="utf-8") as f:
-                sample_count = sum(1 for line in f if line.strip())
-        except Exception:
-            sample_count = 0
+    if sample_count == 0 and ingest_manifest:
+        if ingest_manifest.suffix == ".lance":
+            try:
+                sample_count = manifest_count(ingest_manifest)
+            except Exception:
+                sample_count = 0
         pending_count = max(sample_count - _completed_count(stage_status, sample_count), 0)
 
     return BatchStatusSummary(
@@ -76,21 +76,16 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
 
 def _detect_stage_status(manifests_dir: Path) -> str:
     ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
-    if ingest_manifest and ingest_manifest.suffix == ".jsonl":
-        try:
-            sample_records = []
-            with ingest_manifest.open("r", encoding="utf-8") as f:
-                for i, line in enumerate(f):
-                    if i >= 20:
-                        break
-                    line = line.strip()
-                    if line:
-                        try:
-                            sample_records.append(json.loads(line))
-                        except Exception:
-                            continue
-        except Exception:
+    if ingest_manifest:
+        if ingest_manifest.suffix == ".lance":
+            try:
+                records = read_manifest(ingest_manifest)
+                sample_records = records[:20]  # 只检查前20条
+            except Exception:
+                return "ingested"
+        else:
             return "ingested"
+
         if sample_records:
             has_cluster = any(r.get("cluster_id") for r in sample_records)
             if has_cluster:

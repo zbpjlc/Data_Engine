@@ -7,7 +7,7 @@ from pathlib import Path
 from data_engine.clustering import cluster_records
 from data_engine.embedding import extract_embeddings_for_records
 from data_engine.ingest import run_ingest
-from data_engine.manifests import read_jsonl, write_jsonl
+from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
 from data_engine.progress_tracker import progress_tracker
 from data_engine.registry import DEFAULT_REGISTRY_PATH, SourceRegistry
 from data_engine.status import collect_global_status, format_status_report
@@ -90,14 +90,14 @@ def main(argv: list[str] | None = None) -> int:
         source = registry.get(args.source_id)
         batch_dir = Path(source.root_path) / args.batch
         manifests_dir = batch_dir / "manifests"
-        manifest_path = manifests_dir / "ingest.jsonl"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
         
-        if not manifest_path.exists():
-            print(f"错误: manifest文件不存在 {manifest_path}", file=sys.stderr)
+        if not manifest_path or not manifest_path.exists():
+            print(f"错误: manifest文件不存在", file=sys.stderr)
             return 1
         
         # 读取现有记录
-        records = read_jsonl(manifest_path)
+        records = read_manifest(manifest_path)
         task_id = f"embed_{args.source_id}_{args.batch}"
         
         # 开始任务
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             updated_records = extract_embeddings_for_records(records, batch_dir, task_id=task_id)
             
             # 写入更新后的记录
-            write_jsonl(manifest_path, updated_records)
+            write_manifest(manifest_path, updated_records)
             
             # 完成任务
             progress_tracker.complete_task(
@@ -148,14 +148,14 @@ def main(argv: list[str] | None = None) -> int:
         source = registry.get(args.source_id)
         batch_dir = Path(source.root_path) / args.batch
         manifests_dir = batch_dir / "manifests"
-        manifest_path = manifests_dir / "ingest.jsonl"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
         
-        if not manifest_path.exists():
-            print(f"错误: manifest文件不存在 {manifest_path}", file=sys.stderr)
+        if not manifest_path or not manifest_path.exists():
+            print(f"错误: manifest文件不存在", file=sys.stderr)
             return 1
         
         # 读取现有记录
-        records = read_jsonl(manifest_path)
+        records = read_manifest(manifest_path)
         task_id = f"cluster_{args.source_id}_{args.batch}"
         
         # 开始任务
@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             
             # 写入更新后的记录
-            write_jsonl(manifest_path, updated_records)
+            write_manifest(manifest_path, updated_records)
             
             # 保存聚类统计
             artifacts_dir = batch_dir / "artifacts"

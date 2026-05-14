@@ -1,0 +1,23 @@
+ingest:
+  batch_update_interval: 100   # 每N条记录保存一次
+  image_extensions:            # 支持的图片格式
+    - .jpg
+    - .jpeg
+    - .png
+    - .webp
+    - .bmp
+    - .tif
+    - .tiff
+  pdftoppm:
+    dpi: 150                   # PDF渲染分辨率
+    scale_to: 2000             # 最大边长
+  ffmpeg:
+    scale_to: 2000             # 图片缩放最大边长
+
+embedding:
+  model_name: google/siglip2-base-patch16-224
+
+clustering:
+  default_n_clusters: 5
+  random_state: 42
+  max_clusters: 10

@@ -5,13 +5,15 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 import json
 
+from data_engine.config import get_config
+
 
 class KMeansClusterer:
     """K-means聚类器"""
     
-    def __init__(self, n_clusters: int = 5, random_state: int = 42):
-        self.n_clusters = n_clusters
-        self.random_state = random_state
+    def __init__(self, n_clusters: int | None = None, random_state: int | None = None):
+        self.n_clusters = n_clusters or get_config("clustering", "default_n_clusters", default=5)
+        self.random_state = random_state or get_config("clustering", "random_state", default=42)
         self.model = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
         self.cluster_centers = None
         self.labels = None
@@ -63,8 +65,11 @@ class KMeansClusterer:
         }
 
 
-def find_optimal_clusters(embeddings: list[list[float]], max_clusters: int = 10) -> int:
+def find_optimal_clusters(embeddings: list[list[float]], max_clusters: int | None = None) -> int:
     """使用轮廓系数找到最优聚类数量"""
+    if max_clusters is None:
+        max_clusters = get_config("clustering", "max_clusters", default=10)
+    random_state = get_config("clustering", "random_state", default=42)
     if not embeddings or len(embeddings) < 2:
         return 1
     
@@ -79,7 +84,7 @@ def find_optimal_clusters(embeddings: list[list[float]], max_clusters: int = 10)
     best_k = 1
     
     for k in range(2, min(max_clusters + 1, len(X_valid))):
-        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        kmeans = KMeans(n_clusters=k, random_state=random_state, n_init=10)
         labels = kmeans.fit_predict(X_valid)
         
         if len(set(labels)) > 1:

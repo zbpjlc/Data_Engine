@@ -123,6 +123,7 @@ class UnifiedSampleRecord(BaseModel):
     threshold_version: str = "v1"
     is_active: bool = True
     page_image_sha256: str
+    image_data: bytes | None = None  # 图像二进制数据
     source_metadata: SourceMetadata | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
