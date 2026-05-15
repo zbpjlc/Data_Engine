@@ -168,19 +168,61 @@
       "end_time": "2026-05-13 07:03:36",
       "elapsed_seconds": 43002.0
     },
+    "ingest_base_disk_abc": {
+      "task_id": "ingest_base_disk_abc",
+      "task_type": "ingest",
+      "source_id": "base_disk",
+      "batch_id": "abc",
+      "status": "completed",
+      "current": 9,
+      "total": 9,
+      "message": "成功处理 55 个样本",
+      "error_message": "",
+      "start_time": "2026-05-15 12:30:42",
+      "end_time": "2026-05-15 12:30:45",
+      "elapsed_seconds": 3.0
+    },
+    "embed_base_disk_abc": {
+      "task_id": "embed_base_disk_abc",
+      "task_type": "embed",
+      "source_id": "base_disk",
+      "batch_id": "abc",
+      "status": "completed",
+      "current": 55,
+      "total": 55,
+      "message": "成功提取 55 个样本的embedding",
+      "error_message": "",
+      "start_time": "2026-05-15 12:31:11",
+      "end_time": "2026-05-15 12:31:16",
+      "elapsed_seconds": 5.0
+    },
+    "cluster_base_disk_abc": {
+      "task_id": "cluster_base_disk_abc",
+      "task_type": "cluster",
+      "source_id": "base_disk",
+      "batch_id": "abc",
+      "status": "completed",
+      "current": 55,
+      "total": 55,
+      "message": "聚类完成: 6 簇, 轮廓系数 0.217",
+      "error_message": "",
+      "start_time": "2026-05-15 12:31:27",
+      "end_time": "2026-05-15 12:31:27",
+      "elapsed_seconds": 0.0
+    },
     "ingest_data_disk_金融数据": {
       "task_id": "ingest_data_disk_金融数据",
       "task_type": "ingest",
       "source_id": "data_disk",
       "batch_id": "金融数据",
       "status": "running",
-      "current": 13,
+      "current": 56,
       "total": 11588,
-      "message": "正在处理: 2020-02-28__方大特钢科技股份有限公司__600507__方大特钢__2019年__年度报告.pdf",
+      "message": "正在处理: 2020-03-10__瑞达期货股份有限公司__002961__瑞达期货__2019年__年度报告.pdf",
       "error_message": "",
-      "start_time": "2026-05-14 20:47:02",
+      "start_time": "2026-05-15 13:55:23",
       "end_time": null,
-      "elapsed_seconds": 534.9
+      "elapsed_seconds": 282.4
     }
   }
 }

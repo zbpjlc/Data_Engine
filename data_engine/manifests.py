@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import tempfile
 from datetime import datetime
 import json
 from pathlib import Path
@@ -57,6 +59,7 @@ _JSON_FIELDS = {
 
 def _record_to_arrow(record: dict) -> dict:
     """Convert a Python dict record to Arrow-compatible types."""
+    from enum import Enum
     row = {}
     for field in MANIFEST_SCHEMA:
         name = field.name
@@ -64,7 +67,6 @@ def _record_to_arrow(record: dict) -> dict:
         if name == "embedding":
             row[name] = val if val else None
         elif name == "image_data":
-            # binary data, pass through as-is (bytes or None)
             row[name] = val
         elif name in _JSON_FIELDS:
             row[name] = json.dumps(val, ensure_ascii=False) if val is not None else None
@@ -77,6 +79,8 @@ def _record_to_arrow(record: dict) -> dict:
                 row[name] = str(val)
         elif name == "is_active":
             row[name] = bool(val) if val is not None else True
+        elif isinstance(val, Enum):
+            row[name] = val.value
         else:
             row[name] = str(val) if val is not None else None
     return row
@@ -98,6 +102,16 @@ def _arrow_to_record(row: dict) -> dict:
             record[name] = bool(val) if val is not None else True
         elif name == "created_at":
             record[name] = val  # keep as string
+        elif name == "input_type":
+            # 兼容旧格式 "InputType.PDF" -> "pdf"
+            if val and "." in str(val):
+                val = str(val).split(".")[-1].lower()
+            record[name] = val
+        elif name == "stage_status":
+            # 兼容旧格式 "StageStatus.INGESTED" -> "ingested"
+            if val and "." in str(val):
+                val = str(val).split(".")[-1].lower()
+            record[name] = val
         else:
             record[name] = val
     return record
@@ -110,14 +124,67 @@ def _rows_to_table(rows: list[dict]) -> pa.Table:
     return pa.Table.from_pylist(rows, schema=MANIFEST_SCHEMA)
 
 
+def _supports_atomic_rename(path: Path) -> bool:
+    """Check if the filesystem supports atomic rename (POSIX)."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["stat", "-f", "-c", "%T", str(path)],
+            capture_output=True, text=True
+        )
+        fs_type = result.stdout.strip()
+        # exFAT/FAT32 不支持原子 rename
+        return fs_type not in ("exfat", "vfat", "fuseblk")
+    except Exception:
+        return True  # 默认假设支持
+
+
+def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite") -> None:
+    """Write Lance dataset. Detects filesystem and uses appropriate strategy."""
+    import sys
+    ensure_parent(target_path)
+
+    if _supports_atomic_rename(target_path.parent):
+        # ext4/NFS: 直接写入
+        lance.write_dataset(table, str(target_path), mode=mode)
+        return
+
+    # exFAT: 先写本地再 move
+    print(f"[Lance] 检测到非POSIX文件系统，使用fallback写入", file=sys.stderr)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="lance_tmp_"))
+    try:
+        tmp_lance = tmp_dir / "data.lance"
+        if mode == "append" and target_path.exists():
+            # 尝试读取已有数据合并，损坏则丢弃旧数据重写
+            try:
+                existing_ds = lance.dataset(str(target_path))
+                existing_table = existing_ds.to_table()
+                combined = pa.concat_tables([existing_table, table])
+                lance.write_dataset(combined, str(tmp_lance), mode="overwrite")
+            except Exception as e:
+                print(f"[Lance] 旧数据损坏({e})，丢弃重写", file=sys.stderr)
+                lance.write_dataset(table, str(tmp_lance), mode="overwrite")
+        else:
+            lance.write_dataset(table, str(tmp_lance), mode="overwrite")
+        if target_path.exists():
+            shutil.rmtree(target_path)
+        shutil.move(str(tmp_lance), str(target_path))
+    except Exception as e:
+        print(f"[Lance] 写入失败: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        raise
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def write_manifest(path: Path, records: list[dict]) -> None:
     """Write records to a Lance dataset (overwrite)."""
     if not records:
         return
-    ensure_parent(path)
     rows = [_record_to_arrow(r) for r in records]
     table = _rows_to_table(rows)
-    lance.write_dataset(table, str(path), mode="overwrite")
+    _safe_write_lance(table, path, mode="overwrite")
 
 
 def append_manifest(path: Path, records: list[dict]) -> None:
@@ -126,7 +193,7 @@ def append_manifest(path: Path, records: list[dict]) -> None:
         return
     rows = [_record_to_arrow(r) for r in records]
     table = _rows_to_table(rows)
-    lance.write_dataset(table, str(path), mode="append")
+    _safe_write_lance(table, path, mode="append")
 
 
 def read_manifest(path: Path) -> list[dict]:

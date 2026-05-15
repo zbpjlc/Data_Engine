@@ -173,13 +173,14 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
                         record = _ingest_image(input_path, batch_dir, source_id, category, batch_id)
                         new_records.append(record)
                     
-                    if len(new_records) > 0 and len(new_records) % batch_update_interval == 0:
+                    if len(new_records) >= batch_update_interval:
                         current_dicts = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
                         if manifest_path.exists():
                             append_manifest(manifest_path, current_dicts)
                         else:
                             write_manifest(manifest_path, current_dicts)
-                        print(f"已处理 {len(new_records)} 个样本，追加写入manifest", file=sys.stderr)
+                        print(f"已保存 {len(new_records)} 条记录到Lance", file=sys.stderr)
+                        new_records = []
                         
                         if progress_tracker.is_stopped(task_id):
                             print(f"[INGEST] 定期检查：收到停止信号", file=sys.stderr)
@@ -211,19 +212,18 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
         )
         raise
 
-    # 合并新旧记录并写入Lance
-    all_records: list[dict] = []
-    if manifest_path.exists() and new_records:
-        # 已有的记录通过append写入了，再读取全部用于stats计算
-        all_records = read_manifest(manifest_path)
-    elif new_records:
-        new_dicts = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
-        write_manifest(manifest_path, new_dicts)
-        all_records = new_dicts
-    else:
-        # 没有新记录，但可能已有旧的Lance数据
+    # 保存剩余未写入的记录
+    if new_records:
+        remaining_dicts = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
         if manifest_path.exists():
-            all_records = read_manifest(manifest_path)
+            append_manifest(manifest_path, remaining_dicts)
+        else:
+            write_manifest(manifest_path, remaining_dicts)
+
+    # 读取全部记录用于stats计算
+    all_records: list[dict] = []
+    if manifest_path.exists():
+        all_records = read_manifest(manifest_path)
 
     stats = _build_ingest_stats(all_records)
     write_json(artifacts_dir / "stats.json", stats)

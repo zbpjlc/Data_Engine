@@ -12,7 +12,7 @@ from starlette.requests import Request
 
 from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
 from data_engine.registry import SourceRegistry
-from data_engine.status import collect_global_status, format_status_report
+from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
 from data_engine.progress_tracker import progress_tracker
 
 
@@ -399,6 +399,7 @@ async def clear_ingest(source_id: str, batch_id: str = None):
             import traceback
             traceback.print_exc()
         
+        invalidate_status_cache()
         return {
             "message": f"已清除 {cleared_count} 个批次的INGEST数据和 {len(removed_tasks_info)} 个相关任务进度",
             "status": "cleared",
@@ -504,6 +505,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 task_id=task_id,
                                 message=f"成功提取 {len(updated_records)} 个样本的embedding"
                             )
+                        invalidate_status_cache()
                         
                         print(f"[Embedding后台线程] ✓ 批次 {batch.batch_id} embedding生成成功")
                         print(f"[Embedding后台线程]   - 已处理记录数: {len(updated_records)}")
@@ -606,6 +608,7 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                             task_id=task_id,
                             message=f"聚类完成: {stats.get('n_clusters', '?')} 簇, 轮廓系数 {stats.get('silhouette_score', 0):.3f}"
                         )
+                        invalidate_status_cache()
 
                     except Exception as e:
                         print(f"[聚类后台线程] ✗ 批次 {batch.batch_id} 聚类失败: {e}")

@@ -144,6 +144,7 @@ class SourceScanSummary(BaseModel):
     online: bool
     batch_count: int = 0
     manifest_count: int = 0
+    lance_version: int = 0
     last_scan_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -155,5 +156,6 @@ class BatchStatusSummary(BaseModel):
     sample_count: int = 0
     failed_count: int = 0
     pending_count: int = 0
+    lance_version: int = 0
     difficulty_histogram: dict[str, int] = Field(default_factory=dict)
     updated_at: datetime | None = None

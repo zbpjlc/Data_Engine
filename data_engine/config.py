@@ -6,19 +6,14 @@ from typing import Any
 import yaml
 
 
-_CONFIG: dict[str, Any] | None = None
 _CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 
 
 def load_config() -> dict[str, Any]:
-    global _CONFIG
-    if _CONFIG is None:
-        if _CONFIG_PATH.exists():
-            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-                _CONFIG = yaml.safe_load(f) or {}
-        else:
-            _CONFIG = {}
-    return _CONFIG
+    if _CONFIG_PATH.exists():
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
 
 
 def get_config(*keys: str, default: Any = None) -> Any:

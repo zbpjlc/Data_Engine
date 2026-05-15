@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,10 @@ from data_engine.registry import SourceRegistry
 
 STAGES_IN_ORDER = ["export", "refine", "cmcv", "element_sampling", "page_sampling", "ingest"]
 
+_STATUS_CACHE: GlobalStatus | None = None
+_STATUS_CACHE_TIME: float = 0
+_STATUS_CACHE_TTL: float = 30  # 缓存30秒
+
 
 @dataclass
 class GlobalStatus:
@@ -21,7 +26,19 @@ class GlobalStatus:
     batches: list[BatchStatusSummary]
 
 
-def collect_global_status(registry: SourceRegistry) -> GlobalStatus:
+def invalidate_status_cache() -> None:
+    """手动清除缓存（在 ingest/embed/cluster 完成后调用）"""
+    global _STATUS_CACHE, _STATUS_CACHE_TIME
+    _STATUS_CACHE = None
+    _STATUS_CACHE_TIME = 0
+
+
+def collect_global_status(registry: SourceRegistry, force_refresh: bool = False) -> GlobalStatus:
+    global _STATUS_CACHE, _STATUS_CACHE_TIME
+    now = time.time()
+    if not force_refresh and _STATUS_CACHE and (now - _STATUS_CACHE_TIME) < _STATUS_CACHE_TTL:
+        return _STATUS_CACHE
+    # ... existing code below
     source_summaries = registry.scan()
     batch_summaries: list[BatchStatusSummary] = []
     for source_summary in source_summaries:
@@ -37,7 +54,10 @@ def collect_global_status(registry: SourceRegistry) -> GlobalStatus:
             else:
                 for batch_dir in sorted(p for p in root.iterdir() if p.is_dir() and (p.name.startswith("batch_") or (p / ".engine_meta.yaml").exists())):
                     batch_summaries.append(_summarize_batch(source_summary.source_id, source_summary.category, batch_dir))
-    return GlobalStatus(sources=source_summaries, batches=batch_summaries)
+    result = GlobalStatus(sources=source_summaries, batches=batch_summaries)
+    _STATUS_CACHE = result
+    _STATUS_CACHE_TIME = time.time()
+    return result
 
 
 def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchStatusSummary:
@@ -53,6 +73,7 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
     updated_at = _parse_time(stats.get("updated_at"))
 
     ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
+    lance_version = 0
     if sample_count == 0 and ingest_manifest:
         if ingest_manifest.suffix == ".lance":
             try:
@@ -60,6 +81,14 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
             except Exception:
                 sample_count = 0
         pending_count = max(sample_count - _completed_count(stage_status, sample_count), 0)
+
+    if ingest_manifest and ingest_manifest.suffix == ".lance":
+        try:
+            import lance
+            ds = lance.dataset(str(ingest_manifest))
+            lance_version = ds.version
+        except Exception:
+            pass
 
     return BatchStatusSummary(
         source_id=source_id,
@@ -69,6 +98,7 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
         sample_count=sample_count,
         failed_count=failed_count,
         pending_count=pending_count,
+        lance_version=lance_version,
         difficulty_histogram=difficulty_histogram,
         updated_at=updated_at,
     )

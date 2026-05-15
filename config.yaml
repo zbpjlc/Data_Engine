@@ -1,6 +1,6 @@
 ingest:
-  batch_update_interval: 100   # 每N条记录保存一次
-  image_extensions:            # 支持的图片格式
+  batch_update_interval: 100000   # 每N条记录保存一次
+  image_extensions:              # 支持的图片格式
     - .jpg
     - .jpeg
     - .png

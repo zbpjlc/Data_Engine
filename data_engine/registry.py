@@ -54,12 +54,14 @@ class SourceRegistry:
         return source
 
     def scan(self) -> list[SourceScanSummary]:
+        import lance
         self.model = self._load()
         summaries: list[SourceScanSummary] = []
         for source in self.model.sources:
             online = False
             batch_count = 0
             manifest_count = 0
+            lance_version = 0
             categories = set()
             roots = source.root_paths()
             root_display = roots[0] if len(roots) == 1 else str(roots)
@@ -80,6 +82,13 @@ class SourceRegistry:
                     manifests_dir = batch_dir / "manifests"
                     if manifests_dir.exists():
                         manifest_count += len([p for p in manifests_dir.iterdir() if p.is_file()])
+                        lance_path = manifests_dir / "ingest.lance"
+                        if lance_path.exists():
+                            try:
+                                ds = lance.dataset(str(lance_path))
+                                lance_version = max(lance_version, ds.version)
+                            except Exception:
+                                pass
                     try:
                         batch_meta = BatchMetadata.from_batch_dir(batch_dir)
                         categories.add(batch_meta.category)
@@ -96,6 +105,7 @@ class SourceRegistry:
                     online=online,
                     batch_count=batch_count,
                     manifest_count=manifest_count,
+                    lance_version=lance_version,
                 )
             )
         return summaries
