@@ -1,5 +1,8 @@
+lance:
+  keep_versions: 5              # 每个Lance文件保留的历史版本数
+
 ingest:
-  batch_update_interval: 100000   # 每N条记录保存一次
+  batch_update_interval: 10000   # 每N条记录保存一次
   image_extensions:              # 支持的图片格式
     - .jpg
     - .jpeg

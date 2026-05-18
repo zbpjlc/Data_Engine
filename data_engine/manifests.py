@@ -139,6 +139,18 @@ def _supports_atomic_rename(path: Path) -> bool:
         return True  # 默认假设支持
 
 
+def _cleanup_lance_versions(target_path: Path) -> None:
+    """Keep only the most recent N versions of a Lance dataset."""
+    try:
+        from data_engine.config import get_config
+        keep = get_config("lance", "keep_versions", default=5)
+        if target_path.exists():
+            ds = lance.dataset(str(target_path))
+            ds.cleanup_old_versions(keep_versions=keep)
+    except Exception:
+        pass
+
+
 def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite") -> None:
     """Write Lance dataset. Detects filesystem and uses appropriate strategy."""
     import sys
@@ -147,6 +159,7 @@ def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite
     if _supports_atomic_rename(target_path.parent):
         # ext4/NFS: 直接写入
         lance.write_dataset(table, str(target_path), mode=mode)
+        _cleanup_lance_versions(target_path)
         return
 
     # exFAT: 先写本地再 move
@@ -169,6 +182,7 @@ def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite
         if target_path.exists():
             shutil.rmtree(target_path)
         shutil.move(str(tmp_lance), str(target_path))
+        _cleanup_lance_versions(target_path)
     except Exception as e:
         print(f"[Lance] 写入失败: {e}", file=sys.stderr)
         import traceback
