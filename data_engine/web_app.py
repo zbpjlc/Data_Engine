@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
+from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest, manifest_count
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
 from data_engine.progress_tracker import progress_tracker
@@ -222,7 +222,13 @@ async def start_ingest(source_id: str, batch_id: str = None):
             task_id = f"ingest_{source_id}_{batch_id}"
             existing = progress_tracker.get_task(task_id)
             if existing and existing.status.value in ["running", "pending"]:
-                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+                # 检查线程是否还活着，如果死了则标记为stopped
+                alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+                if task_id not in alive_threads:
+                    progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+                    print(f"[INGEST] 检测到线程 {task_id} 已终止，标记为stopped", file=__import__("sys").stderr)
+                else:
+                    return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
         
         print(f"\n========== 启动INGEST任务请求 ==========")
         print(f"source_id: '{source_id}' (类型: {type(source_id).__name__})")
@@ -269,7 +275,8 @@ async def start_ingest(source_id: str, batch_id: str = None):
         
         # 在后台线程中运行
         print(f"[主线程] 启动后台线程进行INGEST处理...")
-        thread = threading.Thread(target=execute_ingest_task)
+        task_id = f"ingest_{source_id}_{batch_id}"
+        thread = threading.Thread(target=execute_ingest_task, name=task_id)
         thread.daemon = True
         thread.start()
         print(f"[主线程] 后台线程已启动，立即返回响应")
@@ -437,7 +444,13 @@ async def start_embed(source_id: str, batch_id: str = None):
             task_id = f"embed_{source_id}_{batch_id}"
             existing = progress_tracker.get_task(task_id)
             if existing and existing.status.value in ["running", "pending"]:
-                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+                # 检查线程是否还活着，如果死了则标记为stopped
+                alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+                if task_id not in alive_threads:
+                    progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+                    print(f"[Embedding] 检测到线程 {task_id} 已终止，标记为stopped", file=__import__("sys").stderr)
+                else:
+                    return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
         
         print(f"\n========== 启动Embedding任务请求 ==========")
         print(f"source_id: '{source_id}' (类型: {type(source_id).__name__})")
@@ -477,8 +490,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                             print(f"[Embedding后台线程] ⚠ manifest文件不存在")
                             continue
                         
-                        # 读取现有记录
-                        records = read_manifest(manifest_path)
+                        # 使用 manifest_count 获取总数，避免读取全部数据导致 overflow
+                        total_count = manifest_count(manifest_path)
                         task_id = f"embed_{source_id}_{batch.batch_id}"
                         
                         # 开始任务
@@ -487,15 +500,64 @@ async def start_embed(source_id: str, batch_id: str = None):
                             task_type="embed",
                             source_id=source_id,
                             batch_id=batch.batch_id,
-                            total=len(records),
-                            message=f"开始提取 {len(records)} 个样本的embedding"
+                            total=total_count,
+                            message=f"开始提取 {total_count} 个样本的embedding"
                         )
                         
-                        # 提取embedding
-                        print(f"[Embedding后台线程] 开始提取 {len(records)} 个样本的embedding...")
-                        updated_records = extract_embeddings_for_records(records, batch_dir, task_id=task_id)
+                        # 分批读取和处理记录，避免 offset overflow
+                        import lance
+                        from data_engine.config import get_config
+                        ds = lance.dataset(str(manifest_path))
+                        chunk_size = get_config("embedding", "batch_update_interval", default=10000)
                         
-                        write_manifest(manifest_path, updated_records)
+                        # 查询已处理的 sample_id，支持断点续跑
+                        processed_ids = set()
+                        if manifest_path.exists():
+                            try:
+                                existing_ds = lance.dataset(str(manifest_path))
+                                id_table = existing_ds.to_table(columns=["sample_id", "embedding"])
+                                for i in range(id_table.num_rows):
+                                    if id_table.column("embedding")[i].as_py() is not None:
+                                        processed_ids.add(id_table.column("sample_id")[i].as_py())
+                            except Exception:
+                                pass
+                        
+                        print(f"[Embedding] 已有 {len(processed_ids)} 条记录含embedding，将跳过")
+                        
+                        for offset in range(0, total_count, chunk_size):
+                            if progress_tracker.is_stopped(task_id):
+                                print(f"[Embedding] 收到停止信号，已处理到第 {offset} 条", file=__import__("sys").stderr)
+                                progress_tracker.stop_task(task_id, f"用户停止，已处理 {offset}/{total_count} 个样本")
+                                break
+                            
+                            limit = min(chunk_size, total_count - offset)
+                            chunk_table = ds.to_table(offset=offset, limit=limit)
+                            chunk_records = []
+                            for i in range(chunk_table.num_rows):
+                                row = {col: chunk_table.column(col)[i].as_py() for col in chunk_table.column_names}
+                                chunk_records.append(row)
+                            
+                            # 跳过已处理的记录
+                            records_to_process = [r for r in chunk_records if r.get("sample_id") not in processed_ids]
+                            if not records_to_process:
+                                print(f"[Embedding] 跳过第 {offset+1}-{offset+len(chunk_records)} 条（已处理）")
+                                continue
+                            
+                            print(f"[Embedding] 处理第 {offset+1}-{offset+len(chunk_records)} 条，需处理 {len(records_to_process)} 条...")
+                            updated_chunk = extract_embeddings_for_records(records_to_process, batch_dir, task_id=task_id)
+                            
+                            # 分批写入，支持暂停续跑
+                            if manifest_path.exists() and offset > 0:
+                                from data_engine.manifests import append_manifest
+                                append_manifest(manifest_path, updated_chunk)
+                            else:
+                                write_manifest(manifest_path, updated_chunk)
+                            
+                            # 更新已处理集合
+                            for r in updated_chunk:
+                                processed_ids.add(r.get("sample_id"))
+                            
+                            print(f"[Embedding] 已写入 {len(updated_chunk)} 条记录")
                         
                         task_obj = progress_tracker.get_task(task_id)
                         if task_obj and task_obj.status.value == "stopped":
@@ -503,12 +565,12 @@ async def start_embed(source_id: str, batch_id: str = None):
                         else:
                             progress_tracker.complete_task(
                                 task_id=task_id,
-                                message=f"成功提取 {len(updated_records)} 个样本的embedding"
+                                message=f"成功提取embedding，共 {len(processed_ids)} 条"
                             )
                         invalidate_status_cache()
                         
                         print(f"[Embedding后台线程] ✓ 批次 {batch.batch_id} embedding生成成功")
-                        print(f"[Embedding后台线程]   - 已处理记录数: {len(updated_records)}")
+                        print(f"[Embedding后台线程]   - 已处理记录数: {len(processed_ids)}")
                         
                     except Exception as e:
                         print(f"[Embedding后台线程] ✗ 批次 {batch.batch_id} embedding生成失败: {e}")
@@ -526,7 +588,8 @@ async def start_embed(source_id: str, batch_id: str = None):
         
         # 在后台线程中运行
         print(f"[主线程] 启动后台线程进行Embedding处理...")
-        thread = threading.Thread(target=execute_embed_task)
+        task_id = f"embed_{source_id}_{batch_id}"
+        thread = threading.Thread(target=execute_embed_task, name=task_id)
         thread.daemon = True
         thread.start()
         print(f"[主线程] 后台线程已启动，立即返回响应")
@@ -566,6 +629,19 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
     """启动聚类任务"""
     try:
         import threading
+        
+        # 检查是否已有运行中的任务
+        if batch_id:
+            task_id = f"cluster_{source_id}_{batch_id}"
+            existing = progress_tracker.get_task(task_id)
+            if existing and existing.status.value in ["running", "pending"]:
+                # 检查线程是否还活着，如果死了则标记为stopped
+                alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+                if task_id not in alive_threads:
+                    progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+                    print(f"[Cluster] 检测到线程 {task_id} 已终止，标记为stopped", file=__import__("sys").stderr)
+                else:
+                    return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
 
         def execute_cluster_task():
             try:
@@ -624,7 +700,8 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                 import traceback
                 traceback.print_exc()
 
-        thread = threading.Thread(target=execute_cluster_task)
+        task_id = f"cluster_{source_id}_{batch_id}"
+        thread = threading.Thread(target=execute_cluster_task, name=task_id)
         thread.daemon = True
         thread.start()
 

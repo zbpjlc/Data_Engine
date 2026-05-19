@@ -82,13 +82,15 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
             print(f"查询manifest失败: {e}", file=sys.stderr)
 
     # 扫描所有输入文件（只统计需要处理的文件类型，只扫描原始输入目录）
+    raw_input_dir = batch_dir / "raw_input"
+    ref_dir = raw_input_dir if raw_input_dir.exists() else batch_dir
+    
     if stored_input_files:
         # 使用存储的文件列表，确保分母一致
         input_files = [Path(f) for f in stored_input_files]
         print(f"使用存储的输入文件列表: {len(input_files)} 个文件", file=sys.stderr)
     else:
         # 扫描并存储输入文件列表（只扫描raw_input目录）
-        raw_input_dir = batch_dir / "raw_input"
         if raw_input_dir.exists():
             input_files = sorted(p for p in raw_input_dir.rglob("*") 
                                if p.is_file() 
@@ -111,7 +113,14 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
             print(f"存储文件列表失败: {e}", file=sys.stderr)
     
     # 过滤出需要处理的文件（跳过已处理的）
-    files_to_process = [f for f in input_files if str(f) not in processed_files]
+    # 需要将 input_files 转为相对路径再与 processed_files 比较
+    def _to_relative(p: Path) -> str:
+        try:
+            return p.relative_to(ref_dir).as_posix()
+        except ValueError:
+            return str(p)
+    
+    files_to_process = [f for f in input_files if _to_relative(f) not in processed_files]
     
     skipped_count = len(input_files) - len(files_to_process)
     if skipped_count > 0:
@@ -220,12 +229,20 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
         else:
             write_manifest(manifest_path, remaining_dicts)
 
-    # 读取全部记录用于stats计算
+    # 读取记录用于stats计算
     all_records: list[dict] = []
+    total_samples = 0
     if manifest_path.exists():
-        all_records = read_manifest(manifest_path)
+        # 使用 manifest_count 获取准确的总数（避免读取全部数据导致 overflow）
+        total_samples = manifest_count(manifest_path)
+        # 只读取部分记录用于统计详情（input_type等）
+        try:
+            all_records = read_manifest(manifest_path)
+        except Exception:
+            # 读取失败时只用总数
+            all_records = []
 
-    stats = _build_ingest_stats(all_records)
+    stats = _build_ingest_stats(all_records, total_samples=total_samples)
     write_json(artifacts_dir / "stats.json", stats)
 
     # 返回UnifiedSampleRecord格式
@@ -458,9 +475,11 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _build_ingest_stats(records: list[dict | UnifiedSampleRecord]) -> dict[str, Any]:
+def _build_ingest_stats(records: list[dict | UnifiedSampleRecord], total_samples: int | None = None) -> dict[str, Any]:
     """构建统计信息，支持dict和UnifiedSampleRecord对象"""
-    total_samples = len(records)
+    # 如果提供了 total_samples 则使用它，否则用 records 长度
+    if total_samples is None:
+        total_samples = len(records)
     valid_samples = 0
     pdf_count = 0
     image_count = 0
@@ -481,6 +500,10 @@ def _build_ingest_stats(records: list[dict | UnifiedSampleRecord]) -> dict[str, 
             pdf_count += 1
         elif input_type == "image" or input_type == InputType.IMAGE:
             image_count += 1
+    
+    # 如果 records 为空，valid_samples 用 total_samples
+    if not records and total_samples:
+        valid_samples = total_samples
     
     return {
         "updated_at": __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat() + "Z",

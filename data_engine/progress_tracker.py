@@ -252,3 +252,9 @@ class ProgressTracker:
 progress_tracker = ProgressTracker()
 # 加载已有状态
 progress_tracker._load_state()
+# 服务器重启后，将所有running状态改为stopped
+for task_id, task in progress_tracker.tasks.items():
+    if task.status == TaskStatus.RUNNING:
+        task.status = TaskStatus.STOPPED
+        task.message = "服务器重启，任务已停止"
+progress_tracker._save_state()

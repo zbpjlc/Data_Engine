@@ -16,36 +16,36 @@ from pydantic import BaseModel
 # ─── Lance schema for ingest manifest ──────────────────────────────────────────
 
 MANIFEST_SCHEMA = pa.schema([
-    pa.field("sample_id", pa.string(), nullable=False),
-    pa.field("source_id", pa.string(), nullable=False),
-    pa.field("category", pa.string(), nullable=False),
-    pa.field("batch_id", pa.string(), nullable=False),
-    pa.field("input_type", pa.string(), nullable=False),
-    pa.field("original_ext", pa.string(), nullable=False),
-    pa.field("page_id", pa.string(), nullable=False),
-    pa.field("task_type", pa.string(), nullable=False),
-    pa.field("relative_path", pa.string(), nullable=False),
-    pa.field("page_image", pa.string(), nullable=False),
-    pa.field("block_list", pa.string(), nullable=False),        # JSON string
-    pa.field("reading_order", pa.string(), nullable=False),      # JSON string
-    pa.field("table_structure", pa.string(), nullable=True),     # JSON string or null
-    pa.field("formula_spans", pa.string(), nullable=False),      # JSON string
-    pa.field("text_spans", pa.string(), nullable=False),         # JSON string
-    pa.field("bbox", pa.string(), nullable=True),                # JSON string or null
-    pa.field("cluster_id", pa.string(), nullable=True),
-    pa.field("difficulty", pa.string(), nullable=True),
-    pa.field("annotation_source", pa.string(), nullable=True),
-    pa.field("stage_status", pa.string(), nullable=False),
-    pa.field("process_log", pa.string(), nullable=False),        # JSON string
-    pa.field("data_version", pa.string(), nullable=False),
+    pa.field("sample_id", pa.large_string(), nullable=False),
+    pa.field("source_id", pa.large_string(), nullable=False),
+    pa.field("category", pa.large_string(), nullable=False),
+    pa.field("batch_id", pa.large_string(), nullable=False),
+    pa.field("input_type", pa.large_string(), nullable=False),
+    pa.field("original_ext", pa.large_string(), nullable=False),
+    pa.field("page_id", pa.large_string(), nullable=False),
+    pa.field("task_type", pa.large_string(), nullable=False),
+    pa.field("relative_path", pa.large_string(), nullable=False),
+    pa.field("page_image", pa.large_string(), nullable=False),
+    pa.field("block_list", pa.large_string(), nullable=False),        # JSON string
+    pa.field("reading_order", pa.large_string(), nullable=False),      # JSON string
+    pa.field("table_structure", pa.large_string(), nullable=True),     # JSON string or null
+    pa.field("formula_spans", pa.large_string(), nullable=False),      # JSON string
+    pa.field("text_spans", pa.large_string(), nullable=False),         # JSON string
+    pa.field("bbox", pa.large_string(), nullable=True),                # JSON string or null
+    pa.field("cluster_id", pa.large_string(), nullable=True),
+    pa.field("difficulty", pa.large_string(), nullable=True),
+    pa.field("annotation_source", pa.large_string(), nullable=True),
+    pa.field("stage_status", pa.large_string(), nullable=False),
+    pa.field("process_log", pa.large_string(), nullable=False),        # JSON string
+    pa.field("data_version", pa.large_string(), nullable=False),
     pa.field("embedding", pa.list_(pa.float32()), nullable=True),
-    pa.field("schema_version", pa.string(), nullable=False),
-    pa.field("threshold_version", pa.string(), nullable=False),
+    pa.field("schema_version", pa.large_string(), nullable=False),
+    pa.field("threshold_version", pa.large_string(), nullable=False),
     pa.field("is_active", pa.bool_(), nullable=False),
-    pa.field("page_image_sha256", pa.string(), nullable=False),
-    pa.field("image_data", pa.binary(), nullable=True),            # image bytes
-    pa.field("source_metadata", pa.string(), nullable=True),     # JSON string or null
-    pa.field("created_at", pa.string(), nullable=True),
+    pa.field("page_image_sha256", pa.large_string(), nullable=False),
+    pa.field("image_data", pa.large_binary(), nullable=True),            # image bytes
+    pa.field("source_metadata", pa.large_string(), nullable=True),     # JSON string or null
+    pa.field("created_at", pa.large_string(), nullable=True),
 ])
 
 # Fields that are stored as JSON strings in Lance but as dicts/lists in Python
@@ -151,14 +151,38 @@ def _cleanup_lance_versions(target_path: Path) -> None:
         pass
 
 
+def _parse_size(size_str: str | None) -> int | None:
+    """Parse size string like '2GB', '500MB' to bytes."""
+    if not size_str:
+        return None
+    size_str = str(size_str).strip().upper()
+    units = {"GB": 1024**3, "MB": 1024**2, "KB": 1024, "B": 1}
+    for suffix, multiplier in units.items():
+        if size_str.endswith(suffix):
+            try:
+                return int(float(size_str[:-len(suffix)]) * multiplier)
+            except ValueError:
+                return None
+    try:
+        return int(size_str)
+    except ValueError:
+        return None
+
+
 def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite") -> None:
     """Write Lance dataset. Detects filesystem and uses appropriate strategy."""
     import sys
+    from data_engine.config import get_config
     ensure_parent(target_path)
+    
+    max_bytes = _parse_size(get_config("lance", "max_file_size", default=None))
+    write_kwargs = {"mode": mode}
+    if max_bytes:
+        write_kwargs["max_bytes_per_file"] = max_bytes
 
     if _supports_atomic_rename(target_path.parent):
         # ext4/NFS: 直接写入
-        lance.write_dataset(table, str(target_path), mode=mode)
+        lance.write_dataset(table, str(target_path), **write_kwargs)
         _cleanup_lance_versions(target_path)
         return
 
@@ -173,12 +197,12 @@ def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite
                 existing_ds = lance.dataset(str(target_path))
                 existing_table = existing_ds.to_table()
                 combined = pa.concat_tables([existing_table, table])
-                lance.write_dataset(combined, str(tmp_lance), mode="overwrite")
+                lance.write_dataset(combined, str(tmp_lance), **{**write_kwargs, "mode": "overwrite"})
             except Exception as e:
                 print(f"[Lance] 旧数据损坏({e})，丢弃重写", file=sys.stderr)
-                lance.write_dataset(table, str(tmp_lance), mode="overwrite")
+                lance.write_dataset(table, str(tmp_lance), **{**write_kwargs, "mode": "overwrite"})
         else:
-            lance.write_dataset(table, str(tmp_lance), mode="overwrite")
+            lance.write_dataset(table, str(tmp_lance), **{**write_kwargs, "mode": "overwrite"})
         if target_path.exists():
             shutil.rmtree(target_path)
         shutil.move(str(tmp_lance), str(target_path))
@@ -210,12 +234,17 @@ def append_manifest(path: Path, records: list[dict]) -> None:
     _safe_write_lance(table, path, mode="append")
 
 
-def read_manifest(path: Path) -> list[dict]:
-    """Read all records from a Lance dataset."""
+def read_manifest(path: Path, columns: list[str] | None = None) -> list[dict]:
+    """Read records from a Lance dataset.
+    
+    Args:
+        path: Path to the Lance dataset
+        columns: List of column names to read. If None, reads all columns.
+    """
     if not path.exists():
         return []
     ds = lance.dataset(str(path))
-    table = ds.to_table()
+    table = ds.to_table(columns=columns)
     records = []
     for i in range(table.num_rows):
         row = {col: table.column(col)[i].as_py() for col in table.column_names}
