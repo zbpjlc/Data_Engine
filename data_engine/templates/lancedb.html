@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Engine - LanceData</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen">
+        <header class="bg-white shadow-sm border-b">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="flex justify-between items-center py-4">
+                    <h1 class="text-2xl font-bold text-gray-900">Data Engine Console</h1>
+                    <nav class="flex space-x-4">
+                        <a href="/" class="text-gray-600 hover:text-blue-600">数据地图</a>
+                        <a href="/data-filter" class="text-gray-600 hover:text-blue-600">数据筛选</a>
+                        <a href="/hard-case-review" class="text-gray-600 hover:text-blue-600">Hard Case复核</a>
+                        <a href="/qa-sampling" class="text-gray-600 hover:text-blue-600">QA抽检</a>
+                        <a href="/lancedb" class="text-blue-600 font-medium">LanceData</a>
+                    </nav>
+                </div>
+            </div>
+        </header>
+
+        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <!-- Dataset Selector -->
+            <div class="bg-white rounded-lg shadow mb-6 p-4">
+                <div class="flex flex-wrap items-center gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 mb-1">批次</label>
+                        <select id="batch-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[280px]">
+                            <option value="">选择批次...</option>
+                        </select>
+                    </div>
+                    <div id="version-wrapper" class="hidden">
+                        <label class="block text-xs font-medium text-gray-500 mb-1">版本</label>
+                        <select id="version-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[180px]">
+                        </select>
+                    </div>
+                    <div class="flex-1">
+                        <label class="block text-xs font-medium text-gray-500 mb-1">搜索</label>
+                        <div class="flex gap-2">
+                            <select id="search-column" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                <option value="">全列</option>
+                            </select>
+                            <input id="search-input" type="text" placeholder="搜索关键词..."
+                                class="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <button onclick="loadData()" class="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700">查询</button>
+                        </div>
+                    </div>
+                    <div id="info-badge" class="text-sm text-gray-500 self-end pb-2 hidden"></div>
+                </div>
+                <!-- Column filter -->
+                <div id="column-filter" class="mt-3 hidden">
+                    <label class="block text-xs font-medium text-gray-500 mb-1">显示列</label>
+                    <div id="column-checkboxes" class="flex flex-wrap gap-x-4 gap-y-1"></div>
+                </div>
+            </div>
+
+            <!-- Data Table -->
+            <div class="bg-white rounded-lg shadow">
+                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                    <h2 class="text-lg font-semibold text-gray-900">Lance Data Viewer</h2>
+                    <div id="pagination-info" class="text-sm text-gray-500"></div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead id="table-head" class="bg-gray-50">
+                            <tr><th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">请先选择批次</th></tr>
+                        </thead>
+                        <tbody id="table-body" class="bg-white divide-y divide-gray-200">
+                            <tr><td class="px-4 py-8 text-center text-gray-400">请选择批次加载数据</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <!-- Pagination -->
+                <div id="pagination" class="px-6 py-4 border-t border-gray-200 flex items-center justify-between hidden">
+                    <div class="flex items-center gap-2">
+                        <button id="btn-prev" onclick="goPage(currentPage-1)" class="px-3 py-1 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50" disabled>上一页</button>
+                        <span id="page-label" class="text-sm text-gray-600"></span>
+                        <button id="btn-next" onclick="goPage(currentPage+1)" class="px-3 py-1 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50" disabled>下一页</button>
+                    </div>
+                    <div class="flex items-center gap-2 text-sm text-gray-500">
+                        <label>每页</label>
+                        <select id="page-size" onchange="changePageSize()" class="px-2 py-1 border border-gray-300 rounded text-sm">
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                        <label>条</label>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let allSources = [];
+        let currentPage = 1;
+        let totalPages = 1;
+        let selectedColumns = [];
+
+        async function init() {
+            try {
+                const res = await fetch('/api/lancedb/sources');
+                const data = await res.json();
+                allSources = data.sources || [];
+                const sel = document.getElementById('batch-select');
+                sel.innerHTML = '<option value="">选择批次...</option>';
+                allSources.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = `${s.source_id}/${s.batch_id}`;
+                    opt.textContent = `${s.source_id} / ${s.batch_id}  (${s.category}, ${s.sample_count}条, ${s.stage_status})`;
+                    sel.appendChild(opt);
+                });
+                sel.addEventListener('change', onBatchChange);
+            } catch (e) {
+                console.error('Failed to load sources:', e);
+            }
+        }
+
+        function onBatchChange() {
+            const val = document.getElementById('batch-select').value;
+            if (!val) {
+                document.getElementById('version-wrapper').classList.add('hidden');
+                document.getElementById('column-filter').classList.add('hidden');
+                document.getElementById('pagination').classList.add('hidden');
+                document.getElementById('table-head').innerHTML = '<tr><th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">请先选择批次</th></tr>';
+                document.getElementById('table-body').innerHTML = '<tr><td class="px-4 py-8 text-center text-gray-400">请选择批次加载数据</td></tr>';
+                document.getElementById('info-badge').classList.add('hidden');
+                return;
+            }
+            const [sourceId, batchId] = val.split('/');
+            const src = allSources.find(s => s.source_id === sourceId && s.batch_id === batchId);
+            if (!src) return;
+
+            // Populate version selector
+            const verSel = document.getElementById('version-select');
+            verSel.innerHTML = '';
+            (src.versions || []).forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.version;
+                const ts = v.timestamp ? v.timestamp.substring(0, 19).replace('T', ' ') : '';
+                opt.textContent = `v${v.version}  (${v.num_rows}行, ${ts})`;
+                if (v.version === src.current_version) opt.selected = true;
+                verSel.appendChild(opt);
+            });
+            document.getElementById('version-wrapper').classList.remove('hidden');
+
+            selectedColumns = src.columns.slice(0, 8);
+            const colDiv = document.getElementById('column-checkboxes');
+            colDiv.innerHTML = '';
+            src.columns.forEach(col => {
+                const label = document.createElement('label');
+                label.className = 'flex items-center gap-1 text-xs text-gray-600 cursor-pointer';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.value = col;
+                cb.checked = selectedColumns.includes(col);
+                cb.className = 'column-cb';
+                cb.addEventListener('change', onColumnToggle);
+                label.appendChild(cb);
+                label.appendChild(document.createTextNode(' ' + col));
+                colDiv.appendChild(label);
+            });
+            document.getElementById('column-filter').classList.remove('hidden');
+
+            const sc = document.getElementById('search-column');
+            sc.innerHTML = '<option value="">全列</option>';
+            src.columns.forEach(col => {
+                const opt = document.createElement('option');
+                opt.value = col;
+                opt.textContent = col;
+                sc.appendChild(opt);
+            });
+
+            currentPage = 1;
+            loadData();
+        }
+
+        function onColumnToggle() {
+            selectedColumns = Array.from(document.querySelectorAll('.column-cb:checked')).map(cb => cb.value);
+            if (selectedColumns.length === 0) return;
+            loadData();
+        }
+
+        async function loadData() {
+            const val = document.getElementById('batch-select').value;
+            if (!val) return;
+            const [sourceId, batchId] = val.split('/');
+            const search = document.getElementById('search-input').value.trim();
+            const searchCol = document.getElementById('search-column').value;
+            const pageSize = document.getElementById('page-size').value;
+            const version = document.getElementById('version-select').value;
+
+            let url = `/api/lancedb/${sourceId}/${batchId}/data?page=${currentPage}&page_size=${pageSize}`;
+            if (version) url += `&version=${version}`;
+            if (selectedColumns.length > 0) {
+                url += `&columns=${encodeURIComponent(selectedColumns.join(','))}`;
+            }
+            if (search) {
+                url += `&search=${encodeURIComponent(search)}`;
+                if (searchCol) url += `&search_col=${encodeURIComponent(searchCol)}`;
+            }
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                renderTable(data);
+            } catch (e) {
+                console.error('Failed to load data:', e);
+            }
+        }
+
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '<span class="text-gray-400">NULL</span>';
+            const s = String(str);
+            if (s.length > 200) return s.substring(0, 200) + '...';
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function renderTable(data) {
+            totalPages = data.total_pages || 1;
+            const columns = data.columns || [];
+            const rows = data.data || [];
+
+            // Header
+            const thead = document.getElementById('table-head');
+            thead.innerHTML = '<tr>' +
+                '<th class="px-3 py-2 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">#</th>' +
+                columns.map(c => `<th class="px-3 py-2 text-xs font-medium text-gray-500 uppercase whitespace-nowrap cursor-pointer hover:text-blue-600" onclick="sortByColumn('${c}')" title="${c}">${c}</th>`).join('') +
+                '</tr>';
+
+            // Body
+            const tbody = document.getElementById('table-body');
+            if (rows.length === 0) {
+                tbody.innerHTML = '<tr><td class="px-4 py-8 text-center text-gray-400" colspan="' + (columns.length + 1) + '">无数据</td></tr>';
+            } else {
+                const startIdx = (data.page - 1) * data.page_size;
+                tbody.innerHTML = rows.map((row, i) =>
+                    '<tr class="hover:bg-gray-50">' +
+                    '<td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">' + (startIdx + i + 1) + '</td>' +
+                    columns.map(col => {
+                        const val = row[col];
+                        let cls = 'px-3 py-2 text-sm text-gray-700 max-w-[300px] truncate';
+                        let display = escapeHtml(val);
+                        if (col === 'embedding' && Array.isArray(val)) {
+                            display = `<span class="text-blue-600 text-xs">[${val.length}维向量]</span>`;
+                        } else if (col === 'image_data' && typeof val === 'string' && val.startsWith('<')) {
+                            display = `<span class="text-purple-600 text-xs">${escapeHtml(val)}</span>`;
+                        } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+                            display = `<span class="text-xs text-gray-500">${escapeHtml(JSON.stringify(val))}</span>`;
+                        }
+                        return `<td class="${cls}" title="${escapeHtml(typeof val === 'object' ? JSON.stringify(val) : val)}">${display}</td>`;
+                    }).join('') +
+                    '</tr>'
+                ).join('');
+            }
+
+            // Pagination
+            document.getElementById('pagination').classList.remove('hidden');
+            document.getElementById('btn-prev').disabled = currentPage <= 1;
+            document.getElementById('btn-next').disabled = currentPage >= totalPages;
+            document.getElementById('page-label').textContent = `第 ${data.page} / ${totalPages} 页`;
+
+            // Info badge
+            const badge = document.getElementById('info-badge');
+            const verLabel = data.version ? ` (v${data.version})` : '';
+            badge.textContent = `共 ${data.total} 条${verLabel}`;
+            badge.classList.remove('hidden');
+        }
+
+        document.getElementById('version-select').addEventListener('change', function() {
+            currentPage = 1;
+            loadData();
+        });
+
+        function goPage(p) {
+            if (p < 1 || p > totalPages) return;
+            currentPage = p;
+            loadData();
+        }
+
+        function changePageSize() {
+            currentPage = 1;
+            loadData();
+        }
+
+        function sortByColumn(col) {
+            // Re-fetch with current search but this column as search column, just re-select it
+            const sc = document.getElementById('search-column');
+            sc.value = col;
+        }
+
+        document.getElementById('search-input').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                currentPage = 1;
+                loadData();
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>

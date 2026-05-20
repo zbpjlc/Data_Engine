@@ -37,6 +37,7 @@
                             <label class="block text-sm font-medium text-gray-700 mb-1">数据源</label>
                             <select id="cluster-source" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
                                 <option value="">选择数据源...</option>
+                                <option value="__all__">全部数据源</option>
                                 {% for source in sources %}
                                 <option value="{{ source.source_id }}">{{ source.source_id }} ({{ source.batch_count }} 批次)</option>
                                 {% endfor %}
@@ -210,8 +211,9 @@
             const sourceId = this.value;
             const batchSelect = document.getElementById('cluster-batch');
             batchSelect.innerHTML = '<option value="">全部批次</option>';
-            batchData.filter(b => b.source_id === sourceId).forEach(b => {
-                batchSelect.innerHTML += `<option value="${b.batch_id}">${b.batch_id} (${b.sample_count} 样本)</option>`;
+            const filtered = sourceId === '__all__' ? batchData : batchData.filter(b => b.source_id === sourceId);
+            filtered.forEach(b => {
+                batchSelect.innerHTML += `<option value="${b.batch_id}">${b.source_id}/${b.batch_id} (${b.sample_count} 样本)</option>`;
             });
         });
 
@@ -244,26 +246,33 @@
         function pollCluster(sourceId) {
             const interval = setInterval(() => {
                 fetch('/api/progress').then(r => r.json()).then(data => {
-                    const tasks = Object.values(data.tasks || {}).filter(t => t.source_id === sourceId && t.task_type === 'cluster');
-                    const task = tasks[tasks.length - 1];
-                    if (!task) return;
+                    let tasks = Object.values(data.tasks || {}).filter(t => t.task_type === 'cluster');
+                    if (sourceId !== '__all__') {
+                        tasks = tasks.filter(t => t.source_id === sourceId);
+                    }
+                    if (tasks.length === 0) return;
 
-                    const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
-                    document.getElementById('cluster-progress-msg').textContent = task.message;
+                    const totalAll = tasks.reduce((s, t) => s + (t.total || 0), 0);
+                    const currentAll = tasks.reduce((s, t) => s + (t.current || 0), 0);
+                    const pct = totalAll > 0 ? Math.round(currentAll / totalAll * 100) : 0;
+                    const running = tasks.filter(t => t.status === 'running');
+                    const failed = tasks.filter(t => t.status === 'failed');
+                    const lastMsg = tasks[tasks.length - 1].message;
+                    document.getElementById('cluster-progress-msg').textContent = `${lastMsg} (${tasks.length} 批次)`;
                     document.getElementById('cluster-progress-pct').textContent = pct + '%';
                     document.getElementById('cluster-progress-bar').style.width = pct + '%';
 
-                    if (task.status === 'completed') {
+                    if (running.length === 0 && failed.length === 0) {
                         clearInterval(interval);
                         document.getElementById('cluster-progress-bar').classList.remove('bg-purple-600');
                         document.getElementById('cluster-progress-bar').classList.add('bg-green-500');
                         loadClusterStats(sourceId);
                         resetClusterBtn();
-                    } else if (task.status === 'failed') {
+                    } else if (running.length === 0 && failed.length > 0) {
                         clearInterval(interval);
                         document.getElementById('cluster-progress-bar').classList.remove('bg-purple-600');
                         document.getElementById('cluster-progress-bar').classList.add('bg-red-500');
-                        document.getElementById('cluster-progress-msg').textContent = '失败: ' + task.error_message;
+                        document.getElementById('cluster-progress-msg').textContent = '失败: ' + failed[0].error_message;
                         resetClusterBtn();
                     }
                 }).catch(() => {});
@@ -282,7 +291,8 @@
             resultEmpty.classList.add('hidden');
             resultDiv.classList.remove('hidden');
 
-            fetch(`/api/filter-data?sources=${sourceId}&page_size=10000`)
+            let url = sourceId === '__all__' ? '/api/filter-data?page_size=10000' : `/api/filter-data?sources=${sourceId}&page_size=10000`;
+            fetch(url)
                 .then(r => r.json())
                 .then(data => {
                     const clusterCounts = {};
@@ -296,13 +306,20 @@
                     document.getElementById('stat-k').textContent = Object.keys(clusterCounts).filter(k => k !== 'N/A').length;
                     document.getElementById('stat-valid').textContent = valid + '/' + data.total;
 
-                    // 从progress获取轮廓系数
+                    // 从progress获取平均轮廓系数
                     fetch('/api/progress').then(r => r.json()).then(pd => {
-                        const tasks = Object.values(pd.tasks || {}).filter(t => t.source_id === sourceId && t.task_type === 'cluster' && t.status === 'completed');
+                        let tasks = Object.values(pd.tasks || {}).filter(t => t.task_type === 'cluster' && t.status === 'completed');
+                        if (sourceId !== '__all__') {
+                            tasks = tasks.filter(t => t.source_id === sourceId);
+                        }
                         if (tasks.length > 0) {
-                            const msg = tasks[tasks.length - 1].message;
-                            const match = msg.match(/轮廓系数 ([\d.]+)/);
-                            document.getElementById('stat-silhouette').textContent = match ? match[1] : '-';
+                            const scores = [];
+                            tasks.forEach(t => {
+                                const match = t.message.match(/轮廓系数 ([\d.]+)/);
+                                if (match) scores.push(parseFloat(match[1]));
+                            });
+                            const avg = scores.length > 0 ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(3) : '-';
+                            document.getElementById('stat-silhouette').textContent = avg;
                         }
                     });
 

@@ -40,9 +40,9 @@ async def dashboard(request: Request):
             for b in global_status.batches
         ]
         return templates.TemplateResponse(
+            request,
             "dashboard.html",
             {
-                "request": request,
                 "sources": global_status.sources,
                 "batches": global_status.batches,
                 "batches_json": batches_json,
@@ -104,9 +104,9 @@ async def data_filter(request: Request):
             for b in global_status.batches
         ]
         return templates.TemplateResponse(
+            request,
             "data_filter.html",
             {
-                "request": request,
                 "sources": global_status.sources,
                 "batches": global_status.batches,
                 "batches_json": batches_json,
@@ -629,13 +629,14 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
     """启动聚类任务"""
     try:
         import threading
-        
+
+        is_all = source_id == "__all__"
+
         # 检查是否已有运行中的任务
-        if batch_id:
+        if batch_id and not is_all:
             task_id = f"cluster_{source_id}_{batch_id}"
             existing = progress_tracker.get_task(task_id)
             if existing and existing.status.value in ["running", "pending"]:
-                # 检查线程是否还活着，如果死了则标记为stopped
                 alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
                 if task_id not in alive_threads:
                     progress_tracker.stop_task(task_id, "线程已终止，任务停止")
@@ -649,14 +650,19 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                 from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
 
                 global_status = collect_global_status(registry)
-                source_batches = [b for b in global_status.batches if b.source_id == source_id]
+                if is_all:
+                    source_batches = global_status.batches
+                else:
+                    source_batches = [b for b in global_status.batches if b.source_id == source_id]
                 if batch_id:
                     source_batches = [b for b in source_batches if b.batch_id == batch_id]
 
                 for batch in source_batches:
                     try:
-                        source = registry.get(source_id)
-                        batch_dir = source.resolve_batch_dir(batch.batch_id)
+                        bid = batch.batch_id
+                        s_id = batch.source_id
+                        source = registry.get(s_id)
+                        batch_dir = source.resolve_batch_dir(bid)
                         manifests_dir = batch_dir / "manifests"
                         manifest_path = find_stage_manifest(manifests_dir, "ingest")
 
@@ -664,13 +670,13 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                             continue
 
                         records = read_manifest(manifest_path)
-                        task_id = f"cluster_{source_id}_{batch.batch_id}"
+                        t_id = f"cluster_{s_id}_{bid}"
 
                         progress_tracker.start_task(
-                            task_id=task_id,
+                            task_id=t_id,
                             task_type="cluster",
-                            source_id=source_id,
-                            batch_id=batch.batch_id,
+                            source_id=s_id,
+                            batch_id=bid,
                             total=len(records),
                             message=f"开始对 {len(records)} 个样本聚类"
                         )
@@ -681,7 +687,7 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                         write_manifest(manifest_path, updated_records)
 
                         progress_tracker.complete_task(
-                            task_id=task_id,
+                            task_id=t_id,
                             message=f"聚类完成: {stats.get('n_clusters', '?')} 簇, 轮廓系数 {stats.get('silhouette_score', 0):.3f}"
                         )
                         invalidate_status_cache()
@@ -691,7 +697,7 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                         import traceback
                         traceback.print_exc()
                         progress_tracker.fail_task(
-                            task_id=f"cluster_{source_id}_{batch.batch_id}",
+                            task_id=f"cluster_{batch.source_id}_{batch.batch_id}",
                             error_message=str(e)
                         )
 
@@ -705,7 +711,8 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
         thread.daemon = True
         thread.start()
 
-        return {"message": f"已启动 {source_id} 的聚类任务", "status": "started"}
+        label = "全部数据源" if is_all else source_id
+        return {"message": f"已启动 {label} 的聚类任务", "status": "started"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -714,8 +721,9 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
 async def hard_case_review(request: Request):
     """Hard Case复核页面"""
     return templates.TemplateResponse(
+        request,
         "hard_case_review.html",
-        {"request": request}
+        {}
     )
 
 
@@ -723,9 +731,164 @@ async def hard_case_review(request: Request):
 async def qa_sampling(request: Request):
     """QA抽检页面"""
     return templates.TemplateResponse(
+        request,
         "qa_sampling.html",
-        {"request": request}
+        {}
     )
+
+
+@app.get("/lancedb")
+async def lancedb_view(request: Request):
+    """LanceData 页面"""
+    return templates.TemplateResponse(
+        request,
+        "lancedb.html",
+        {}
+    )
+
+
+@app.get("/api/lancedb/sources")
+async def lancedb_list_sources():
+    """列出所有有Lance数据的数据源和批次"""
+    try:
+        import lance
+        global_status = collect_global_status(registry)
+        result = []
+        for batch in global_status.batches:
+            source_config = registry.get(batch.source_id)
+            batch_dir = source_config.resolve_batch_dir(batch.batch_id)
+            manifests_dir = batch_dir / "manifests"
+            manifest_path = find_stage_manifest(manifests_dir, "ingest")
+            if manifest_path and manifest_path.suffix == ".lance" and manifest_path.exists():
+                try:
+                    ds = lance.dataset(str(manifest_path))
+                    schema_fields = [f.name for f in ds.schema]
+                    versions = []
+                    for v in ds.versions():
+                        ts = v.get("timestamp")
+                        versions.append({
+                            "version": v["version"],
+                            "timestamp": ts.isoformat() if ts else None,
+                            "num_rows": int(v.get("metadata", {}).get("total_rows", 0)),
+                        })
+                    result.append({
+                        "source_id": batch.source_id,
+                        "batch_id": batch.batch_id,
+                        "category": batch.category,
+                        "stage_status": batch.stage_status,
+                        "sample_count": batch.sample_count,
+                        "current_version": ds.version,
+                        "columns": schema_fields,
+                        "versions": versions,
+                    })
+                except Exception:
+                    pass
+        return {"sources": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/lancedb/{source_id}/{batch_id}/data")
+async def lancedb_query_data(
+    source_id: str,
+    batch_id: str,
+    page: int = 1,
+    page_size: int = 20,
+    columns: str = None,
+    search: str = None,
+    search_col: str = None,
+    version: int = None,
+):
+    """查询Lance数据"""
+    try:
+        import lance
+        global_status = collect_global_status(registry)
+        batch = next(
+            (b for b in global_status.batches if b.source_id == source_id and b.batch_id == batch_id),
+            None,
+        )
+        if not batch:
+            raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+
+        source_config = registry.get(source_id)
+        batch_dir = source_config.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+        if not manifest_path or manifest_path.suffix != ".lance":
+            raise HTTPException(status_code=404, detail="No Lance data found")
+
+        if version:
+            ds = lance.dataset(str(manifest_path)).checkout_version(version)
+        else:
+            ds = lance.dataset(str(manifest_path))
+        total = ds.count_rows()
+
+        select_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+        if select_cols and "sample_id" not in select_cols:
+            select_cols.append("sample_id")
+
+        schema_fields = [f.name for f in ds.schema]
+
+        if search and search_col and search_col in schema_fields:
+            safe_search = search.replace("'", "''")
+            try:
+                results = ds.to_table(
+                    columns=select_cols,
+                    filter=f"contains(cast({search_col} as string), '{safe_search}')",
+                )
+            except Exception:
+                results = ds.to_table(columns=select_cols)
+            total = results.num_rows
+
+            start = (page - 1) * page_size
+            end = min(start + page_size, total)
+            page_rows = []
+            for i in range(start, end):
+                row = {col: results.column(col)[i].as_py() for col in results.column_names}
+                for k, v in list(row.items()):
+                    if isinstance(v, bytes):
+                        row[k] = f"<{len(v)} bytes>"
+                page_rows.append(row)
+
+            return {
+                "columns": list(results.column_names),
+                "schema": schema_fields,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": (total + page_size - 1) // page_size,
+                "data": page_rows,
+                "version": ds.version,
+            }
+
+        start = (page - 1) * page_size
+        if start >= total:
+            page_rows = []
+        else:
+            limit = min(page_size, total - start)
+            results = ds.to_table(offset=start, limit=limit, columns=select_cols)
+            page_rows = []
+            for i in range(results.num_rows):
+                row = {col: results.column(col)[i].as_py() for col in results.column_names}
+                for k, v in list(row.items()):
+                    if isinstance(v, bytes):
+                        row[k] = f"<{len(v)} bytes>"
+                page_rows.append(row)
+
+        return {
+            "columns": select_cols or schema_fields,
+            "schema": schema_fields,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+            "data": page_rows,
+            "version": ds.version,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/progress")

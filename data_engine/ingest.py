@@ -205,29 +205,32 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
                     was_stopped = True
                     break
         
+        # 保存剩余未写入的记录
+        if new_records:
+            remaining_dicts = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
+            if manifest_path.exists():
+                append_manifest(manifest_path, remaining_dicts)
+            else:
+                write_manifest(manifest_path, remaining_dicts)
+
+        # 获取实际总记录数
+        total_samples_final = manifest_count(manifest_path) if manifest_path.exists() else 0
+
         # 完成任务（停止的不标记完成）
         if was_stopped:
-            progress_tracker.stop_task(task_id, f"用户停止，已处理 {len(new_records)} 个样本")
+            progress_tracker.stop_task(task_id, f"用户停止，已处理 {total_samples_final} 个样本")
         else:
             progress_tracker.complete_task(
                 task_id=task_id,
-                message=f"成功处理 {len(new_records)} 个样本"
+                message=f"成功处理 {total_samples_final} 个样本"
             )
-        
+    
     except Exception as e:
         progress_tracker.fail_task(
             task_id=task_id,
             error_message=str(e)
         )
         raise
-
-    # 保存剩余未写入的记录
-    if new_records:
-        remaining_dicts = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
-        if manifest_path.exists():
-            append_manifest(manifest_path, remaining_dicts)
-        else:
-            write_manifest(manifest_path, remaining_dicts)
 
     # 读取记录用于stats计算
     all_records: list[dict] = []
