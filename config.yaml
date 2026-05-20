@@ -21,6 +21,7 @@ ingest:
 embedding:
   model_name: google/siglip2-base-patch16-224
   batch_update_interval: 10000   # 每N条记录保存一次
+  progress_update_interval: 100  # 每N条记录更新一次进度到progress_state.json
 
 clustering:
   default_n_clusters: 5

@@ -511,24 +511,15 @@ async def start_embed(source_id: str, batch_id: str = None):
                         ds = lance.dataset(str(manifest_path))
                         chunk_size = get_config("embedding", "batch_update_interval", default=10000)
                         
-                        # 查询已处理的 sample_id，支持断点续跑
-                        # 只查询有 embedding 的记录，避免加载整个 embedding 列
-                        processed_ids = set()
-                        if manifest_path.exists():
-                            try:
-                                existing_ds = lance.dataset(str(manifest_path))
-                                filtered = existing_ds.to_table(
-                                    columns=["sample_id"],
-                                    filter="embedding IS NOT NULL"
-                                )
-                                for i in range(filtered.num_rows):
-                                    processed_ids.add(filtered.column("sample_id")[i].as_py())
-                            except Exception:
-                                pass
+                        # 用 count_rows 计算实际已处理数，作为续跑起点
+                        try:
+                            processed_count = ds.count_rows(filter="embedding IS NOT NULL")
+                            start_offset = (processed_count // chunk_size) * chunk_size
+                            print(f"[Embedding] 实际已有 {processed_count} 条记录含embedding，从 offset={start_offset} 开始")
+                        except Exception:
+                            start_offset = 0
                         
-                        print(f"[Embedding] 已有 {len(processed_ids)} 条记录含embedding，将跳过")
-                        
-                        for offset in range(0, total_count, chunk_size):
+                        for offset in range(start_offset, total_count, chunk_size):
                             if progress_tracker.is_stopped(task_id):
                                 print(f"[Embedding] 收到停止信号，已处理到第 {offset} 条", file=__import__("sys").stderr)
                                 progress_tracker.stop_task(task_id, f"用户停止，已处理 {offset}/{total_count} 个样本")
@@ -541,8 +532,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 row = {col: chunk_table.column(col)[i].as_py() for col in chunk_table.column_names}
                                 chunk_records.append(row)
                             
-                            # 跳过已处理的记录
-                            records_to_process = [r for r in chunk_records if r.get("sample_id") not in processed_ids]
+                            # 跳过已处理的记录（在当前 chunk 内检查）
+                            records_to_process = [r for r in chunk_records if r.get("embedding") is None]
                             if not records_to_process:
                                 print(f"[Embedding] 跳过第 {offset+1}-{offset+len(chunk_records)} 条（已处理）")
                                 continue
@@ -565,9 +556,13 @@ async def start_embed(source_id: str, batch_id: str = None):
                             ds.merge_insert("sample_id").when_matched_update_all().execute(update_table)
                             print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
                             
-                            # 更新已处理集合
-                            for sid in embedding_map:
-                                processed_ids.add(sid)
+                            # 更新进度到下一个 chunk 位置
+                            next_offset = offset + len(chunk_records)
+                            progress_tracker.update_progress(
+                                task_id=task_id,
+                                current=next_offset,
+                                message=f"已处理 {next_offset}/{total_count}"
+                            )
                         
                         task_obj = progress_tracker.get_task(task_id)
                         if task_obj and task_obj.status.value == "stopped":

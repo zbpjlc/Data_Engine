@@ -9,7 +9,8 @@ from modelscope import AutoModel, AutoProcessor
 from data_engine.config import get_config
 
 
-class CLIPEmbeddingExtractor:
+def _get_progress_interval() -> int:
+    return get_config("embedding", "progress_update_interval", default=100) CLIPEmbeddingExtractor:
     """SigLIP2图像embedding提取器"""
 
     def __init__(self, model_name: str | None = None):
@@ -99,13 +100,6 @@ def extract_embeddings_for_records(
             # 优先从 Lance 记录的 image_data 读取，否则从文件路径读取
             image_data = record.get("image_data")
 
-            if progress_tracker and task_id:
-                progress_tracker.update_progress(
-                    task_id=task_id,
-                    current=offset + idx + 1,
-                    message=f"处理第 {offset + idx + 1} 个样本"
-                )
-
             if image_data:
                 # 从二进制数据提取 embedding
                 embedding = extractor.extract_embedding_from_bytes(image_data)
@@ -124,11 +118,14 @@ def extract_embeddings_for_records(
                     updated_records.append(record)
 
             if progress_tracker and task_id:
-                progress_tracker.update_progress(
-                    task_id=task_id,
-                    current=offset + idx + 1,
-                    message=f"已处理 {offset + idx + 1} 个样本"
-                )
+                # 按配置间隔更新进度，减少IO开销
+                interval = _get_progress_interval()
+                if (idx + 1) % interval == 0 or idx == len(records) - 1:
+                    progress_tracker.update_progress(
+                        task_id=task_id,
+                        current=offset + idx + 1,
+                        message=f"已处理 {offset + idx + 1} 个样本"
+                    )
 
         except Exception as e:
             print(f"处理记录embedding失败 {record.get('sample_id')}: {e}", file=__import__("sys").stderr)
@@ -136,10 +133,11 @@ def extract_embeddings_for_records(
             updated_records.append(record)
 
             if progress_tracker and task_id:
-                progress_tracker.update_progress(
-                    task_id=task_id,
-                    current=offset + idx + 1,
-                    message=f"已处理 {offset + idx + 1} 个样本（含失败）"
-                )
+                if (idx + 1) % interval == 0 or idx == len(records) - 1:
+                    progress_tracker.update_progress(
+                        task_id=task_id,
+                        current=offset + idx + 1,
+                        message=f"已处理 {offset + idx + 1} 个样本（含失败）"
+                    )
 
     return updated_records
