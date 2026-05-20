@@ -84,7 +84,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "embed":
-        import sys
         import time
         
         source = registry.get(args.source_id)
@@ -143,7 +142,6 @@ def main(argv: list[str] | None = None) -> int:
             raise
 
     if args.command == "cluster":
-        import sys
         
         source = registry.get(args.source_id)
         batch_dir = Path(source.root_path) / args.batch

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import hashlib
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
-
+import time
+from tqdm import tqdm
+from data_engine.progress_tracker import progress_tracker
+from data_engine.models import BatchMetadata
 from data_engine.config import get_config
 from data_engine.hashing import sample_id_for_page, sha256_file
 from data_engine.manifests import (
@@ -32,12 +36,6 @@ class IngestResult:
 
 
 def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> IngestResult:
-    import sys
-    import time
-    from tqdm import tqdm
-    from data_engine.progress_tracker import progress_tracker
-    from data_engine.models import BatchMetadata
-    
     source = registry.get(source_id)
     batch_dir = source.resolve_batch_dir(batch_id)
     
@@ -473,7 +471,7 @@ def _scale(original: int | None, normalized: int | None) -> float | None:
 
 
 def _hash_text(text: str) -> str:
-    import hashlib
+    
 
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

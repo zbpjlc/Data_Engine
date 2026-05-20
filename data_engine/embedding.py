@@ -1,4 +1,5 @@
 import io
+import sys
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -10,7 +11,10 @@ from data_engine.config import get_config
 
 
 def _get_progress_interval() -> int:
-    return get_config("embedding", "progress_update_interval", default=100) CLIPEmbeddingExtractor:
+    return get_config("embedding", "progress_update_interval", default=100)
+
+
+class CLIPEmbeddingExtractor:
     """SigLIP2图像embedding提取器"""
 
     def __init__(self, model_name: str | None = None):
@@ -22,7 +26,6 @@ def _get_progress_interval() -> int:
 
     def _load_model(self) -> None:
         """加载SigLIP2模型"""
-        import sys
         print(f"加载模型: {self.model_name}", file=sys.stderr)
         self.model = AutoModel.from_pretrained(
             self.model_name, device_map="auto").eval()

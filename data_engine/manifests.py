@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from datetime import datetime
-import json
 from pathlib import Path
 from typing import Any, Iterable, Sequence
-
+import subprocess
 import pyarrow as pa
 import lance
-
+from enum import Enum
 from pydantic import BaseModel
-
+from data_engine.config import get_config
 
 # ─── Lance schema for ingest manifest ──────────────────────────────────────────
 
@@ -59,7 +59,6 @@ _JSON_FIELDS = {
 
 def _record_to_arrow(record: dict) -> dict:
     """Convert a Python dict record to Arrow-compatible types."""
-    from enum import Enum
     row = {}
     for field in MANIFEST_SCHEMA:
         name = field.name
@@ -127,7 +126,6 @@ def _rows_to_table(rows: list[dict]) -> pa.Table:
 def _supports_atomic_rename(path: Path) -> bool:
     """Check if the filesystem supports atomic rename (POSIX)."""
     try:
-        import subprocess
         result = subprocess.run(
             ["stat", "-f", "-c", "%T", str(path)],
             capture_output=True, text=True
@@ -142,7 +140,6 @@ def _supports_atomic_rename(path: Path) -> bool:
 def _cleanup_lance_versions(target_path: Path) -> None:
     """Keep only the most recent N versions of a Lance dataset."""
     try:
-        from data_engine.config import get_config
         keep = get_config("lance", "keep_versions", default=5)
         if target_path.exists():
             ds = lance.dataset(str(target_path))
@@ -171,8 +168,6 @@ def _parse_size(size_str: str | None) -> int | None:
 
 def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite") -> None:
     """Write Lance dataset. Detects filesystem and uses appropriate strategy."""
-    import sys
-    from data_engine.config import get_config
     ensure_parent(target_path)
     
     max_bytes = _parse_size(get_config("lance", "max_file_size", default=None))
@@ -209,7 +204,6 @@ def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite
         _cleanup_lance_versions(target_path)
     except Exception as e:
         print(f"[Lance] 写入失败: {e}", file=sys.stderr)
-        import traceback
         traceback.print_exc(file=sys.stderr)
         raise
     finally:

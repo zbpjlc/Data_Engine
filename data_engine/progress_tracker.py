@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import os
 import json
 import threading
 import time
@@ -202,7 +202,6 @@ class ProgressTracker:
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(state, f, ensure_ascii=False, indent=2, default=str)
                 f.flush()
-                import os
                 os.fsync(f.fileno())
             tmp_path.replace(self._file_path)
         except Exception:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
+
 
 from data_engine.models import SourceConfig, SourceRegistryModel, SourceScanSummary, BatchMetadata
 from data_engine.yaml_support import dump_yaml, load_yaml
@@ -54,7 +55,6 @@ class SourceRegistry:
         return source
 
     def scan(self) -> list[SourceScanSummary]:
-        import lance
         self.model = self._load()
         summaries: list[SourceScanSummary] = []
         for source in self.model.sources:

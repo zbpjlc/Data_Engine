@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+
 from data_engine.manifests import find_stage_manifest, read_json, manifest_count
 from data_engine.models import BatchStatusSummary, SourceScanSummary
 from data_engine.registry import SourceRegistry
@@ -76,7 +77,6 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
     lance_version = 0
     if ingest_manifest and ingest_manifest.suffix == ".lance":
         try:
-            import lance
             ds = lance.dataset(str(ingest_manifest))
             lance_version = ds.version
             # 用 lance 实际行数校验 sample_count，不一致时以 lance 为准
@@ -106,7 +106,6 @@ def _detect_stage_status(manifests_dir: Path) -> str:
     if ingest_manifest:
         if ingest_manifest.suffix == ".lance":
             try:
-                import lance
                 ds = lance.dataset(str(ingest_manifest))
                 table = ds.to_table(limit=20)
                 sample_records = []

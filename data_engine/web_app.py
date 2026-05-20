@@ -3,19 +3,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-
+import shutil
+import pyarrow as pa
+import lance
+import threading
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
-
+from fastapi.responses import Response
 from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest, manifest_count
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
 from data_engine.progress_tracker import progress_tracker
-import threading
-
+from data_engine.config import get_config
 
 app = FastAPI(title="Data Engine Web Console", version="1.0.0")
 
@@ -216,7 +218,6 @@ async def get_hard_cases(batch_id: str):
 async def start_ingest(source_id: str, batch_id: str = None):
     """启动INGEST任务"""
     try:
-        import threading
         
         # 检查是否已有运行中的任务
         if batch_id:
@@ -266,12 +267,10 @@ async def start_ingest(source_id: str, batch_id: str = None):
                         print(f"[INGEST后台线程]   - 统计信息: {result.stats}")
                     except Exception as e:
                         print(f"[INGEST后台线程] ✗ 批次 {batch.batch_id} 处理失败: {e}")
-                        import traceback
                         traceback.print_exc()
                         
             except Exception as e:
                 print(f"[INGEST后台线程] ✗ INGEST任务执行失败: {e}")
-                import traceback
                 traceback.print_exc()
         
         # 在后台线程中运行
@@ -288,7 +287,6 @@ async def start_ingest(source_id: str, batch_id: str = None):
         }
     except Exception as e:
         print(f"启动INGEST API错误: {e}")
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -328,7 +326,6 @@ async def clear_ingest(source_id: str, batch_id: str = None):
                     fpath = batch_dir / "manifests" / fname
                     if fpath.exists():
                         if fpath.is_dir():
-                            import shutil
                             shutil.rmtree(fpath)
                         else:
                             fpath.unlink()
@@ -342,7 +339,6 @@ async def clear_ingest(source_id: str, batch_id: str = None):
                 
                 page_images_dir = batch_dir / "page_images"
                 if page_images_dir.exists():
-                    import shutil
                     shutil.rmtree(page_images_dir)
                     page_images_dir.mkdir(parents=True, exist_ok=True)
                     print(f"已清空: {page_images_dir}")
@@ -404,7 +400,6 @@ async def clear_ingest(source_id: str, batch_id: str = None):
             
         except Exception as e:
             print(f"[清除进度] ✗ 清除进度任务失败: {e}")
-            import traceback
             traceback.print_exc()
         
         invalidate_status_cache()
@@ -417,7 +412,6 @@ async def clear_ingest(source_id: str, batch_id: str = None):
         }
     except Exception as e:
         print(f"清除INGEST API错误: {e}")
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -438,7 +432,6 @@ async def restart_ingest(source_id: str):
 async def start_embed(source_id: str, batch_id: str = None):
     """启动embedding生成任务"""
     try:
-        import threading
         
         # 检查是否已有运行中的任务
         if batch_id:
@@ -506,10 +499,12 @@ async def start_embed(source_id: str, batch_id: str = None):
                         )
                         
                         # 分批读取和处理记录，避免 offset overflow
-                        import lance
-                        from data_engine.config import get_config
                         ds = lance.dataset(str(manifest_path))
                         chunk_size = get_config("embedding", "batch_update_interval", default=10000)
+                        
+                        # 创建一次 extractor，复用模型
+                        from data_engine.embedding import CLIPEmbeddingExtractor
+                        extractor = CLIPEmbeddingExtractor()
                         
                         # 用 count_rows 计算实际已处理数，作为续跑起点
                         try:
@@ -539,13 +534,12 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 continue
                             
                             print(f"[Embedding] 处理第 {offset+1}-{offset+len(chunk_records)} 条，需处理 {len(records_to_process)} 条...")
-                            updated_records = extract_embeddings_for_records(records_to_process, batch_dir, task_id=task_id, offset=offset)
+                            updated_records = extract_embeddings_for_records(records_to_process, batch_dir, extractor=extractor, task_id=task_id, offset=offset)
                             
                             # 构建 sample_id -> embedding 映射
                             embedding_map = {r["sample_id"]: r.get("embedding") for r in updated_records}
                             
                             # 用 Lance update 原地更新 embedding
-                            import pyarrow as pa
                             update_ids = list(embedding_map.keys())
                             update_embeddings = [embedding_map[sid] for sid in update_ids]
                             update_table = pa.table({
@@ -569,7 +563,6 @@ async def start_embed(source_id: str, batch_id: str = None):
                             print(f"[Embedding] 任务已停止，不标记完成", file=__import__("sys").stderr)
                         else:
                             # 统计实际成功的embedding数
-                            import lance
                             verify_ds = lance.dataset(str(manifest_path))
                             verify_table = verify_ds.to_table(columns=["embedding"])
                             actual_success = sum(
@@ -591,7 +584,6 @@ async def start_embed(source_id: str, batch_id: str = None):
                         
                     except Exception as e:
                         print(f"[Embedding后台线程] ✗ 批次 {batch.batch_id} embedding生成失败: {e}")
-                        import traceback
                         traceback.print_exc()
                         progress_tracker.fail_task(
                             task_id=f"embed_{source_id}_{batch.batch_id}",
@@ -600,7 +592,6 @@ async def start_embed(source_id: str, batch_id: str = None):
                         
             except Exception as e:
                 print(f"[Embedding后台线程] ✗ Embedding任务执行失败: {e}")
-                import traceback
                 traceback.print_exc()
         
         # 在后台线程中运行
@@ -617,7 +608,6 @@ async def start_embed(source_id: str, batch_id: str = None):
         }
     except Exception as e:
         print(f"启动Embedding API错误: {e}")
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -645,7 +635,6 @@ async def stop_task(source_id: str, batch_id: str = None):
 async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 5, auto_optimize: bool = True):
     """启动聚类任务"""
     try:
-        import threading
 
         is_all = source_id == "__all__"
 
@@ -711,7 +700,6 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
 
                     except Exception as e:
                         print(f"[聚类后台线程] ✗ 批次 {batch.batch_id} 聚类失败: {e}")
-                        import traceback
                         traceback.print_exc()
                         progress_tracker.fail_task(
                             task_id=f"cluster_{batch.source_id}_{batch.batch_id}",
@@ -720,7 +708,6 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
 
             except Exception as e:
                 print(f"[聚类后台线程] ✗ 聚类任务执行失败: {e}")
-                import traceback
                 traceback.print_exc()
 
         task_id = f"cluster_{source_id}_{batch_id}"
@@ -768,7 +755,6 @@ async def lancedb_view(request: Request):
 async def lancedb_list_sources():
     """列出所有有Lance数据的数据源和批次"""
     try:
-        import lance
         global_status = collect_global_status(registry)
         result = []
         for batch in global_status.batches:
@@ -818,7 +804,6 @@ async def lancedb_query_data(
 ):
     """查询Lance数据"""
     try:
-        import lance
         global_status = collect_global_status(registry)
         batch = next(
             (b for b in global_status.batches if b.source_id == source_id and b.batch_id == batch_id),
@@ -916,9 +901,6 @@ async def lancedb_query_data(
 async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, version: int = None):
     """获取样本图片"""
     try:
-        import lance
-        from fastapi.responses import Response
-
         source_config = registry.get(source_id)
         batch_dir = source_config.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
