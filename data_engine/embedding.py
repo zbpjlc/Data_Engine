@@ -74,7 +74,8 @@ def extract_embeddings_for_records(
     records: list[dict[str, Any]],
     batch_dir: Path,
     extractor: CLIPEmbeddingExtractor | None = None,
-    task_id: str | None = None
+    task_id: str | None = None,
+    offset: int = 0
 ) -> list[dict[str, Any]]:
     """为样本记录提取embedding"""
     if extractor is None:
@@ -101,8 +102,8 @@ def extract_embeddings_for_records(
             if progress_tracker and task_id:
                 progress_tracker.update_progress(
                     task_id=task_id,
-                    current=idx + 1,
-                    message=f"开始处理第 {idx + 1}/{len(records)} 个样本"
+                    current=offset + idx + 1,
+                    message=f"处理第 {offset + idx + 1} 个样本"
                 )
 
             if image_data:
@@ -125,8 +126,8 @@ def extract_embeddings_for_records(
             if progress_tracker and task_id:
                 progress_tracker.update_progress(
                     task_id=task_id,
-                    current=idx + 1,
-                    message=f"已处理 {idx + 1}/{len(records)} 个样本"
+                    current=offset + idx + 1,
+                    message=f"已处理 {offset + idx + 1} 个样本"
                 )
 
         except Exception as e:
@@ -137,8 +138,8 @@ def extract_embeddings_for_records(
             if progress_tracker and task_id:
                 progress_tracker.update_progress(
                     task_id=task_id,
-                    current=idx + 1,
-                    message=f"已处理 {idx + 1}/{len(records)} 个样本（含失败）"
+                    current=offset + idx + 1,
+                    message=f"已处理 {offset + idx + 1} 个样本（含失败）"
                 )
 
     return updated_records

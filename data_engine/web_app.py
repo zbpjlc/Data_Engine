@@ -548,7 +548,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 continue
                             
                             print(f"[Embedding] 处理第 {offset+1}-{offset+len(chunk_records)} 条，需处理 {len(records_to_process)} 条...")
-                            updated_records = extract_embeddings_for_records(records_to_process, batch_dir, task_id=task_id)
+                            updated_records = extract_embeddings_for_records(records_to_process, batch_dir, task_id=task_id, offset=offset)
                             
                             # 构建 sample_id -> embedding 映射
                             embedding_map = {r["sample_id"]: r.get("embedding") for r in updated_records}
