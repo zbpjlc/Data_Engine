@@ -544,28 +544,46 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 continue
                             
                             print(f"[Embedding] 处理第 {offset+1}-{offset+len(chunk_records)} 条，需处理 {len(records_to_process)} 条...")
-                            updated_chunk = extract_embeddings_for_records(records_to_process, batch_dir, task_id=task_id)
+                            updated_records = extract_embeddings_for_records(records_to_process, batch_dir, task_id=task_id)
                             
-                            # 分批写入，支持暂停续跑
-                            if manifest_path.exists() and offset > 0:
-                                from data_engine.manifests import append_manifest
-                                append_manifest(manifest_path, updated_chunk)
-                            else:
-                                write_manifest(manifest_path, updated_chunk)
+                            # 构建 sample_id -> embedding 映射
+                            embedding_map = {r["sample_id"]: r.get("embedding") for r in updated_records}
+                            
+                            # 用 Lance update 原地更新 embedding
+                            import pyarrow as pa
+                            update_ids = list(embedding_map.keys())
+                            update_embeddings = [embedding_map[sid] for sid in update_ids]
+                            update_table = pa.table({
+                                "sample_id": pa.array(update_ids, type=pa.large_string()),
+                                "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32())),
+                            })
+                            ds = lance.dataset(str(manifest_path))
+                            ds.merge(update_table, on="sample_id")
+                            print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
                             
                             # 更新已处理集合
-                            for r in updated_chunk:
-                                processed_ids.add(r.get("sample_id"))
-                            
-                            print(f"[Embedding] 已写入 {len(updated_chunk)} 条记录")
+                            for sid in embedding_map:
+                                processed_ids.add(sid)
                         
                         task_obj = progress_tracker.get_task(task_id)
                         if task_obj and task_obj.status.value == "stopped":
                             print(f"[Embedding] 任务已停止，不标记完成", file=__import__("sys").stderr)
                         else:
+                            # 统计实际成功的embedding数
+                            import lance
+                            verify_ds = lance.dataset(str(manifest_path))
+                            verify_table = verify_ds.to_table(columns=["embedding"])
+                            actual_success = sum(
+                                1 for i in range(verify_table.num_rows)
+                                if verify_table.column("embedding")[i].as_py() is not None
+                            )
+                            total_rows = verify_table.num_rows
+                            msg = f"完成: {actual_success}/{total_rows} 条成功"
+                            if actual_success == 0:
+                                msg += " (全部失败，请检查GPU显存)"
                             progress_tracker.complete_task(
                                 task_id=task_id,
-                                message=f"成功提取embedding，共 {len(processed_ids)} 条"
+                                message=msg
                             )
                         invalidate_status_cache()
                         
@@ -846,7 +864,9 @@ async def lancedb_query_data(
             for i in range(start, end):
                 row = {col: results.column(col)[i].as_py() for col in results.column_names}
                 for k, v in list(row.items()):
-                    if isinstance(v, bytes):
+                    if k == "image_data":
+                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                    elif isinstance(v, bytes):
                         row[k] = f"<{len(v)} bytes>"
                 page_rows.append(row)
 
@@ -871,7 +891,9 @@ async def lancedb_query_data(
             for i in range(results.num_rows):
                 row = {col: results.column(col)[i].as_py() for col in results.column_names}
                 for k, v in list(row.items()):
-                    if isinstance(v, bytes):
+                    if k == "image_data":
+                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                    elif isinstance(v, bytes):
                         row[k] = f"<{len(v)} bytes>"
                 page_rows.append(row)
 
@@ -885,6 +907,43 @@ async def lancedb_query_data(
             "data": page_rows,
             "version": ds.version,
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/lancedb/{source_id}/{batch_id}/image/{sample_id}")
+async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, version: int = None):
+    """获取样本图片"""
+    try:
+        import lance
+        from fastapi.responses import Response
+
+        source_config = registry.get(source_id)
+        batch_dir = source_config.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+        if not manifest_path or manifest_path.suffix != ".lance":
+            raise HTTPException(status_code=404, detail="No Lance data found")
+
+        if version:
+            ds = lance.dataset(str(manifest_path)).checkout_version(version)
+        else:
+            ds = lance.dataset(str(manifest_path))
+
+        results = ds.to_table(
+            columns=["sample_id", "image_data"],
+            filter=f"sample_id = '{sample_id}'",
+        )
+        if results.num_rows == 0:
+            raise HTTPException(status_code=404, detail="Sample not found")
+
+        image_bytes = results.column("image_data")[0].as_py()
+        if image_bytes is None:
+            raise HTTPException(status_code=404, detail="No image data")
+
+        return Response(content=image_bytes, media_type="image/jpeg")
     except HTTPException:
         raise
     except Exception as e:

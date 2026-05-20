@@ -101,6 +101,9 @@
         let currentPage = 1;
         let totalPages = 1;
         let selectedColumns = [];
+        let currentSourceId = '';
+        let currentBatchId = '';
+        let currentVersion = '';
 
         async function init() {
             try {
@@ -195,6 +198,10 @@
             const pageSize = document.getElementById('page-size').value;
             const version = document.getElementById('version-select').value;
 
+            currentSourceId = sourceId;
+            currentBatchId = batchId;
+            currentVersion = version;
+
             let url = `/api/lancedb/${sourceId}/${batchId}/data?page=${currentPage}&page_size=${pageSize}`;
             if (version) url += `&version=${version}`;
             if (selectedColumns.length > 0) {
@@ -248,8 +255,10 @@
                         let display = escapeHtml(val);
                         if (col === 'embedding' && Array.isArray(val)) {
                             display = `<span class="text-blue-600 text-xs">[${val.length}维向量]</span>`;
-                        } else if (col === 'image_data' && typeof val === 'string' && val.startsWith('<')) {
-                            display = `<span class="text-purple-600 text-xs">${escapeHtml(val)}</span>`;
+                        } else if (col === 'image_data' && val && typeof val === 'object' && val.has_image) {
+                            const sid = row['sample_id'] || '';
+                            const kb = (val.size / 1024).toFixed(1);
+                            display = `<a href="javascript:void(0)" onclick="showImage('${sid}')" class="text-blue-600 underline text-xs cursor-pointer">${kb}KB</a>`;
                         } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
                             display = `<span class="text-xs text-gray-500">${escapeHtml(JSON.stringify(val))}</span>`;
                         }
@@ -302,6 +311,38 @@
         });
 
         document.addEventListener('DOMContentLoaded', init);
+
+        function showImage(sampleId) {
+            const verParam = currentVersion ? `?version=${currentVersion}` : '';
+            const url = `/api/lancedb/${currentSourceId}/${currentBatchId}/image/${sampleId}${verParam}`;
+            const modal = document.getElementById('image-modal');
+            const img = document.getElementById('modal-image');
+            const label = document.getElementById('modal-label');
+            img.src = url;
+            label.textContent = sampleId;
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function closeImageModal() {
+            const modal = document.getElementById('image-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            document.getElementById('modal-image').src = '';
+        }
     </script>
+
+    <!-- Image Modal -->
+    <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-70 z-50 hidden items-center justify-center" onclick="closeImageModal()">
+        <div class="bg-white rounded-lg shadow-xl max-w-4xl max-h-[90vh] overflow-auto" onclick="event.stopPropagation()">
+            <div class="flex items-center justify-between px-4 py-3 border-b">
+                <span id="modal-label" class="text-sm font-medium text-gray-700"></span>
+                <button onclick="closeImageModal()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+            </div>
+            <div class="p-4">
+                <img id="modal-image" src="" class="max-w-full max-h-[75vh] object-contain mx-auto" />
+            </div>
+        </div>
+    </div>
 </body>
 </html>
