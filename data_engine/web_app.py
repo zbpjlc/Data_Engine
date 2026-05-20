@@ -228,7 +228,7 @@ async def start_ingest(source_id: str, batch_id: str = None):
                 alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
                 if task_id not in alive_threads:
                     progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-                    print(f"[INGEST] 检测到线程 {task_id} 已终止，标记为stopped", file=__import__("sys").stderr)
+                    print(f"[INGEST] 检测到线程 {task_id} 已终止，标记为stopped", file=sys.stderr)
                 else:
                     return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
         
@@ -442,7 +442,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                 alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
                 if task_id not in alive_threads:
                     progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-                    print(f"[Embedding] 检测到线程 {task_id} 已终止，标记为stopped", file=__import__("sys").stderr)
+                    print(f"[Embedding] 检测到线程 {task_id} 已终止，标记为stopped", file=sys.stderr)
                 else:
                     return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
         
@@ -516,7 +516,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                         
                         for offset in range(start_offset, total_count, chunk_size):
                             if progress_tracker.is_stopped(task_id):
-                                print(f"[Embedding] 收到停止信号，已处理到第 {offset} 条", file=__import__("sys").stderr)
+                                print(f"[Embedding] 收到停止信号，已处理到第 {offset} 条", file=sys.stderr)
                                 progress_tracker.stop_task(task_id, f"用户停止，已处理 {offset}/{total_count} 个样本")
                                 break
                             
@@ -546,7 +546,6 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 "sample_id": pa.array(update_ids, type=pa.large_string()),
                                 "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32())),
                             })
-                            ds = lance.dataset(str(manifest_path))
                             ds.merge_insert("sample_id").when_matched_update_all().execute(update_table)
                             print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
                             
@@ -560,11 +559,10 @@ async def start_embed(source_id: str, batch_id: str = None):
                         
                         task_obj = progress_tracker.get_task(task_id)
                         if task_obj and task_obj.status.value == "stopped":
-                            print(f"[Embedding] 任务已停止，不标记完成", file=__import__("sys").stderr)
+                            print(f"[Embedding] 任务已停止，不标记完成", file=sys.stderr)
                         else:
                             # 统计实际成功的embedding数
-                            verify_ds = lance.dataset(str(manifest_path))
-                            verify_table = verify_ds.to_table(columns=["embedding"])
+                            verify_table = ds.to_table(columns=["embedding"])
                             actual_success = sum(
                                 1 for i in range(verify_table.num_rows)
                                 if verify_table.column("embedding")[i].as_py() is not None
@@ -646,7 +644,7 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                 alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
                 if task_id not in alive_threads:
                     progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-                    print(f"[Cluster] 检测到线程 {task_id} 已终止，标记为stopped", file=__import__("sys").stderr)
+                    print(f"[Cluster] 检测到线程 {task_id} 已终止，标记为stopped", file=sys.stderr)
                 else:
                     return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
 

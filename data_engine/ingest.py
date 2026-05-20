@@ -4,9 +4,11 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 import time
@@ -507,7 +509,7 @@ def _build_ingest_stats(records: list[dict | UnifiedSampleRecord], total_samples
         valid_samples = total_samples
     
     return {
-        "updated_at": __import__("datetime").datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "updated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
         "total_samples": total_samples,
         "valid_samples": valid_samples,
         "stage_status_counts": {"ingested": total_samples},

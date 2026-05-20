@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import lance
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime

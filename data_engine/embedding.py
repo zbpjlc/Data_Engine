@@ -19,7 +19,8 @@ class CLIPEmbeddingExtractor:
 
     def __init__(self, model_name: str | None = None):
         self.model_name = model_name or get_config("embedding", "model_name", default="google/siglip2-base-patch16-224")
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        gpu_id = get_config("embedding", "gpu_id", default=0)
+        self.device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.processor = None
         self._load_model()
@@ -28,7 +29,7 @@ class CLIPEmbeddingExtractor:
         """加载SigLIP2模型"""
         print(f"加载模型: {self.model_name}", file=sys.stderr)
         self.model = AutoModel.from_pretrained(
-            self.model_name, device_map="auto").eval()
+            self.model_name, device_map=self.device).eval()
         self.processor = AutoProcessor.from_pretrained(self.model_name)
         self.device = self.model.device
         print(f"模型已加载到: {self.device}", file=sys.stderr)
@@ -70,7 +71,7 @@ class CLIPEmbeddingExtractor:
             try:
                 embeddings[image_path] = self.extract_embedding(image_path)
             except Exception as e:
-                print(f"提取embedding失败 {image_path}: {e}", file=__import__("sys").stderr)
+                print(f"提取embedding失败 {image_path}: {e}", file=sys.stderr)
         return embeddings
 
 
@@ -95,7 +96,7 @@ def extract_embeddings_for_records(
     updated_records = []
     for idx, record in enumerate(records):
         if progress_tracker and task_id and progress_tracker.is_stopped(task_id):
-            print(f"[Embedding] 收到停止信号，中断处理", file=__import__("sys").stderr)
+            print(f"[Embedding] 收到停止信号，中断处理", file=sys.stderr)
             progress_tracker.stop_task(task_id, f"用户停止，已处理 {idx}/{len(records)} 个样本")
             break
         
@@ -112,7 +113,7 @@ def extract_embeddings_for_records(
                 # 回退到文件路径
                 image_path = batch_dir / record["page_image"]
                 if not image_path.exists():
-                    print(f"图像文件不存在: {image_path}", file=__import__("sys").stderr)
+                    print(f"图像文件不存在: {image_path}", file=sys.stderr)
                     record["embedding"] = None
                     updated_records.append(record)
                 else:
@@ -131,7 +132,7 @@ def extract_embeddings_for_records(
                     )
 
         except Exception as e:
-            print(f"处理记录embedding失败 {record.get('sample_id')}: {e}", file=__import__("sys").stderr)
+            print(f"处理记录embedding失败 {record.get('sample_id')}: {e}", file=sys.stderr)
             record["embedding"] = None
             updated_records.append(record)
 
