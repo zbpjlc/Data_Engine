@@ -1,5 +1,5 @@
 lance:
-  keep_versions: 5              # 每个Lance文件保留的历史版本数
+  keep_versions: 10              # 每个Lance文件保留的历史版本数
   max_file_size: 2GB            # 单个Lance文件最大大小,支持格式：2GB、500MB、1024KB、纯数字（字节）
 
 ingest:

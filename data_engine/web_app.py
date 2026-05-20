@@ -14,6 +14,7 @@ from data_engine.manifests import read_manifest, write_manifest, find_stage_mani
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
 from data_engine.progress_tracker import progress_tracker
+import threading
 
 
 app = FastAPI(title="Data Engine Web Console", version="1.0.0")
@@ -511,14 +512,17 @@ async def start_embed(source_id: str, batch_id: str = None):
                         chunk_size = get_config("embedding", "batch_update_interval", default=10000)
                         
                         # 查询已处理的 sample_id，支持断点续跑
+                        # 只查询有 embedding 的记录，避免加载整个 embedding 列
                         processed_ids = set()
                         if manifest_path.exists():
                             try:
                                 existing_ds = lance.dataset(str(manifest_path))
-                                id_table = existing_ds.to_table(columns=["sample_id", "embedding"])
-                                for i in range(id_table.num_rows):
-                                    if id_table.column("embedding")[i].as_py() is not None:
-                                        processed_ids.add(id_table.column("sample_id")[i].as_py())
+                                filtered = existing_ds.to_table(
+                                    columns=["sample_id"],
+                                    filter="embedding IS NOT NULL"
+                                )
+                                for i in range(filtered.num_rows):
+                                    processed_ids.add(filtered.column("sample_id")[i].as_py())
                             except Exception:
                                 pass
                         

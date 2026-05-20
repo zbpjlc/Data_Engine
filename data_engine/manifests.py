@@ -146,7 +146,7 @@ def _cleanup_lance_versions(target_path: Path) -> None:
         keep = get_config("lance", "keep_versions", default=5)
         if target_path.exists():
             ds = lance.dataset(str(target_path))
-            ds.cleanup_old_versions(keep_versions=keep)
+            ds.cleanup_old_versions(retain_versions=keep)
     except Exception:
         pass
 
