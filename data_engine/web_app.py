@@ -562,7 +562,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32())),
                             })
                             ds = lance.dataset(str(manifest_path))
-                            ds.merge(update_table, on="sample_id")
+                            ds.merge_insert("sample_id").when_matched_update_all().execute(update_table)
                             print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
                             
                             # 更新已处理集合
