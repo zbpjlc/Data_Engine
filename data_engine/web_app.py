@@ -7,6 +7,7 @@ import shutil
 import pyarrow as pa
 import lance
 import threading
+import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -32,10 +33,10 @@ registry = SourceRegistry(Path("sources.yaml"))
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
+async def dashboard(request: Request, refresh: int = 0):
     """数据地图首页 - The Map"""
     try:
-        global_status = collect_global_status(registry)
+        global_status = collect_global_status(registry, force_refresh=bool(refresh))
         
         batches_json = [
             {"source_id": b.source_id, "batch_id": b.batch_id, "sample_count": b.sample_count,
@@ -542,12 +543,16 @@ async def start_embed(source_id: str, batch_id: str = None):
                             # 用 Lance update 原地更新 embedding
                             update_ids = list(embedding_map.keys())
                             update_embeddings = [embedding_map[sid] for sid in update_ids]
+                            embedding_dim = get_config("embedding", "embedding_dim", default=768)
                             update_table = pa.table({
                                 "sample_id": pa.array(update_ids, type=pa.large_string()),
-                                "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32())),
+                                "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32(), embedding_dim)),
                             })
                             ds.merge_insert("sample_id").when_matched_update_all().execute(update_table)
                             print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
+                            
+                            # merge_insert 后重新获取 dataset（版本已变）
+                            ds = lance.dataset(str(manifest_path))
                             
                             # 更新进度到下一个 chunk 位置
                             next_offset = offset + len(chunk_records)

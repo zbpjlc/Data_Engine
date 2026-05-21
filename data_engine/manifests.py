@@ -38,7 +38,7 @@ MANIFEST_SCHEMA = pa.schema([
     pa.field("stage_status", pa.large_string(), nullable=False),
     pa.field("process_log", pa.large_string(), nullable=False),        # JSON string
     pa.field("data_version", pa.large_string(), nullable=False),
-    pa.field("embedding", pa.list_(pa.float32()), nullable=True),
+    pa.field("embedding", pa.list_(pa.float32(), get_config("embedding", "embedding_dim", default=768)), nullable=True),
     pa.field("schema_version", pa.large_string(), nullable=False),
     pa.field("threshold_version", pa.large_string(), nullable=False),
     pa.field("is_active", pa.bool_(), nullable=False),
