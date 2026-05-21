@@ -27,10 +27,14 @@ class CLIPEmbeddingExtractor:
 
     def _load_model(self) -> None:
         """加载SigLIP2模型"""
-        print(f"加载模型: {self.model_name}", file=sys.stderr)
+        local_path = get_config("embedding", "local_path", default=None)
+        if local_path:
+            local_path = str(Path(local_path).expanduser())
+        model_source = local_path if local_path else self.model_name
+        print(f"加载模型: {model_source}", file=sys.stderr)
         self.model = AutoModel.from_pretrained(
-            self.model_name, device_map=self.device).eval()
-        self.processor = AutoProcessor.from_pretrained(self.model_name)
+            model_source, device_map=self.device).eval()
+        self.processor = AutoProcessor.from_pretrained(model_source)
         self.device = self.model.device
         print(f"模型已加载到: {self.device}", file=sys.stderr)
 

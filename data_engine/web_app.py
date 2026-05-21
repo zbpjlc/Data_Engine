@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import os
 import json
 from pathlib import Path
 from typing import Any
 import shutil
 import pyarrow as pa
+
+# 设置 Lance 内存限制（必须在 import lance 之前）
+from data_engine.config import get_config
+_memory_limit = get_config("lance", "memory_limit", default=None)
+if _memory_limit:
+    os.environ["LANCE_DEFAULT_MEMORY_LIMIT"] = str(_memory_limit)
+
 import lance
 import threading
 import traceback
@@ -14,11 +22,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 from fastapi.responses import Response
-from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest, manifest_count
+from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest, manifest_count, _lance_write_lock
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
 from data_engine.progress_tracker import progress_tracker
-from data_engine.config import get_config
 
 app = FastAPI(title="Data Engine Web Console", version="1.0.0")
 
@@ -548,9 +555,12 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 "sample_id": pa.array(update_ids, type=pa.large_string()),
                                 "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32(), embedding_dim)),
                             })
-                            ds.merge_insert("sample_id").when_matched_update_all().execute(update_table)
+                            # 写入 Lance 时加锁，避免多线程并发写入导致 glibc 内存死锁
+                            with _lance_write_lock:
+                                current_ds = lance.dataset(str(manifest_path))
+                                current_ds.merge_insert("sample_id").when_matched_update_all().execute(update_table)
                             print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
-                            
+
                             # merge_insert 后重新获取 dataset（版本已变）
                             ds = lance.dataset(str(manifest_path))
                             
@@ -583,7 +593,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                         invalidate_status_cache()
                         
                         print(f"[Embedding后台线程] ✓ 批次 {batch.batch_id} embedding生成成功")
-                        print(f"[Embedding后台线程]   - 已处理记录数: {len(processed_ids)}")
+                        print(f"[Embedding后台线程]   - 已处理记录数: {actual_success}/{total_rows}")
                         
                     except Exception as e:
                         print(f"[Embedding后台线程] ✗ 批次 {batch.batch_id} embedding生成失败: {e}")
@@ -693,7 +703,8 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
                         updated_records, stats = cluster_records(
                             records, n_clusters=n_clusters, auto_optimize=auto_optimize)
 
-                        write_manifest(manifest_path, updated_records)
+                        with _lance_write_lock:
+                            write_manifest(manifest_path, updated_records)
 
                         progress_tracker.complete_task(
                             task_id=t_id,

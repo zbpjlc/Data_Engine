@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -12,6 +13,8 @@ import lance
 from enum import Enum
 from pydantic import BaseModel
 from data_engine.config import get_config
+
+_lance_write_lock = threading.Lock()
 
 # ─── Lance schema for ingest manifest ──────────────────────────────────────────
 
@@ -168,8 +171,14 @@ def _parse_size(size_str: str | None) -> int | None:
 
 def _safe_write_lance(table: pa.Table, target_path: Path, mode: str = "overwrite") -> None:
     """Write Lance dataset. Detects filesystem and uses appropriate strategy."""
+    with _lance_write_lock:
+        _safe_write_lance_inner(table, target_path, mode)
+
+
+def _safe_write_lance_inner(table: pa.Table, target_path: Path, mode: str = "overwrite") -> None:
+    """Internal write implementation (must be called under _lance_write_lock)."""
     ensure_parent(target_path)
-    
+
     max_bytes = _parse_size(get_config("lance", "max_file_size", default=None))
     write_kwargs = {"mode": mode}
     if max_bytes:

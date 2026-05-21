@@ -170,31 +170,42 @@ V1 规定统一样本最少包含以下结构：
 
 建议统一记录结构如下：
 
-- `sample_id`
-- `source_id`
-- `category`
-- `batch_id`
-- `input_type`
-- `original_ext`
-- `page_id`
-- `task_type`
-- `relative_path`
-- `page_image`
-- `block_list`
-- `reading_order`
-- `table_structure`
-- `formula_spans`
-- `text_spans`
-- `bbox`
-- `cluster_id`
-- `difficulty`
-- `annotation_source`
-- `stage_status`
-- `process_log`
-- `data_version`
-- `schema_version`
-- `threshold_version`
-- `is_active`
+- `sample_id` — `large_string`，内容哈希 ID
+- `source_id` — `large_string`
+- `category` — `large_string`
+- `batch_id` — `large_string`
+- `input_type` — `string`
+- `original_ext` — `string`
+- `page_id` — `large_string`
+- `task_type` — `string`
+- `relative_path` — `large_string`
+- `page_image` — `large_string`
+- `block_list` — `large_list`
+- `reading_order` — `large_list`
+- `table_structure` — `large_string`（JSON）
+- `formula_spans` — `large_list`
+- `text_spans` — `large_list`
+- `bbox` — `list<float32>`（固定 4 维）
+- `cluster_id` — `large_string`
+- `difficulty` — `string`
+- `annotation_source` — `string`
+- `stage_status` — `string`
+- `process_log` — `large_list<string>`
+- `data_version` — `string`
+- `schema_version` — `string`
+- `threshold_version` — `string`
+- `is_active` — `bool`
+- `page_image_sha256` — `large_string`
+- `image_data` — `binary`（可选，Lance blob 存储）
+- `source_metadata` — `large_string`（JSON）
+- `embedding` — `list<float32>`（固定维度，由配置决定）
+
+类型约束：
+
+- 所有字符串字段使用 `pa.large_string()`，保证超大数据集兼容性
+- `sample_id`、`page_id`、`page_image_sha256` 必须为合法小写十六进制字符串
+- `embedding` 维度由配置 `embedding.embedding_dim` 决定，默认 768，整个生命周期内不可变更
+- `bbox` 固定为 `[x1, y1, x2, y2]` 四维 `float32`
 
 约束如下：
 
@@ -301,7 +312,7 @@ is_my_task = int(sample_id, 16) % num_shards == shard_id
 
 ### 5.4 Parquet 并发写约束
 
-虽然 Parquet 适合做联邦查询和阶段落盘，但 V1 在多进程环境下不应采用“多个进程同时追加同一个 parquet 文件”的方式。
+虽然 Parquet 适合做联邦查询和阶段落盘，但 V1 在多进程环境下不应采用"多个进程同时追加同一个 parquet 文件"的方式。
 
 推荐策略：
 
@@ -317,6 +328,57 @@ is_my_task = int(sample_id, 16) % num_shards == shard_id
 - merge 操作必须是显式且可重跑的
 - merge 前后都要保留 shard 级来源信息，便于失败排查
 - 若使用 `pandas.concat` 或等价逻辑进行合并，最终写盘前应执行去重和 schema 对齐检查
+
+### 5.5 Lance 写入安全锁
+
+Lance 支持并发读取，但写操作（`merge_insert`、`write_dataset`、`create_index`）在同一时间只能有一个线程执行，否则会触发 glibc malloc 内存死锁。
+
+V1 采用全局写锁策略：
+
+- 在 `manifests.py` 中定义全局锁 `_lance_write_lock = threading.Lock()`
+- 所有 Lance 写入路径（`_safe_write_lance`、`merge_insert`）必须在获取该锁后执行
+- 每次写入前应在锁内重新 `lance.dataset(path)` 获取最新 manifest 视图
+- GPU 推理（embedding 提取）不受锁影响，可多线程并发执行
+
+约束：
+
+- 读操作（`lance.dataset().to_table()`、`count_rows()`）不需要加锁
+- 写操作必须串行化
+- 不得在多线程间共享同一个 `ds` 对象，每个线程应独立打开 dataset 句柄
+
+### 5.6 Lance 内存限制
+
+`merge_insert` 操作在排序阶段可能因数据量过大导致内存耗尽。通过 `LANCE_DEFAULT_MEMORY_LIMIT` 环境变量限制 Lance 的内存使用。
+
+配置方式（`config.yaml`）：
+
+```yaml
+lance:
+  memory_limit: 4GB
+```
+
+实现约束：
+
+- 环境变量必须在 `import lance` 之前设置
+- 默认值为 `4GB`，可根据服务器内存调整
+- 内存不足时应适当减小 `batch_update_interval` 分批写入
+
+### 5.7 PyArrow 类型约束（64 位安全）
+
+为保证大规模数据集（超过 2^31 行）的兼容性，V1 对 PyArrow 类型做以下约束：
+
+- 字符串字段使用 `pa.large_string()` 而非 `pa.string()`
+  - 适用字段：`sample_id`、`source_id`、`category`、`batch_id`、`page_id` 等
+- 列表字段使用 `pa.large_list()` 而非 `pa.list_()`（当元素总量可能超限）
+- 嵌入向量使用 `pa.list_(pa.float32(), embedding_dim)` 固定维度
+  - `embedding_dim` 从配置读取，默认 768
+- 整型字段根据实际范围选择 `int64` 或 `int32`
+
+约束：
+
+- 所有 manifest 的 Arrow schema 必须统一使用 `large_string`
+- 不得混用 `string` 和 `large_string`
+- 嵌入向量维度一旦确定，在整个数据源生命周期内不可变更
 
 ## 6. 六阶段流程
 
@@ -634,31 +696,37 @@ V1 至少定义以下公共记录类型。
 
 ### 8.1 UnifiedSampleRecord
 
-- `sample_id`
-- `source_id`
-- `category`
-- `batch_id`
-- `input_type`
-- `original_ext`
-- `page_id`
-- `task_type`
-- `relative_path`
-- `page_image`
-- `block_list`
-- `reading_order`
-- `table_structure`
-- `formula_spans`
-- `text_spans`
-- `bbox`
-- `cluster_id`
-- `difficulty`
-- `stage_status`
-- `process_log`
-- `annotation_source`
-- `data_version`
-- `schema_version`
-- `threshold_version`
-- `is_active`
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sample_id` | `large_string` | 内容哈希 ID（小写 hex） |
+| `source_id` | `large_string` | 数据源 ID |
+| `category` | `large_string` | 类别 |
+| `batch_id` | `large_string` | 批次 ID |
+| `input_type` | `string` | `pdf` 或 `image` |
+| `original_ext` | `string` | 原始文件后缀 |
+| `page_id` | `large_string` | 页面 ID（小写 hex） |
+| `task_type` | `string` | 任务类型，默认 `page` |
+| `relative_path` | `large_string` | 相对路径 |
+| `page_image` | `large_string` | 页面图像路径 |
+| `block_list` | `large_list` | 块级对象列表 |
+| `reading_order` | `large_list` | 阅读顺序 |
+| `table_structure` | `large_string` | 表格结构 JSON |
+| `formula_spans` | `large_list` | 公式 span 列表 |
+| `text_spans` | `large_list` | 文本 span 列表 |
+| `bbox` | `list<float32>` | 边界框 `[x1,y1,x2,y2]` |
+| `cluster_id` | `large_string` | 聚类 ID |
+| `difficulty` | `string` | 难度分桶 |
+| `stage_status` | `string` | 当前阶段状态 |
+| `process_log` | `large_list` | 处理日志 |
+| `annotation_source` | `string` | 标注来源 |
+| `data_version` | `string` | 数据版本 |
+| `schema_version` | `string` | Schema 版本 |
+| `threshold_version` | `string` | 阈值版本 |
+| `is_active` | `bool` | 是否激活 |
+| `page_image_sha256` | `large_string` | 页面图像校验哈希 |
+| `image_data` | `binary` | 图像二进制（可选） |
+| `source_metadata` | `large_string` | 来源元数据 JSON |
+| `embedding` | `list<float32>` | CLIP 向量（固定 `embedding_dim` 维） |
 
 ### 8.2 PredictionRecord
 

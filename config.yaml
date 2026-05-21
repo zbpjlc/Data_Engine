@@ -1,6 +1,7 @@
 lance:
   keep_versions: 10              # 每个Lance文件保留的历史版本数
   max_file_size: 2GB            # 单个Lance文件最大大小,支持格式：2GB、500MB、1024KB、纯数字（字节）
+  memory_limit: 4GB             # Lance merge_insert 操作的内存限制
 
 ingest:
   batch_update_interval: 10000   # 每N条记录保存一次
@@ -20,6 +21,7 @@ ingest:
 
 embedding:
   model_name: google/siglip2-base-patch16-224
+  local_path: ~/.cache/modelscope/hub/models/google/siglip2-base-patch16-224
   embedding_dim: 768
   gpu_id: 0  # 使用的GPU编号
   batch_update_interval: 10000   # 每N条记录保存一次
