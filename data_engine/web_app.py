@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import os
 import json
+import gc
 from pathlib import Path
 from typing import Any
 import shutil
 import pyarrow as pa
+
+# 可选导入 torch，仅用于 CUDA 内存清理
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    torch = None
 
 # 设置 Lance 内存限制（必须在 import lance 之前）
 from data_engine.config import get_config
@@ -563,6 +572,12 @@ async def start_embed(source_id: str, batch_id: str = None):
 
                             # merge_insert 后重新获取 dataset（版本已变）
                             ds = lance.dataset(str(manifest_path))
+                            
+                            # 清理 chunk 内存，避免大规模处理时 segfault
+                            del chunk_table, chunk_records, records_to_process, updated_records, embedding_map, update_table
+                            gc.collect()
+                            if HAS_TORCH and torch.cuda.is_available():
+                                torch.cuda.empty_cache()
                             
                             # 更新进度到下一个 chunk 位置
                             next_offset = offset + len(chunk_records)

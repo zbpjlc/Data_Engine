@@ -24,7 +24,7 @@ embedding:
   local_path: ~/.cache/modelscope/hub/models/google/siglip2-base-patch16-224
   embedding_dim: 768
   gpu_id: 0  # 使用的GPU编号
-  batch_update_interval: 10000   # 每N条记录保存一次
+  batch_update_interval: 10000    # 每N条记录保存一次（降低以减少内存占用）
   progress_update_interval: 100  # 每N条记录更新一次进度到progress_state.json
 
 clustering:

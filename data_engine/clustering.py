@@ -14,7 +14,7 @@ class KMeansClusterer:
     def __init__(self, n_clusters: int | None = None, random_state: int | None = None):
         self.n_clusters = n_clusters or get_config("clustering", "default_n_clusters", default=5)
         self.random_state = random_state or get_config("clustering", "random_state", default=42)
-        self.model = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+        self.model = KMeans(n_clusters=self.n_clusters, random_state=self.random_state, n_init=10)
         self.cluster_centers = None
         self.labels = None
         self.silhouette_score = None

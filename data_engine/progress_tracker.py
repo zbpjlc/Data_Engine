@@ -205,11 +205,11 @@ class ProgressTracker:
                 os.fsync(f.fileno())
             tmp_path.replace(self._file_path)
         except Exception:
-            pass
-            with open(self._file_path, 'w', encoding='utf-8') as f:
-                json.dump(state, f, ensure_ascii=False, indent=2, default=str)
-        except Exception:
-            pass  # 忽略保存错误
+            try:
+                with open(self._file_path, 'w', encoding='utf-8') as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2, default=str)
+            except Exception:
+                pass
     
     def _load_state(self) -> None:
         """从文件加载状态"""
