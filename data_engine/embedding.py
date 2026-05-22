@@ -95,6 +95,17 @@ class CLIPEmbeddingExtractor:
         return embeddings
 
 
+def _ensure_pure_list(embedding: Any) -> list[float] | None:
+    """确保 embedding 是纯 Python list，切断 PyTorch/numpy 底层引用。"""
+    if embedding is None:
+        return None
+    if isinstance(embedding, list):
+        return embedding
+    if hasattr(embedding, "tolist"):
+        return embedding.tolist()
+    return list(embedding)
+
+
 def extract_embeddings_for_records(
     records: list[dict[str, Any]],
     batch_dir: Path,
@@ -102,7 +113,7 @@ def extract_embeddings_for_records(
     task_id: str | None = None,
     offset: int = 0
 ) -> list[dict[str, Any]]:
-    """为样本记录提取embedding"""
+    """为样本记录提取embedding（已优化内存管理）"""
     if extractor is None:
         extractor = CLIPEmbeddingExtractor()
 
@@ -114,42 +125,39 @@ def extract_embeddings_for_records(
             pass
 
     interval = _get_progress_interval()
+    gc_interval = get_config("embedding", "gc_interval", default=1000)
     updated_records = []
+
     for idx, record in enumerate(records):
         if progress_tracker and task_id and progress_tracker.is_stopped(task_id):
             print(f"[Embedding] 收到停止信号，中断处理", file=sys.stderr)
             progress_tracker.stop_task(task_id, f"用户停止，已处理 {idx}/{len(records)} 个样本")
             break
-        
+
         try:
             image_data = record.get("image_data")
+            embedding = None
 
             if image_data:
                 image_bytes = _coerce_image_bytes(image_data)
                 if image_bytes is None:
                     print(f"[Embedding] record {record.get('sample_id')} image_data 类型异常: {type(image_data).__name__}, 跳过", file=sys.stderr)
-                    record["embedding"] = None
-                    updated_records.append(record)
                 else:
                     embedding = extractor.extract_embedding_from_bytes(image_bytes)
-                    record["embedding"] = embedding
-                    updated_records.append(record)
             else:
                 page_image = record.get("page_image")
                 if not page_image or not isinstance(page_image, str):
                     print(f"[Embedding] record {record.get('sample_id')} page_image 异常: {page_image!r}, 跳过", file=sys.stderr)
-                    record["embedding"] = None
-                    updated_records.append(record)
                 else:
                     image_path = batch_dir / page_image
                     if not image_path.exists():
                         print(f"图像文件不存在: {image_path}", file=sys.stderr)
-                        record["embedding"] = None
-                        updated_records.append(record)
                     else:
                         embedding = extractor.extract_embedding(image_path)
-                        record["embedding"] = embedding
-                        updated_records.append(record)
+
+            # 确保 embedding 是纯 Python list，切断底层 C/显存 引用
+            record["embedding"] = _ensure_pure_list(embedding)
+            updated_records.append(record)
 
             if progress_tracker and task_id:
                 if (idx + 1) % interval == 0 or idx == len(records) - 1:
@@ -173,16 +181,13 @@ def extract_embeddings_for_records(
                         message=f"已处理 {offset + idx + 1} 个样本（含失败）"
                     )
 
-        finally:
-            # 更频繁的内存清理，避免大规模处理时 OOM
-            if idx % 50 == 0:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                gc.collect()
+        # 降频 GC：每 gc_interval 条做一次轻量回收，不再调用 empty_cache
+        if (idx + 1) % gc_interval == 0:
+            gc.collect()
 
-    # 处理完成后强制清理
+    # 批次结束做一次终极清理
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    gc.collect()
 
     return updated_records

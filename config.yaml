@@ -26,6 +26,7 @@ embedding:
   gpu_id: 0  # 使用的GPU编号
   batch_update_interval: 10000    # 每N条记录保存一次（降低以减少内存占用）
   progress_update_interval: 100  # 每N条记录更新一次进度到progress_state.json
+  gc_interval: 1000              # 每N条记录做一次 gc.collect()
 
 clustering:
   default_n_clusters: 5
