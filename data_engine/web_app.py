@@ -573,6 +573,9 @@ async def start_embed(source_id: str, batch_id: str = None):
                             # merge_insert 后重新获取 dataset（版本已变）
                             ds = lance.dataset(str(manifest_path))
                             
+                            # 保存 chunk 长度用于进度更新
+                            chunk_len = len(chunk_records)
+                            
                             # 清理 chunk 内存，避免大规模处理时 segfault
                             del chunk_table, chunk_records, records_to_process, updated_records, embedding_map, update_table
                             gc.collect()
@@ -580,7 +583,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 torch.cuda.empty_cache()
                             
                             # 更新进度到下一个 chunk 位置
-                            next_offset = offset + len(chunk_records)
+                            next_offset = offset + chunk_len
                             progress_tracker.update_progress(
                                 task_id=task_id,
                                 current=next_offset,
