@@ -26,83 +26,7 @@
         </header>
 
         <!-- Main Content -->
-        <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-            <!-- 数据聚类卡片 -->
-            <div class="bg-white rounded-lg shadow p-6 mb-8">
-                <h2 class="text-lg font-semibold text-gray-900 mb-6">数据聚类</h2>
-                
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <!-- 左侧：聚类配置 -->
-                    <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">数据源</label>
-                            <select id="cluster-source" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                                <option value="">选择数据源...</option>
-                                <option value="__all__">全部数据源</option>
-                                {% for source in sources %}
-                                <option value="{{ source.source_id }}">{{ source.source_id }} ({{ source.batch_count }} 批次)</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">批次</label>
-                            <select id="cluster-batch" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                                <option value="">全部批次</option>
-                            </select>
-                        </div>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">聚类数 (K)</label>
-                                <input id="cluster-k" type="number" value="5" min="2" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                            </div>
-                            <div class="flex items-end">
-                                <label class="flex items-center text-sm text-gray-700">
-                                    <input id="cluster-auto" type="checkbox" checked class="mr-2 rounded"> 自动优化K值
-                                </label>
-                            </div>
-                        </div>
-                        <button id="btn-cluster" class="w-full px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 font-medium">
-                            开始聚类
-                        </button>
-                        <div id="cluster-progress" class="hidden">
-                            <div class="flex items-center justify-between text-sm mb-1">
-                                <span id="cluster-progress-msg" class="text-gray-600">准备中...</span>
-                                <span id="cluster-progress-pct" class="text-purple-600 font-medium">0%</span>
-                            </div>
-                            <div class="w-full bg-gray-200 rounded-full h-2">
-                                <div id="cluster-progress-bar" class="bg-purple-600 h-2 rounded-full transition-all" style="width:0%"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 右侧：聚类结果 -->
-                    <div>
-                        <div id="cluster-result-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">
-                            执行聚类后将在此显示结果
-                        </div>
-                        <div id="cluster-result" class="hidden space-y-4">
-                            <div class="grid grid-cols-3 gap-3">
-                                <div class="bg-purple-50 rounded-lg p-3 text-center">
-                                    <div class="text-xs text-purple-600 mb-1">聚类数</div>
-                                    <div id="stat-k" class="text-xl font-bold text-purple-800">-</div>
-                                </div>
-                                <div class="bg-blue-50 rounded-lg p-3 text-center">
-                                    <div class="text-xs text-blue-600 mb-1">轮廓系数</div>
-                                    <div id="stat-silhouette" class="text-xl font-bold text-blue-800">-</div>
-                                </div>
-                                <div class="bg-green-50 rounded-lg p-3 text-center">
-                                    <div class="text-xs text-green-600 mb-1">有效样本</div>
-                                    <div id="stat-valid" class="text-xl font-bold text-green-800">-</div>
-                                </div>
-                            </div>
-                            <div class="bg-gray-50 rounded-lg p-4">
-                                <canvas id="cluster-chart" height="180"></canvas>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
+        <main class="max-w-7xl mx-auto px-4 sm:lg:px-8 py-8">
             <!-- 向量索引卡片 -->
             <div class="bg-white rounded-lg shadow p-6 mb-8">
                 <h2 class="text-lg font-semibold text-gray-900 mb-6">向量索引</h2>
@@ -194,6 +118,33 @@
                 </div>
             </div>
 
+            <!-- 分区样本查看弹窗 -->
+            <div id="partition-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+                <div class="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[80vh] flex flex-col">
+                    <div class="flex items-center justify-between p-4 border-b">
+                        <h3 id="partition-modal-title" class="text-lg font-semibold">分区样本</h3>
+                        <button id="partition-modal-close" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+                    </div>
+                    <div id="partition-modal-body" class="p-4 overflow-auto flex-1">
+                        <div class="text-gray-400 text-center">加载中...</div>
+                    </div>
+                    <div id="partition-modal-pagination" class="flex items-center justify-center gap-2 p-4 border-t"></div>
+                </div>
+            </div>
+
+            <!-- 图片查看弹窗 -->
+            <div id="image-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center">
+                <div class="bg-white rounded-lg shadow-xl max-w-[90vw] max-h-[90vh] flex flex-col">
+                    <div class="flex items-center justify-between p-4 border-b">
+                        <h3 id="image-modal-title" class="text-lg font-semibold">图片</h3>
+                        <button id="image-modal-close" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+                    </div>
+                    <div class="p-4 overflow-auto flex-1 flex items-center justify-center">
+                        <img id="image-modal-img" src="" alt="" class="max-w-full max-h-[70vh] object-contain" />
+                    </div>
+                </div>
+            </div>
+
             <!-- 高级筛选器 -->
             <div class="bg-white rounded-lg shadow p-6 mb-8">
                 <h2 class="text-lg font-semibold text-gray-900 mb-6">数据筛选</h2>
@@ -235,14 +186,6 @@
                                 <input type="checkbox" value="has_embedding" class="status-checkbox mr-2">
                                 <span class="text-sm text-gray-700">已有向量</span>
                             </label>
-                            <label class="flex items-center">
-                                <input type="checkbox" value="has_cluster" class="status-checkbox mr-2">
-                                <span class="text-sm text-gray-700">已聚类</span>
-                            </label>
-                            <label class="flex items-center">
-                                <input type="checkbox" value="no_cluster" class="status-checkbox mr-2">
-                                <span class="text-sm text-gray-700">未聚类</span>
-                            </label>
                         </div>
                     </div>
                 </div>
@@ -277,14 +220,13 @@
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">数据源</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">批次</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类型</th>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">聚类ID</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">难度</th>
                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
                                 </tr>
                             </thead>
                             <tbody id="results-body" class="bg-white divide-y divide-gray-200">
                                 <tr>
-                                    <td colspan="7" class="px-6 py-12 text-center text-gray-500">暂无数据</td>
+                                    <td colspan="6" class="px-6 py-12 text-center text-gray-500">暂无数据</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -296,19 +238,7 @@
 
     <script>
         const batchData = {{ batches_json | tojson }};
-        let clusterChart = null;
         let indexChart = null;
-
-        // 聚类数据源联动批次
-        document.getElementById('cluster-source').addEventListener('change', function() {
-            const sourceId = this.value;
-            const batchSelect = document.getElementById('cluster-batch');
-            batchSelect.innerHTML = '<option value="">全部批次</option>';
-            const filtered = sourceId === '__all__' ? batchData : batchData.filter(b => b.source_id === sourceId);
-            filtered.forEach(b => {
-                batchSelect.innerHTML += `<option value="${b.batch_id}">${b.source_id}/${b.batch_id} (${b.sample_count} 样本)</option>`;
-            });
-        });
 
         // 索引数据源联动批次
         document.getElementById('index-source').addEventListener('change', function() {
@@ -319,6 +249,20 @@
             filtered.forEach(b => {
                 batchSelect.innerHTML += `<option value="${b.batch_id}">${b.source_id}/${b.batch_id} (${b.sample_count} 样本)</option>`;
             });
+            // 选择数据源后自动加载索引统计
+            if (sourceId) {
+                const batchId = filtered.length > 0 ? filtered[0].batch_id : '';
+                loadIndexStats(sourceId, batchId);
+            }
+        });
+
+        // 索引批次选择变化时加载统计
+        document.getElementById('index-batch').addEventListener('change', function() {
+            const sourceId = document.getElementById('index-source').value;
+            const batchId = this.value;
+            if (sourceId) {
+                loadIndexStats(sourceId, batchId || (batchData.filter(b => b.source_id === sourceId)[0]?.batch_id || ''));
+            }
         });
 
         // 构建向量索引
@@ -444,6 +388,12 @@
                         },
                         options: {
                             responsive: true,
+                            onClick: (e, elements) => {
+                                if (elements.length > 0) {
+                                    const idx = elements[0].index;
+                                    showPartitionSamples(sourceId, batchId, idx);
+                                }
+                            },
                             plugins: { legend: { display: false }, tooltip: { callbacks: { title: (items) => items[0].label, label: (item) => `${item.raw} 条` } } },
                             scales: { y: { beginAtZero: true, title: { display: true, text: '样本数' } }, x: { title: { display: true, text: '分区' } } }
                         }
@@ -454,132 +404,121 @@
                 });
         }
 
-        // 开始聚类
-        document.getElementById('btn-cluster').addEventListener('click', function() {
-            const sourceId = document.getElementById('cluster-source').value;
-            if (!sourceId) { alert('请选择数据源'); return; }
-
-            const k = document.getElementById('cluster-k').value;
-            const auto = document.getElementById('cluster-auto').checked;
-            const progressDiv = document.getElementById('cluster-progress');
-            const resultEmpty = document.getElementById('cluster-result-empty');
-            const resultDiv = document.getElementById('cluster-result');
-
-            progressDiv.classList.remove('hidden');
-            resultEmpty.classList.add('hidden');
-            resultDiv.classList.add('hidden');
-            this.disabled = true;
-            this.textContent = '聚类中...';
-
-            fetch(`/api/cluster/${sourceId}?n_clusters=${k}&auto_optimize=${auto}`, { method: 'POST' })
-                .then(r => r.json())
-                .then(() => pollCluster(sourceId))
-                .catch(err => {
-                    alert('聚类启动失败: ' + err.message);
-                    resetClusterBtn();
-                });
-        });
-
-        function pollCluster(sourceId) {
-            const interval = setInterval(() => {
-                fetch('/api/progress').then(r => r.json()).then(data => {
-                    let tasks = Object.values(data.tasks || {}).filter(t => t.task_type === 'cluster');
-                    if (sourceId !== '__all__') {
-                        tasks = tasks.filter(t => t.source_id === sourceId);
-                    }
-                    if (tasks.length === 0) return;
-
-                    const totalAll = tasks.reduce((s, t) => s + (t.total || 0), 0);
-                    const currentAll = tasks.reduce((s, t) => s + (t.current || 0), 0);
-                    const pct = totalAll > 0 ? Math.round(currentAll / totalAll * 100) : 0;
-                    const running = tasks.filter(t => t.status === 'running');
-                    const failed = tasks.filter(t => t.status === 'failed');
-                    const lastMsg = tasks[tasks.length - 1].message;
-                    document.getElementById('cluster-progress-msg').textContent = `${lastMsg} (${tasks.length} 批次)`;
-                    document.getElementById('cluster-progress-pct').textContent = pct + '%';
-                    document.getElementById('cluster-progress-bar').style.width = pct + '%';
-
-                    if (running.length === 0 && failed.length === 0) {
-                        clearInterval(interval);
-                        document.getElementById('cluster-progress-bar').classList.remove('bg-purple-600');
-                        document.getElementById('cluster-progress-bar').classList.add('bg-green-500');
-                        loadClusterStats(sourceId);
-                        resetClusterBtn();
-                    } else if (running.length === 0 && failed.length > 0) {
-                        clearInterval(interval);
-                        document.getElementById('cluster-progress-bar').classList.remove('bg-purple-600');
-                        document.getElementById('cluster-progress-bar').classList.add('bg-red-500');
-                        document.getElementById('cluster-progress-msg').textContent = '失败: ' + failed[0].error_message;
-                        resetClusterBtn();
-                    }
-                }).catch(() => {});
-            }, 1000);
+        // 页面加载时自动加载已有索引的桶分布
+        if (batchData.length > 0) {
+            // 优先选择有索引的批次
+            const indexSource = document.getElementById('index-source');
+            const indexBatch = document.getElementById('index-batch');
+            if (indexSource && indexSource.value) {
+                loadIndexStats(indexSource.value, indexBatch.value || '');
+            } else {
+                // 默认加载第一个批次
+                const firstBatch = batchData[0];
+                loadIndexStats(firstBatch.source_id, firstBatch.batch_id);
+            }
         }
 
-        function resetClusterBtn() {
-            const btn = document.getElementById('btn-cluster');
-            btn.disabled = false;
-            btn.textContent = '开始聚类';
-        }
+        // 分区样本查看
+        let currentPartitionPage = 1;
+        let currentPartitionSource = '';
+        let currentPartitionBatch = '';
+        let currentPartitionId = 0;
 
-        function loadClusterStats(sourceId) {
-            const resultDiv = document.getElementById('cluster-result');
-            const resultEmpty = document.getElementById('cluster-result-empty');
-            resultEmpty.classList.add('hidden');
-            resultDiv.classList.remove('hidden');
+        function showPartitionSamples(sourceId, batchId, partitionId, page) {
+            page = page || 1;
+            currentPartitionSource = sourceId;
+            currentPartitionBatch = batchId;
+            currentPartitionId = partitionId;
+            currentPartitionPage = page;
 
-            let url = sourceId === '__all__' ? '/api/filter-data?page_size=10000' : `/api/filter-data?sources=${sourceId}&page_size=10000`;
-            fetch(url)
+            const modal = document.getElementById('partition-modal');
+            const body = document.getElementById('partition-modal-body');
+            const title = document.getElementById('partition-modal-title');
+            const pagination = document.getElementById('partition-modal-pagination');
+
+            title.textContent = `分区 P${partitionId} 样本`;
+            body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
+            pagination.innerHTML = '';
+            modal.classList.remove('hidden');
+
+            fetch(`/api/index/${sourceId}/${batchId}/partition/${partitionId}?page=${page}&page_size=20`)
                 .then(r => r.json())
                 .then(data => {
-                    const clusterCounts = {};
-                    let valid = 0;
-                    data.samples.forEach(s => {
-                        const cid = s.cluster_id || 'N/A';
-                        clusterCounts[cid] = (clusterCounts[cid] || 0) + 1;
-                        if (s.cluster_id) valid++;
+                    if (!data.samples || data.samples.length === 0) {
+                        body.innerHTML = '<div class="text-gray-400 text-center">该分区无数据</div>';
+                        return;
+                    }
+
+                    const cols = Object.keys(data.samples[0]).filter(k => k !== 'embedding');
+                    let html = '<table class="w-full text-sm"><thead><tr class="bg-gray-50">';
+                    cols.forEach(c => { html += `<th class="px-3 py-2 text-left font-medium text-gray-600">${c}</th>`; });
+                    html += '</tr></thead><tbody>';
+                    data.samples.forEach((row, i) => {
+                        html += `<tr class="${i % 2 ? 'bg-gray-50' : ''}">`;
+                        cols.forEach(c => {
+                            let v = row[c];
+                            if (c === 'image_data' && v && v.has_image) {
+                                v = `<button onclick="showSampleImage('${sourceId}','${batchId}','${row.sample_id}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${v.size} bytes</button>`;
+                            } else {
+                                if (v === null || v === undefined) v = '-';
+                                else if (typeof v === 'object') v = JSON.stringify(v);
+                                else v = String(v);
+                                if (v.length > 80) v = v.substring(0, 80) + '...';
+                            }
+                            html += `<td class="px-3 py-2 border-t text-gray-700">${v}</td>`;
+                        });
+                        html += '</tr>';
                     });
+                    html += '</tbody></table>';
+                    body.innerHTML = html;
 
-                    document.getElementById('stat-k').textContent = Object.keys(clusterCounts).filter(k => k !== 'N/A').length;
-                    document.getElementById('stat-valid').textContent = valid + '/' + data.total;
-
-                    // 从progress获取平均轮廓系数
-                    fetch('/api/progress').then(r => r.json()).then(pd => {
-                        let tasks = Object.values(pd.tasks || {}).filter(t => t.task_type === 'cluster' && t.status === 'completed');
-                        if (sourceId !== '__all__') {
-                            tasks = tasks.filter(t => t.source_id === sourceId);
-                        }
-                        if (tasks.length > 0) {
-                            const scores = [];
-                            tasks.forEach(t => {
-                                const match = t.message.match(/轮廓系数 ([\d.]+)/);
-                                if (match) scores.push(parseFloat(match[1]));
-                            });
-                            const avg = scores.length > 0 ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(3) : '-';
-                            document.getElementById('stat-silhouette').textContent = avg;
-                        }
-                    });
-
-                    // 画图表
-                    const labels = Object.keys(clusterCounts).sort();
-                    const values = labels.map(l => clusterCounts[l]);
-                    const colors = labels.map((_, i) => `hsl(${(i * 360 / labels.length) % 360}, 65%, 55%)`);
-
-                    if (clusterChart) clusterChart.destroy();
-                    clusterChart = new Chart(document.getElementById('cluster-chart'), {
-                        type: 'bar',
-                        data: {
-                            labels: labels,
-                            datasets: [{ label: '样本数', data: values, backgroundColor: colors }]
-                        },
-                        options: {
-                            responsive: true,
-                            plugins: { legend: { display: false } },
-                            scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } }
-                        }
-                    });
+                    // 分页
+                    const totalPages = Math.ceil(data.total / data.page_size);
+                    let pg = '';
+                    if (page > 1) pg += `<button onclick="showPartitionSamples('${sourceId}','${batchId}',${partitionId},${page-1})" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 text-sm">上一页</button>`;
+                    pg += `<span class="text-sm text-gray-500">${page} / ${totalPages}</span>`;
+                    if (page < totalPages) pg += `<button onclick="showPartitionSamples('${sourceId}','${batchId}',${partitionId},${page+1})" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 text-sm">下一页</button>`;
+                    pagination.innerHTML = pg;
+                })
+                .catch(err => {
+                    body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`;
                 });
         }
+
+        document.getElementById('partition-modal-close').addEventListener('click', function() {
+            document.getElementById('partition-modal').classList.add('hidden');
+        });
+        document.getElementById('partition-modal').addEventListener('click', function(e) {
+            if (e.target === this) this.classList.add('hidden');
+        });
+
+        // 图片查看
+        function showSampleImage(sourceId, batchId, sampleId) {
+            const modal = document.getElementById('image-modal');
+            const img = document.getElementById('image-modal-img');
+            const title = document.getElementById('image-modal-title');
+            title.textContent = `图片 - ${sampleId}`;
+            img.src = '';
+            img.alt = '加载中...';
+            modal.classList.remove('hidden');
+
+            fetch(`/api/index/${sourceId}/${batchId}/sample/${sampleId}/image`)
+                .then(r => r.json())
+                .then(data => {
+                    img.src = `data:image/png;base64,${data.image_base64}`;
+                    img.alt = sampleId;
+                })
+                .catch(err => {
+                    img.alt = `加载失败: ${err.message}`;
+                });
+        }
+
+        document.getElementById('image-modal-close').addEventListener('click', function() {
+            document.getElementById('image-modal').classList.add('hidden');
+        });
+        document.getElementById('image-modal').addEventListener('click', function(e) {
+            if (e.target === this) this.classList.add('hidden');
+        });
 
         // 全选/清空
         document.getElementById('select-all').addEventListener('click', () => document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true));
@@ -632,7 +571,6 @@
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.source_id}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.batch_id}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.input_type}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.cluster_id || 'N/A'}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.difficulty || 'N/A'}</td>
                     <td class="px-6 py-4 whitespace-nowrap"><button onclick="alert('${s.sample_id}')" class="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700">查看</button></td>
                 </tr>`;

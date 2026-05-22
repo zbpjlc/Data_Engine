@@ -121,6 +121,8 @@ def get_index_stats(manifest_path: Path) -> dict[str, Any]:
     if not manifest_path.exists():
         raise FileNotFoundError(f"Lance 数据集不存在: {manifest_path}")
 
+    build_record = load_index_stats(manifest_path)
+
     with _lance_write_lock:
         ds = lance.dataset(str(manifest_path))
         indices = ds.list_indices()
@@ -136,18 +138,50 @@ def get_index_stats(manifest_path: Path) -> dict[str, Any]:
                 stats = ds.index_statistics(idx_name)
                 if isinstance(stats, str):
                     stats = json.loads(stats)
-                if isinstance(stats, dict) and "indices" in stats:
-                    for sub_idx in stats["indices"]:
-                        if "partitions" in sub_idx:
-                            for part in sub_idx["partitions"]:
-                                if "size" in part:
-                                    bucket_counts.append(part["size"])
-                            index_name = idx_name
-                            break
+                # 尝试多种格式提取分区大小
+                if isinstance(stats, dict):
+                    if "indices" in stats:
+                        for sub_idx in stats["indices"]:
+                            if "partitions" in sub_idx:
+                                for part in sub_idx["partitions"]:
+                                    if "size" in part:
+                                        bucket_counts.append(part["size"])
+                                break
+                    elif "num_partitions" in stats and "num_rows" in stats:
+                        # 兜底：无详细分区信息时，根据分区数和总行数估算
+                        np = stats.get("num_partitions", 0)
+                        nr = stats.get("num_rows", 0)
+                        if np > 0 and nr > 0:
+                            avg = nr // np
+                            bucket_counts = [avg] * np
                 if bucket_counts:
                     break
             except Exception:
                 continue
+
+    # 如果从 Lance 获取失败，尝试从保存的构建记录恢复
+    if not bucket_counts and build_record:
+        nr = build_record.get("total_rows", 0)
+        np = build_record.get("num_partitions", 0)
+        if nr > 0 and np > 0:
+            avg = nr // np
+            bucket_counts = [avg] * np
+            index_name = build_record.get("index_name", "idx_embedding_ivf")
+
+    # 最终兜底：直接从 Lance 数据集推断
+    if not bucket_counts:
+        try:
+            with _lance_write_lock:
+                ds2 = lance.dataset(str(manifest_path))
+                if ds2.list_indices():
+                    nr = ds2.count_rows()
+                    # IVF_PQ 默认分区数通常为 256
+                    np_default = get_config("index", "num_partitions", default=256)
+                    avg = nr // np_default
+                    bucket_counts = [avg] * np_default
+                    index_name = "idx_embedding_ivf"
+        except Exception:
+            pass
 
     if not bucket_counts:
         return {"has_index": False, "message": "未找到向量索引，请先构建索引"}

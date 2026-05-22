@@ -20,7 +20,7 @@ from data_engine.hashing import sample_id_for_page, sha256_file
 from data_engine.manifests import (
     write_json, read_json,
     read_manifest, write_manifest, append_manifest,
-    query_relative_paths, manifest_count,
+    query_relative_paths, query_sample_ids, manifest_count,
 )
 from data_engine.models import InputType, SourceMetadata, SourceRegistryModel, StageStatus, UnifiedSampleRecord
 from data_engine.registry import SourceRegistry
@@ -62,6 +62,7 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
     file_list_path = manifests_dir / "input_files.json"
     existing_records = []
     processed_files: set[str] = set()
+    processed_sample_ids: set[str] = set()
     stored_input_files = []
     
     # 尝试读取存储的输入文件列表
@@ -75,9 +76,10 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
     
     if manifest_path.exists():
         try:
-            # 只查询 relative_path 列，避免加载全部数据到内存
+            # 同时查询 relative_path 和 sample_id，双重去重
             processed_files = query_relative_paths(manifest_path)
-            print(f"发现已有manifest，已处理 {len(processed_files)} 个文件 (Lance高效查询)", file=sys.stderr)
+            processed_sample_ids = query_sample_ids(manifest_path)
+            print(f"发现已有manifest，已处理 {len(processed_files)} 个文件, {len(processed_sample_ids)} 个样本 (Lance高效查询)", file=sys.stderr)
         except Exception as e:
             print(f"查询manifest失败: {e}", file=sys.stderr)
 
@@ -183,12 +185,23 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
                         new_records.append(record)
                     
                     if len(new_records) >= batch_update_interval:
-                        current_dicts = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
-                        if manifest_path.exists():
-                            append_manifest(manifest_path, current_dicts)
-                        else:
-                            write_manifest(manifest_path, current_dicts)
-                        print(f"已保存 {len(new_records)} 条记录到Lance", file=sys.stderr)
+                        # 按 sample_id 去重，跳过已存在的样本
+                        current_dicts = []
+                        for r in new_records:
+                            r_dict = r.model_dump() if hasattr(r, 'model_dump') else r
+                            sid = r_dict.get("sample_id")
+                            if sid and sid in processed_sample_ids:
+                                continue  # 跳过重复样本
+                            current_dicts.append(r_dict)
+                            if sid:
+                                processed_sample_ids.add(sid)
+                        
+                        if current_dicts:
+                            if manifest_path.exists():
+                                append_manifest(manifest_path, current_dicts)
+                            else:
+                                write_manifest(manifest_path, current_dicts)
+                            print(f"已保存 {len(current_dicts)} 条记录到Lance", file=sys.stderr)
                         new_records = []
                         
                         if progress_tracker.is_stopped(task_id):
@@ -207,11 +220,22 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
         
         # 保存剩余未写入的记录
         if new_records:
-            remaining_dicts = [r.model_dump() if hasattr(r, 'model_dump') else r for r in new_records]
-            if manifest_path.exists():
-                append_manifest(manifest_path, remaining_dicts)
-            else:
-                write_manifest(manifest_path, remaining_dicts)
+            # 按 sample_id 去重，跳过已存在的样本
+            remaining_dicts = []
+            for r in new_records:
+                r_dict = r.model_dump() if hasattr(r, 'model_dump') else r
+                sid = r_dict.get("sample_id")
+                if sid and sid in processed_sample_ids:
+                    continue  # 跳过重复样本
+                remaining_dicts.append(r_dict)
+                if sid:
+                    processed_sample_ids.add(sid)
+            
+            if remaining_dicts:
+                if manifest_path.exists():
+                    append_manifest(manifest_path, remaining_dicts)
+                else:
+                    write_manifest(manifest_path, remaining_dicts)
 
         # 获取实际总记录数
         total_samples_final = manifest_count(manifest_path) if manifest_path.exists() else 0

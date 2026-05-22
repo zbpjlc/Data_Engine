@@ -266,6 +266,18 @@ def query_relative_paths(path: Path) -> set[str]:
         return set()
 
 
+def query_sample_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    try:
+        ds = lance.dataset(str(path))
+        col = ds.to_table(columns=["sample_id"]).column("sample_id")
+        return set(col.to_pylist())
+    except Exception as e:
+        print(f"读取 Lance 数据集失败 {path}: {e}", file=sys.stderr)
+        return set()
+
+
 def manifest_count(path: Path) -> int:
     """Return the number of records in a Lance dataset."""
     if not path.exists():

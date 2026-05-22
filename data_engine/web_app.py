@@ -862,6 +862,98 @@ async def get_index_stats(source_id: str, batch_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/index/{source_id}/{batch_id}/partition/{partition_id}")
+async def get_partition_samples(source_id: str, batch_id: str, partition_id: int, page: int = 1, page_size: int = 20):
+    """获取指定分区的样本列表"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifest_path = batch_dir / "manifests" / "ingest.lance"
+
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="Lance 数据集不存在")
+
+        import pyarrow as pa
+
+        with _lance_write_lock:
+            ds = lance.dataset(str(manifest_path))
+
+            # 获取分区对应的质心向量
+            try:
+                stats = ds.index_statistics("idx_embedding_ivf")
+                centroids = stats["indices"][0]["centroids"]
+                if partition_id < 0 or partition_id >= len(centroids):
+                    raise HTTPException(status_code=400, detail=f"分区ID超出范围 (0-{len(centroids)-1})")
+                centroid = centroids[partition_id]
+            except HTTPException:
+                raise
+            except Exception:
+                raise HTTPException(status_code=404, detail="未找到向量索引")
+
+            # 用质心向量查询该分区的样本
+            query_vec = pa.array(centroid, type=pa.float32())
+            results = ds.to_table(
+                columns=[c for c in ds.schema.names if c != "embedding"],
+                nearest={"column": "embedding", "q": query_vec, "k": page_size * page}
+            )
+            total = min(results.num_rows, page_size * 20)  # 限制最大返回
+            offset = (page - 1) * page_size
+            limit = min(page_size, total - offset)
+            if limit <= 0:
+                return {"partition_id": partition_id, "samples": [], "total": total, "page": page, "page_size": page_size}
+
+            # 取当前页数据
+            if offset > 0 or limit < results.num_rows:
+                table = results.slice(offset, limit)
+            else:
+                table = results
+
+            samples = table.to_pylist()
+            for row in samples:
+                for k, v in list(row.items()):
+                    if k == "image_data":
+                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                    elif isinstance(v, bytes):
+                        row[k] = f"<{len(v)} bytes>"
+                    elif k in ("_distance",):
+                        row[k] = round(float(v), 4) if v is not None else None
+            return {"partition_id": partition_id, "samples": samples, "total": total, "page": page, "page_size": page_size}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/index/{source_id}/{batch_id}/sample/{sample_id}/image")
+async def get_sample_image(source_id: str, batch_id: str, sample_id: str):
+    """获取指定样本的图片"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifest_path = batch_dir / "manifests" / "ingest.lance"
+
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="Lance 数据集不存在")
+
+        with _lance_write_lock:
+            ds = lance.dataset(str(manifest_path))
+            table = ds.to_table(filter=f"sample_id = '{sample_id}'", columns=["sample_id", "image_data"])
+            if table.num_rows == 0:
+                raise HTTPException(status_code=404, detail="样本不存在")
+            row = table.to_pylist()[0]
+            image_data = row.get("image_data")
+            if not image_data:
+                raise HTTPException(status_code=404, detail="样本无图片数据")
+
+            import base64
+            b64 = base64.b64encode(image_data).decode("utf-8")
+            return {"sample_id": sample_id, "image_base64": b64, "size": len(image_data)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/hard-case-review")
 async def hard_case_review(request: Request):
     """Hard Case复核页面"""
