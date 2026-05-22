@@ -28,6 +28,10 @@ embedding:
   progress_update_interval: 100  # 每N条记录更新一次进度到progress_state.json
   gc_interval: 1000              # 每N条记录做一次 gc.collect()
 
+index:
+  num_partitions: 256            # IVF_PQ 聚类分区数
+  num_sub_vectors: 16            # PQ 子向量数（768维推荐 16 或 32）
+
 clustering:
   default_n_clusters: 5
   random_state: 42

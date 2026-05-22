@@ -251,11 +251,7 @@ def read_manifest(path: Path, columns: list[str] | None = None) -> list[dict]:
     with _lance_write_lock:
         ds = lance.dataset(str(path))
         table = ds.to_table(columns=columns)
-        records = []
-        for i in range(table.num_rows):
-            row = {col: table.column(col)[i].as_py() for col in table.column_names}
-            records.append(_arrow_to_record(row))
-        return records
+        return [_arrow_to_record(row) for row in table.to_pylist()]
 
 
 def query_relative_paths(path: Path) -> set[str]:

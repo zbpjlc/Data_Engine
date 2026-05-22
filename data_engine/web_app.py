@@ -543,10 +543,7 @@ async def start_embed(source_id: str, batch_id: str = None):
                             limit = min(chunk_size, total_count - offset)
                             with _lance_write_lock:
                                 chunk_table = ds.to_table(offset=offset, limit=limit)
-                            chunk_records = []
-                            for i in range(chunk_table.num_rows):
-                                row = {col: chunk_table.column(col)[i].as_py() for col in chunk_table.column_names}
-                                chunk_records.append(row)
+                            chunk_records = chunk_table.to_pylist()
                             
                             # 跳过已处理的记录（在当前 chunk 内检查）
                             records_to_process = [r for r in chunk_records if r.get("embedding") is None]
@@ -753,8 +750,106 @@ async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 
         thread.daemon = True
         thread.start()
 
-        label = "全部数据源" if is_all else source_id
         return {"message": f"已启动 {label} 的聚类任务", "status": "started"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/index/{source_id}")
+async def start_index_build(source_id: str, batch_id: str = None, num_partitions: int = 256, num_sub_vectors: int = 16):
+    """构建向量索引（IVF_PQ）"""
+    try:
+        task_id = f"index_{source_id}_{batch_id}" if batch_id else f"index_{source_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+            if task_id not in alive_threads:
+                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+            else:
+                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+
+        def execute_index_task():
+            try:
+                from data_engine.index import build_ivf_pq_index
+
+                global_status = collect_global_status(registry)
+                source_batches = [b for b in global_status.batches if b.source_id == source_id]
+                if batch_id:
+                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
+
+                for batch in source_batches:
+                    bid = batch.batch_id
+                    s_id = batch.source_id
+                    source = registry.get(s_id)
+                    batch_dir = source.resolve_batch_dir(bid)
+                    manifest_path = batch_dir / "manifests" / "ingest.lance"
+
+                    if not manifest_path.exists():
+                        print(f"[Index] 跳过 {bid}: ingest.lance 不存在", file=sys.stderr)
+                        continue
+
+                    t_id = f"index_{s_id}_{bid}"
+                    total_count = manifest_count(manifest_path)
+
+                    progress_tracker.start_task(
+                        task_id=t_id,
+                        task_type="index",
+                        source_id=s_id,
+                        batch_id=bid,
+                        total=total_count,
+                        message=f"开始构建向量索引 ({total_count} 条)"
+                    )
+
+                    try:
+                        accelerator = "cuda" if (HAS_TORCH and torch.cuda.is_available()) else None
+                        result = build_ivf_pq_index(
+                            manifest_path,
+                            num_partitions=num_partitions,
+                            num_sub_vectors=num_sub_vectors,
+                            accelerator=accelerator,
+                        )
+
+                        progress_tracker.complete_task(
+                            task_id=t_id,
+                            message=f"索引构建完成: {num_partitions} 分区, 版本 {result['version']}"
+                        )
+                        invalidate_status_cache()
+                        print(f"[Index] ✓ 批次 {bid} 索引构建成功", file=sys.stderr)
+
+                    except Exception as e:
+                        print(f"[Index] ✗ 批次 {bid} 索引构建失败: {e}", file=sys.stderr)
+                        traceback.print_exc()
+                        progress_tracker.fail_task(task_id=t_id, error_message=str(e))
+
+            except Exception as e:
+                print(f"[Index] ✗ 索引任务执行失败: {e}", file=sys.stderr)
+                traceback.print_exc()
+
+        thread = threading.Thread(target=execute_index_task, name=task_id)
+        thread.daemon = True
+        thread.start()
+
+        return {"message": f"已启动 {source_id} 的向量索引构建任务", "status": "started"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/index/{source_id}/{batch_id}/stats")
+async def get_index_stats(source_id: str, batch_id: str):
+    """获取向量索引的桶分布统计"""
+    try:
+        from data_engine.index import get_index_stats as _get_stats
+
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifest_path = batch_dir / "manifests" / "ingest.lance"
+
+        if not manifest_path.exists():
+            raise HTTPException(status_code=404, detail="Lance 数据集不存在")
+
+        return _get_stats(manifest_path)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -884,15 +979,13 @@ async def lancedb_query_data(
 
                 start = (page - 1) * page_size
                 end = min(start + page_size, total)
-                page_rows = []
-                for i in range(start, end):
-                    row = {col: results.column(col)[i].as_py() for col in results.column_names}
+                page_rows = results.to_pylist()[start:end]
+                for row in page_rows:
                     for k, v in list(row.items()):
                         if k == "image_data":
                             row[k] = {"has_image": True, "size": len(v)} if v is not None else None
                         elif isinstance(v, bytes):
                             row[k] = f"<{len(v)} bytes>"
-                    page_rows.append(row)
 
                 return {
                     "columns": list(results.column_names),
@@ -911,15 +1004,13 @@ async def lancedb_query_data(
             else:
                 limit = min(page_size, total - start)
                 results = ds.to_table(offset=start, limit=limit, columns=select_cols)
-                page_rows = []
-                for i in range(results.num_rows):
-                    row = {col: results.column(col)[i].as_py() for col in results.column_names}
+                page_rows = results.to_pylist()
+                for row in page_rows:
                     for k, v in list(row.items()):
                         if k == "image_data":
                             row[k] = {"has_image": True, "size": len(v)} if v is not None else None
                         elif isinstance(v, bytes):
                             row[k] = f"<{len(v)} bytes>"
-                    page_rows.append(row)
 
             return {
                 "columns": select_cols or schema_fields,

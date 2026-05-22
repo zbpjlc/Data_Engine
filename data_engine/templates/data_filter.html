@@ -103,6 +103,97 @@
                 </div>
             </div>
 
+            <!-- 向量索引卡片 -->
+            <div class="bg-white rounded-lg shadow p-6 mb-8">
+                <h2 class="text-lg font-semibold text-gray-900 mb-6">向量索引</h2>
+                
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- 左侧：索引构建 -->
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">数据源</label>
+                            <select id="index-source" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                <option value="">选择数据源...</option>
+                                {% for source in sources %}
+                                <option value="{{ source.source_id }}">{{ source.source_id }} ({{ source.batch_count }} 批次)</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">批次</label>
+                            <select id="index-batch" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                <option value="">全部批次</option>
+                            </select>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">分区数</label>
+                                <input id="index-partitions" type="number" value="256" min="16" max="1024" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">子向量数</label>
+                                <input id="index-subvectors" type="number" value="16" min="4" max="96" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                        </div>
+                        <button id="btn-index" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium">
+                            构建向量索引
+                        </button>
+                        <div id="index-progress" class="hidden">
+                            <div class="flex items-center justify-between text-sm mb-1">
+                                <span id="index-progress-msg" class="text-gray-600">准备中...</span>
+                                <span id="index-progress-pct" class="text-indigo-600 font-medium">0%</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-2">
+                                <div id="index-progress-bar" class="bg-indigo-600 h-2 rounded-full transition-all" style="width:0%"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右侧：索引桶分布 -->
+                    <div>
+                        <div id="index-stats-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">
+                            构建索引后将在此显示桶分布
+                        </div>
+                        <div id="index-stats" class="hidden space-y-4">
+                            <div class="grid grid-cols-3 gap-3">
+                                <div class="bg-indigo-50 rounded-lg p-3 text-center">
+                                    <div class="text-xs text-indigo-600 mb-1">分区数</div>
+                                    <div id="idx-partitions" class="text-xl font-bold text-indigo-800">-</div>
+                                </div>
+                                <div class="bg-blue-50 rounded-lg p-3 text-center">
+                                    <div class="text-xs text-blue-600 mb-1">总向量数</div>
+                                    <div id="idx-vectors" class="text-xl font-bold text-blue-800">-</div>
+                                </div>
+                                <div class="bg-green-50 rounded-lg p-3 text-center">
+                                    <div class="text-xs text-green-600 mb-1">平均桶大小</div>
+                                    <div id="idx-avg" class="text-xl font-bold text-green-800">-</div>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-3 gap-3">
+                                <div class="bg-yellow-50 rounded-lg p-2 text-center">
+                                    <div class="text-xs text-yellow-600">空桶</div>
+                                    <div id="idx-empty" class="text-lg font-bold text-yellow-800">-</div>
+                                </div>
+                                <div class="bg-orange-50 rounded-lg p-2 text-center">
+                                    <div class="text-xs text-orange-600">小簇(&lt;50)</div>
+                                    <div id="idx-small" class="text-lg font-bold text-orange-800">-</div>
+                                </div>
+                                <div class="bg-red-50 rounded-lg p-2 text-center">
+                                    <div class="text-xs text-red-600">大簇(&gt;3000)</div>
+                                    <div id="idx-large" class="text-lg font-bold text-red-800">-</div>
+                                </div>
+                            </div>
+                            <div class="bg-gray-50 rounded-lg p-4">
+                                <canvas id="index-chart" height="180"></canvas>
+                            </div>
+                            <div id="index-build-record" class="hidden bg-gray-50 rounded-lg p-3 text-xs text-gray-500">
+                                <span id="idx-built-at"></span> | 分区 <span id="idx-rec-partitions"></span> | 子向量 <span id="idx-rec-subvectors"></span> | 版本 <span id="idx-rec-version"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- 高级筛选器 -->
             <div class="bg-white rounded-lg shadow p-6 mb-8">
                 <h2 class="text-lg font-semibold text-gray-900 mb-6">数据筛选</h2>
@@ -206,6 +297,7 @@
     <script>
         const batchData = {{ batches_json | tojson }};
         let clusterChart = null;
+        let indexChart = null;
 
         // 聚类数据源联动批次
         document.getElementById('cluster-source').addEventListener('change', function() {
@@ -217,6 +309,150 @@
                 batchSelect.innerHTML += `<option value="${b.batch_id}">${b.source_id}/${b.batch_id} (${b.sample_count} 样本)</option>`;
             });
         });
+
+        // 索引数据源联动批次
+        document.getElementById('index-source').addEventListener('change', function() {
+            const sourceId = this.value;
+            const batchSelect = document.getElementById('index-batch');
+            batchSelect.innerHTML = '<option value="">全部批次</option>';
+            const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : [];
+            filtered.forEach(b => {
+                batchSelect.innerHTML += `<option value="${b.batch_id}">${b.source_id}/${b.batch_id} (${b.sample_count} 样本)</option>`;
+            });
+        });
+
+        // 构建向量索引
+        document.getElementById('btn-index').addEventListener('click', function() {
+            const sourceId = document.getElementById('index-source').value;
+            if (!sourceId) { alert('请选择数据源'); return; }
+
+            const batchId = document.getElementById('index-batch').value;
+            const partitions = document.getElementById('index-partitions').value;
+            const subvectors = document.getElementById('index-subvectors').value;
+            const progressDiv = document.getElementById('index-progress');
+            const statsEmpty = document.getElementById('index-stats-empty');
+            const statsDiv = document.getElementById('index-stats');
+
+            progressDiv.classList.remove('hidden');
+            statsEmpty.classList.add('hidden');
+            statsDiv.classList.add('hidden');
+            this.disabled = true;
+            this.textContent = '构建中...';
+
+            let url = `/api/index/${sourceId}?num_partitions=${partitions}&num_sub_vectors=${subvectors}`;
+            if (batchId) url += `&batch_id=${batchId}`;
+
+            fetch(url, { method: 'POST' })
+                .then(r => r.json())
+                .then(() => pollIndex(sourceId, batchId))
+                .catch(err => {
+                    alert('索引构建启动失败: ' + err.message);
+                    resetIndexBtn();
+                });
+        });
+
+        function pollIndex(sourceId, batchId) {
+            const interval = setInterval(() => {
+                fetch('/api/progress').then(r => r.json()).then(data => {
+                    let tasks = Object.values(data.tasks || {}).filter(t => t.task_type === 'index');
+                    if (sourceId && sourceId !== '__all__') tasks = tasks.filter(t => t.source_id === sourceId);
+                    if (batchId) tasks = tasks.filter(t => t.batch_id === batchId);
+                    if (tasks.length === 0) return;
+
+                    const totalAll = tasks.reduce((s, t) => s + (t.total || 0), 0);
+                    const currentAll = tasks.reduce((s, t) => s + (t.current || 0), 0);
+                    const pct = totalAll > 0 ? Math.round(currentAll / totalAll * 100) : 0;
+                    const running = tasks.filter(t => t.status === 'running');
+                    const failed = tasks.filter(t => t.status === 'failed');
+                    const lastMsg = tasks[tasks.length - 1].message;
+                    document.getElementById('index-progress-msg').textContent = `${lastMsg} (${tasks.length} 批次)`;
+                    document.getElementById('index-progress-pct').textContent = pct + '%';
+                    document.getElementById('index-progress-bar').style.width = pct + '%';
+
+                    if (running.length === 0 && failed.length === 0) {
+                        clearInterval(interval);
+                        document.getElementById('index-progress-bar').classList.remove('bg-indigo-600');
+                        document.getElementById('index-progress-bar').classList.add('bg-green-500');
+                        loadIndexStats(sourceId, batchId);
+                        resetIndexBtn();
+                    } else if (running.length === 0 && failed.length > 0) {
+                        clearInterval(interval);
+                        document.getElementById('index-progress-bar').classList.remove('bg-indigo-600');
+                        document.getElementById('index-progress-bar').classList.add('bg-red-500');
+                        document.getElementById('index-progress-msg').textContent = '失败: ' + failed[0].error_message;
+                        resetIndexBtn();
+                    }
+                }).catch(() => {});
+            }, 1000);
+        }
+
+        function resetIndexBtn() {
+            const btn = document.getElementById('btn-index');
+            btn.disabled = false;
+            btn.textContent = '构建向量索引';
+        }
+
+        function loadIndexStats(sourceId, batchId) {
+            if (!batchId) {
+                // 选择全部批次时，取第一个批次
+                const filtered = batchData.filter(b => b.source_id === sourceId);
+                if (filtered.length === 0) return;
+                batchId = filtered[0].batch_id;
+            }
+
+            fetch(`/api/index/${sourceId}/${batchId}/stats`)
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.has_index) {
+                        document.getElementById('index-stats-empty').textContent = data.message;
+                        return;
+                    }
+
+                    document.getElementById('index-stats-empty').classList.add('hidden');
+                    document.getElementById('index-stats').classList.remove('hidden');
+
+                    document.getElementById('idx-partitions').textContent = data.total_partitions;
+                    document.getElementById('idx-vectors').textContent = data.total_vectors.toLocaleString();
+                    document.getElementById('idx-avg').textContent = data.avg_bucket;
+                    document.getElementById('idx-empty').textContent = data.empty_buckets;
+                    document.getElementById('idx-small').textContent = data.small_buckets;
+                    document.getElementById('idx-large').textContent = data.large_buckets;
+
+                    // 显示构建记录
+                    if (data.build_record) {
+                        document.getElementById('index-build-record').classList.remove('hidden');
+                        document.getElementById('idx-built-at').textContent = data.build_record.built_at ? new Date(data.build_record.built_at).toLocaleString('zh-CN') : '-';
+                        document.getElementById('idx-rec-partitions').textContent = data.build_record.num_partitions || '-';
+                        document.getElementById('idx-rec-subvectors').textContent = data.build_record.num_sub_vectors || '-';
+                        document.getElementById('idx-rec-version').textContent = data.build_record.lance_version || '-';
+                    }
+
+                    // 画柱状图
+                    if (indexChart) indexChart.destroy();
+                    const labels = data.buckets.map((_, i) => `P${i}`);
+                    const colors = data.buckets.map(v => {
+                        if (v === 0) return 'rgba(200,200,200,0.6)';
+                        if (v < 50) return 'rgba(251,146,60,0.7)';
+                        if (v > 3000) return 'rgba(239,68,68,0.7)';
+                        return 'rgba(99,102,241,0.6)';
+                    });
+                    indexChart = new Chart(document.getElementById('index-chart'), {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: [{ label: '桶大小', data: data.buckets, backgroundColor: colors }]
+                        },
+                        options: {
+                            responsive: true,
+                            plugins: { legend: { display: false }, tooltip: { callbacks: { title: (items) => items[0].label, label: (item) => `${item.raw} 条` } } },
+                            scales: { y: { beginAtZero: true, title: { display: true, text: '样本数' } }, x: { title: { display: true, text: '分区' } } }
+                        }
+                    });
+                })
+                .catch(err => {
+                    document.getElementById('index-stats-empty').textContent = '加载统计失败: ' + err.message;
+                });
+        }
 
         // 开始聚类
         document.getElementById('btn-cluster').addEventListener('click', function() {

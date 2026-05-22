@@ -111,10 +111,7 @@ def _detect_stage_status(manifests_dir: Path) -> str:
                 with _lance_write_lock:
                     ds = lance.dataset(str(ingest_manifest))
                     table = ds.to_table(limit=20)
-                    sample_records = []
-                    for i in range(table.num_rows):
-                        row = {col: table.column(col)[i].as_py() for col in table.column_names}
-                        sample_records.append(row)
+                    sample_records = table.to_pylist()
             except Exception:
                 return "ingested"
         else:
