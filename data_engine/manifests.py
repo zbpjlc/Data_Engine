@@ -248,30 +248,41 @@ def read_manifest(path: Path, columns: list[str] | None = None) -> list[dict]:
     """
     if not path.exists():
         return []
-    ds = lance.dataset(str(path))
-    table = ds.to_table(columns=columns)
-    records = []
-    for i in range(table.num_rows):
-        row = {col: table.column(col)[i].as_py() for col in table.column_names}
-        records.append(_arrow_to_record(row))
-    return records
+    with _lance_write_lock:
+        ds = lance.dataset(str(path))
+        table = ds.to_table(columns=columns)
+        records = []
+        for i in range(table.num_rows):
+            row = {col: table.column(col)[i].as_py() for col in table.column_names}
+            records.append(_arrow_to_record(row))
+        return records
 
 
 def query_relative_paths(path: Path) -> set[str]:
-    """Efficiently query only the relative_path column (for resume logic)."""
     if not path.exists():
         return set()
-    ds = lance.dataset(str(path))
-    col = ds.to_table(columns=["relative_path"]).column("relative_path")
-    return set(col.to_pylist())
+    try:
+        ds = lance.dataset(str(path))
+        col = ds.to_table(columns=["relative_path"]).column("relative_path")
+        return set(col.to_pylist())
+    except Exception as e:
+        print(f"读取 Lance 数据集失败 {path}: {e}", file=sys.stderr)
+        return set()
 
 
 def manifest_count(path: Path) -> int:
     """Return the number of records in a Lance dataset."""
     if not path.exists():
         return 0
-    ds = lance.dataset(str(path))
-    return ds.count_rows()
+    
+    # 仅仅是将 Lance 数据集加载进内存，这通常是只读且线程安全的
+    try:
+        ds = lance.dataset(str(path))
+        return ds.count_rows()
+    except Exception as e:
+        # 防止底层报错导致整个服务挂掉，加个安全的日志打印
+        print(f"读取 Lance 数据集失败 {path}: {e}")
+        return 0
 
 
 def ensure_parent(path: Path) -> None:

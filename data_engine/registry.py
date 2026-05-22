@@ -7,6 +7,7 @@ from pathlib import Path
 
 from data_engine.models import SourceConfig, SourceRegistryModel, SourceScanSummary, BatchMetadata
 from data_engine.yaml_support import dump_yaml, load_yaml
+from data_engine.manifests import _lance_write_lock
 
 
 DEFAULT_REGISTRY_PATH = Path("sources.yaml")
@@ -86,8 +87,9 @@ class SourceRegistry:
                         lance_path = manifests_dir / "ingest.lance"
                         if lance_path.exists():
                             try:
-                                ds = lance.dataset(str(lance_path))
-                                lance_version = max(lance_version, ds.version)
+                                with _lance_write_lock:
+                                    ds = lance.dataset(str(lance_path))
+                                    lance_version = max(lance_version, ds.version)
                             except Exception:
                                 pass
                     try:

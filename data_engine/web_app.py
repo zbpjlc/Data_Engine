@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import json
 import gc
 from pathlib import Path
@@ -516,7 +517,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                         )
                         
                         # 分批读取和处理记录，避免 offset overflow
-                        ds = lance.dataset(str(manifest_path))
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(manifest_path))
                         chunk_size = get_config("embedding", "batch_update_interval", default=10000)
                         
                         # 创建一次 extractor，复用模型
@@ -525,7 +527,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                         
                         # 用 count_rows 计算实际已处理数，作为续跑起点
                         try:
-                            processed_count = ds.count_rows(filter="embedding IS NOT NULL")
+                            with _lance_write_lock:
+                                processed_count = ds.count_rows(filter="embedding IS NOT NULL")
                             start_offset = (processed_count // chunk_size) * chunk_size
                             print(f"[Embedding] 实际已有 {processed_count} 条记录含embedding，从 offset={start_offset} 开始")
                         except Exception:
@@ -538,7 +541,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                                 break
                             
                             limit = min(chunk_size, total_count - offset)
-                            chunk_table = ds.to_table(offset=offset, limit=limit)
+                            with _lance_write_lock:
+                                chunk_table = ds.to_table(offset=offset, limit=limit)
                             chunk_records = []
                             for i in range(chunk_table.num_rows):
                                 row = {col: chunk_table.column(col)[i].as_py() for col in chunk_table.column_names}
@@ -571,7 +575,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                             print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
 
                             # merge_insert 后重新获取 dataset（版本已变）
-                            ds = lance.dataset(str(manifest_path))
+                            with _lance_write_lock:
+                                ds = lance.dataset(str(manifest_path))
                             
                             # 保存 chunk 长度用于进度更新
                             chunk_len = len(chunk_records)
@@ -595,7 +600,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                             print(f"[Embedding] 任务已停止，不标记完成", file=sys.stderr)
                         else:
                             # 统计实际成功的embedding数
-                            verify_table = ds.to_table(columns=["embedding"])
+                            with _lance_write_lock:
+                                verify_table = ds.to_table(columns=["embedding"])
                             actual_success = sum(
                                 1 for i in range(verify_table.num_rows)
                                 if verify_table.column("embedding")[i].as_py() is not None
@@ -796,26 +802,27 @@ async def lancedb_list_sources():
             manifest_path = find_stage_manifest(manifests_dir, "ingest")
             if manifest_path and manifest_path.suffix == ".lance" and manifest_path.exists():
                 try:
-                    ds = lance.dataset(str(manifest_path))
-                    schema_fields = [f.name for f in ds.schema]
-                    versions = []
-                    for v in ds.versions():
-                        ts = v.get("timestamp")
-                        versions.append({
-                            "version": v["version"],
-                            "timestamp": ts.isoformat() if ts else None,
-                            "num_rows": int(v.get("metadata", {}).get("total_rows", 0)),
+                    with _lance_write_lock:
+                        ds = lance.dataset(str(manifest_path))
+                        schema_fields = [f.name for f in ds.schema]
+                        versions = []
+                        for v in ds.versions():
+                            ts = v.get("timestamp")
+                            versions.append({
+                                "version": v["version"],
+                                "timestamp": ts.isoformat() if ts else None,
+                                "num_rows": int(v.get("metadata", {}).get("total_rows", 0)),
+                            })
+                        result.append({
+                            "source_id": batch.source_id,
+                            "batch_id": batch.batch_id,
+                            "category": batch.category,
+                            "stage_status": batch.stage_status,
+                            "sample_count": batch.sample_count,
+                            "current_version": ds.version,
+                            "columns": schema_fields,
+                            "versions": versions,
                         })
-                    result.append({
-                        "source_id": batch.source_id,
-                        "batch_id": batch.batch_id,
-                        "category": batch.category,
-                        "stage_status": batch.stage_status,
-                        "sample_count": batch.sample_count,
-                        "current_version": ds.version,
-                        "columns": schema_fields,
-                        "versions": versions,
-                    })
                 except Exception:
                     pass
         return {"sources": result}
@@ -851,43 +858,71 @@ async def lancedb_query_data(
         if not manifest_path or manifest_path.suffix != ".lance":
             raise HTTPException(status_code=404, detail="No Lance data found")
 
-        if version:
-            ds = lance.dataset(str(manifest_path)).checkout_version(version)
-        else:
-            ds = lance.dataset(str(manifest_path))
-        total = ds.count_rows()
+        with _lance_write_lock:
+            if version:
+                ds = lance.dataset(str(manifest_path)).checkout_version(version)
+            else:
+                ds = lance.dataset(str(manifest_path))
+            total = ds.count_rows()
 
-        select_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
-        if select_cols and "sample_id" not in select_cols:
-            select_cols.append("sample_id")
+            select_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+            if select_cols and "sample_id" not in select_cols:
+                select_cols.append("sample_id")
 
-        schema_fields = [f.name for f in ds.schema]
+            schema_fields = [f.name for f in ds.schema]
 
-        if search and search_col and search_col in schema_fields:
-            safe_search = search.replace("'", "''")
-            try:
-                results = ds.to_table(
-                    columns=select_cols,
-                    filter=f"contains(cast({search_col} as string), '{safe_search}')",
-                )
-            except Exception:
-                results = ds.to_table(columns=select_cols)
-            total = results.num_rows
+            if search and search_col and search_col in schema_fields:
+                safe_search = search.replace("'", "''")
+                try:
+                    results = ds.to_table(
+                        columns=select_cols,
+                        filter=f"contains(cast({search_col} as string), '{safe_search}')",
+                    )
+                except Exception:
+                    results = ds.to_table(columns=select_cols)
+                total = results.num_rows
+
+                start = (page - 1) * page_size
+                end = min(start + page_size, total)
+                page_rows = []
+                for i in range(start, end):
+                    row = {col: results.column(col)[i].as_py() for col in results.column_names}
+                    for k, v in list(row.items()):
+                        if k == "image_data":
+                            row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                        elif isinstance(v, bytes):
+                            row[k] = f"<{len(v)} bytes>"
+                    page_rows.append(row)
+
+                return {
+                    "columns": list(results.column_names),
+                    "schema": schema_fields,
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": (total + page_size - 1) // page_size,
+                    "data": page_rows,
+                    "version": ds.version,
+                }
 
             start = (page - 1) * page_size
-            end = min(start + page_size, total)
-            page_rows = []
-            for i in range(start, end):
-                row = {col: results.column(col)[i].as_py() for col in results.column_names}
-                for k, v in list(row.items()):
-                    if k == "image_data":
-                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
-                    elif isinstance(v, bytes):
-                        row[k] = f"<{len(v)} bytes>"
-                page_rows.append(row)
+            if start >= total:
+                page_rows = []
+            else:
+                limit = min(page_size, total - start)
+                results = ds.to_table(offset=start, limit=limit, columns=select_cols)
+                page_rows = []
+                for i in range(results.num_rows):
+                    row = {col: results.column(col)[i].as_py() for col in results.column_names}
+                    for k, v in list(row.items()):
+                        if k == "image_data":
+                            row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                        elif isinstance(v, bytes):
+                            row[k] = f"<{len(v)} bytes>"
+                    page_rows.append(row)
 
             return {
-                "columns": list(results.column_names),
+                "columns": select_cols or schema_fields,
                 "schema": schema_fields,
                 "total": total,
                 "page": page,
@@ -896,33 +931,6 @@ async def lancedb_query_data(
                 "data": page_rows,
                 "version": ds.version,
             }
-
-        start = (page - 1) * page_size
-        if start >= total:
-            page_rows = []
-        else:
-            limit = min(page_size, total - start)
-            results = ds.to_table(offset=start, limit=limit, columns=select_cols)
-            page_rows = []
-            for i in range(results.num_rows):
-                row = {col: results.column(col)[i].as_py() for col in results.column_names}
-                for k, v in list(row.items()):
-                    if k == "image_data":
-                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
-                    elif isinstance(v, bytes):
-                        row[k] = f"<{len(v)} bytes>"
-                page_rows.append(row)
-
-        return {
-            "columns": select_cols or schema_fields,
-            "schema": schema_fields,
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "total_pages": (total + page_size - 1) // page_size,
-            "data": page_rows,
-            "version": ds.version,
-        }
     except HTTPException:
         raise
     except Exception as e:
@@ -940,23 +948,24 @@ async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, versi
         if not manifest_path or manifest_path.suffix != ".lance":
             raise HTTPException(status_code=404, detail="No Lance data found")
 
-        if version:
-            ds = lance.dataset(str(manifest_path)).checkout_version(version)
-        else:
-            ds = lance.dataset(str(manifest_path))
+        with _lance_write_lock:
+            if version:
+                ds = lance.dataset(str(manifest_path)).checkout_version(version)
+            else:
+                ds = lance.dataset(str(manifest_path))
 
-        results = ds.to_table(
-            columns=["sample_id", "image_data"],
-            filter=f"sample_id = '{sample_id}'",
-        )
-        if results.num_rows == 0:
-            raise HTTPException(status_code=404, detail="Sample not found")
+            results = ds.to_table(
+                columns=["sample_id", "image_data"],
+                filter=f"sample_id = '{sample_id}'",
+            )
+            if results.num_rows == 0:
+                raise HTTPException(status_code=404, detail="Sample not found")
 
-        image_bytes = results.column("image_data")[0].as_py()
-        if image_bytes is None:
-            raise HTTPException(status_code=404, detail="No image data")
+            image_bytes = results.column("image_data")[0].as_py()
+            if image_bytes is None:
+                raise HTTPException(status_code=404, detail="No image data")
 
-        return Response(content=image_bytes, media_type="image/jpeg")
+            return Response(content=image_bytes, media_type="image/jpeg")
     except HTTPException:
         raise
     except Exception as e:
