@@ -80,7 +80,7 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
         try:
             with _lance_write_lock:
                 ds = lance.dataset(str(ingest_manifest))
-                lance_version = ds.version
+                lance_version = getattr(ds, "version", None)
                 # 用 lance 实际行数校验 sample_count，不一致时以 lance 为准
                 lance_count = manifest_count(ingest_manifest)
                 if lance_count > 0 and lance_count != sample_count:

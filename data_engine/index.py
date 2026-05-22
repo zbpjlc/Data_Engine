@@ -102,7 +102,7 @@ def build_ivf_pq_index(
             "num_partitions": num_partitions,
             "num_sub_vectors": num_sub_vectors,
             "total_rows": total_rows,
-            "lance_version": ds.version,
+            "lance_version": lance.__version__,
             "manifest_path": str(manifest_path),
         }
         _save_index_stats(manifest_path, result)

@@ -89,7 +89,7 @@ class SourceRegistry:
                             try:
                                 with _lance_write_lock:
                                     ds = lance.dataset(str(lance_path))
-                                    lance_version = max(lance_version, ds.version)
+                                    lance_version = max(lance_version, getattr(ds, "version", 0))
                             except Exception:
                                 pass
                     try:

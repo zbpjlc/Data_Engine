@@ -162,7 +162,7 @@ def run_ingest(registry: SourceRegistry, source_id: str, batch_id: str) -> Inges
         new_records: list[UnifiedSampleRecord] = []
         was_stopped = False
         batch_update_interval = get_config("ingest", "batch_update_interval", default=100)
-        with tqdm(files_to_process, desc="处理文件", unit="file", total=len(input_files), initial=skipped_count) as pbar:
+        with tqdm(files_to_process, desc="处理文件", unit="file", total=len(input_files), initial=skipped_count, disable_monitor=True) as pbar:
             for i, input_path in enumerate(pbar):
                 ext = input_path.suffix.lower()
                 pbar.set_postfix({"文件": input_path.name})

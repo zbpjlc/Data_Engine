@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 import os
+# 限制所有底层 C/C++ 库的并发线程为 1，避免多层线程嵌套导致 malloc 崩溃
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["TORCH_NUM_THREADS"] = "1"
+
 import sys
 import json
 import gc
@@ -811,7 +819,7 @@ async def start_index_build(source_id: str, batch_id: str = None, num_partitions
 
                         progress_tracker.complete_task(
                             task_id=t_id,
-                            message=f"索引构建完成: {num_partitions} 分区, 版本 {result['version']}"
+                            message=f"索引构建完成: {num_partitions} 分区, 版本 {result['lance_version']}"
                         )
                         invalidate_status_cache()
                         print(f"[Index] ✓ 批次 {bid} 索引构建成功", file=sys.stderr)
@@ -914,7 +922,7 @@ async def lancedb_list_sources():
                             "category": batch.category,
                             "stage_status": batch.stage_status,
                             "sample_count": batch.sample_count,
-                            "current_version": ds.version,
+                            "current_version": getattr(ds, "version", None),
                             "columns": schema_fields,
                             "versions": versions,
                         })
@@ -995,7 +1003,6 @@ async def lancedb_query_data(
                     "page_size": page_size,
                     "total_pages": (total + page_size - 1) // page_size,
                     "data": page_rows,
-                    "version": ds.version,
                 }
 
             start = (page - 1) * page_size
@@ -1020,7 +1027,6 @@ async def lancedb_query_data(
                 "page_size": page_size,
                 "total_pages": (total + page_size - 1) // page_size,
                 "data": page_rows,
-                "version": ds.version,
             }
     except HTTPException:
         raise
