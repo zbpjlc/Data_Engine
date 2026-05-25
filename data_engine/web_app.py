@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 import shutil
 import pyarrow as pa
-
 # 可选导入 torch，仅用于 CUDA 内存清理
 try:
     import torch
@@ -607,11 +606,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                             # 统计实际成功的embedding数
                             with _lance_write_lock:
                                 verify_table = ds.to_table(columns=["embedding"])
-                            actual_success = sum(
-                                1 for i in range(verify_table.num_rows)
-                                if verify_table.column("embedding")[i].as_py() is not None
-                            )
                             total_rows = verify_table.num_rows
+                            actual_success = total_rows - verify_table.column("embedding").null_count
                             msg = f"完成: {actual_success}/{total_rows} 条成功"
                             if actual_success == 0:
                                 msg += " (全部失败，请检查GPU显存)"
