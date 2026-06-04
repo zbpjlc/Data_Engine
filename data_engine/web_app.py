@@ -39,7 +39,11 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 from fastapi.responses import Response
-from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest, manifest_count, _lance_write_lock
+from data_engine.manifests import (
+    read_manifest, write_manifest, find_stage_manifest, manifest_count,
+    _lance_write_lock,
+    read_element_manifest, write_element_manifest, merge_insert_element,
+)
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
 from data_engine.progress_tracker import progress_tracker
@@ -657,7 +661,7 @@ async def stop_task(source_id: str, batch_id: str = None):
         raise HTTPException(status_code=400, detail="batch_id is required")
     
     stopped = []
-    for task_type in ["ingest", "embed", "cluster"]:
+    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv"]:
         task_id = f"{task_type}_{source_id}_{batch_id}"
         task = progress_tracker.get_task(task_id)
         if task and task.status.value in ["running", "pending"]:
@@ -811,6 +815,7 @@ async def start_index_build(source_id: str, batch_id: str = None, num_partitions
                             num_partitions=num_partitions,
                             num_sub_vectors=num_sub_vectors,
                             accelerator=accelerator,
+                            task_id=t_id,
                         )
 
                         progress_tracker.complete_task(
@@ -1238,6 +1243,552 @@ async def get_batch_progress(source_id: str, batch_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/ocr/{source_id}")
+async def start_ocr(source_id: str, batch_id: str = None, models: str = "paddleocr,glm_ocr,self_ocr", resume: bool = False):
+    """启动 OCR 推理任务 (pp-layout + 远程 OCR 服务)"""
+    try:
+        task_id = f"element_sample_{source_id}_{batch_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+            if task_id not in alive_threads:
+                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+            else:
+                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+
+        model_names = [m.strip() for m in models.split(",") if m.strip()]
+
+        def execute_ocr_task():
+            try:
+                from data_engine.ocr.base import BaseOCREngine
+                from data_engine.ocr.layout_provider import PPLayoutProvider
+                from data_engine.ocr.normalizer import results_to_element_rows, ocr_results_to_ingest_fields
+                from data_engine.manifests import iso_now
+
+                source = registry.get(source_id)
+                batch_dir = source.resolve_batch_dir(batch_id)
+                manifests_dir = batch_dir / "manifests"
+                ingest_path = find_stage_manifest(manifests_dir, "ingest")
+                element_path = manifests_dir / "element.lance"
+
+                if not ingest_path or not ingest_path.exists():
+                    print("[OCR] ingest manifest 不存在", file=sys.stderr)
+                    return
+
+                engines: dict[str, BaseOCREngine] = {}
+                for name in model_names:
+                    if name == "paddleocr":
+                        from data_engine.ocr.paddle_ocr import PaddleOCREngine
+                        engines["paddle"] = PaddleOCREngine()
+                    elif name == "glm_ocr":
+                        from data_engine.ocr.glm_ocr import GLMOCREngine
+                        engines["glm"] = GLMOCREngine()
+                    elif name == "self_ocr":
+                        from data_engine.ocr.self_ocr import SelfOCREngine
+                        engines["self"] = SelfOCREngine()
+
+                layout = PPLayoutProvider()
+                records = read_manifest(ingest_path)
+                now_str = iso_now()
+
+                progress_tracker.start_task(
+                    task_id=task_id,
+                    task_type="element_sample",
+                    source_id=source_id,
+                    batch_id=batch_id,
+                    total=len(records),
+                    message=f"开始 OCR: {len(records)} 页面",
+                )
+
+                all_element_rows: list[dict] = []
+                for page_idx, record in enumerate(records):
+                    if progress_tracker.is_stopped(task_id):
+                        progress_tracker.stop_task(task_id, f"用户停止 {page_idx}/{len(records)}")
+                        break
+
+                    sample_id = record["sample_id"]
+                    image_path = batch_dir / record.get("page_image", "")
+                    if not image_path.exists():
+                        continue
+
+                    blocks = layout.detect_layout(image_path)
+                    engine_results: dict[str, list] = {}
+                    for prefix, engine in engines.items():
+                        try:
+                            engine_results[prefix] = engine.recognize_regions(image_path, blocks)
+                        except Exception as exc:
+                            print(f"[{prefix}] failed sample={sample_id}: {exc}", file=sys.stderr)
+                            engine_results[prefix] = []
+
+                    element_rows = results_to_element_rows(
+                        sample_id=sample_id, blocks=blocks,
+                        engine_results=engine_results, created_at=now_str,
+                    )
+                    all_element_rows.extend(element_rows)
+
+                    paddle_results = engine_results.get("paddle", [])
+                    if paddle_results:
+                        ingest_fields = ocr_results_to_ingest_fields(paddle_results)
+                        for key, val in ingest_fields.items():
+                            record[key] = val
+
+                    progress_tracker.update_progress(task_id=task_id, current=page_idx + 1)
+
+                if all_element_rows:
+                    if resume and element_path.exists():
+                        merge_insert_element(element_path, all_element_rows)
+                    else:
+                        write_element_manifest(element_path, all_element_rows)
+                    write_manifest(ingest_path, records)
+
+                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(all_element_rows)} block")
+                invalidate_status_cache()
+
+            except Exception as e:
+                print(f"[OCR] 任务失败: {e}", file=sys.stderr)
+                traceback.print_exc()
+                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
+
+        thread = threading.Thread(target=execute_ocr_task, name=task_id)
+        thread.daemon = True
+        thread.start()
+
+        return {"message": f"已启动 {source_id} 的 OCR 任务", "status": "started", "models": model_names}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/cmcv/{source_id}")
+async def start_cmcv(source_id: str, batch_id: str = None):
+    """启动 CMCV 一致性比较任务"""
+    try:
+        task_id = f"cmcv_{source_id}_{batch_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+            if task_id not in alive_threads:
+                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+            else:
+                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+
+        def execute_cmcv_task():
+            try:
+                from data_engine.ocr.cmcv import CMCVEngine
+
+                source = registry.get(source_id)
+                batch_dir = source.resolve_batch_dir(batch_id)
+                manifests_dir = batch_dir / "manifests"
+                element_path = manifests_dir / "element.lance"
+                ingest_path = find_stage_manifest(manifests_dir, "ingest")
+
+                if not element_path.exists():
+                    print("[CMCV] element.lance 不存在", file=sys.stderr)
+                    return
+
+                element_rows = read_element_manifest(element_path)
+                progress_tracker.start_task(
+                    task_id=task_id, task_type="cmcv",
+                    source_id=source_id, batch_id=batch_id,
+                    total=len(element_rows), message="开始一致性比较",
+                )
+
+                cmcv = CMCVEngine()
+                updated_rows, page_tiers = cmcv.process_element_batch(element_rows)
+                merge_insert_element(element_path, updated_rows)
+
+                if ingest_path and ingest_path.exists() and page_tiers:
+                    import pyarrow as pa
+                    sample_ids = list(page_tiers.keys())
+                    tiers = [page_tiers[sid] for sid in sample_ids]
+                    update_table = pa.table({
+                        "sample_id": pa.array(sample_ids, type=pa.large_string()),
+                        "difficulty": pa.array(tiers, type=pa.large_string()),
+                    })
+                    with _lance_write_lock:
+                        ds = lance.dataset(str(ingest_path))
+                        ds.merge_insert(["sample_id"]).when_matched_update_all().execute(update_table)
+
+                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(page_tiers)} 页面")
+                invalidate_status_cache()
+
+            except Exception as e:
+                print(f"[CMCV] 任务失败: {e}", file=sys.stderr)
+                traceback.print_exc()
+                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
+
+        thread = threading.Thread(target=execute_cmcv_task, name=task_id)
+        thread.daemon = True
+        thread.start()
+
+        return {"message": f"已启动 {source_id} 的 CMCV 任务", "status": "started"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/cmcv/{source_id}/{batch_id}/results")
+async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
+    """获取 CMCV 比较结果"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        element_path = manifests_dir / "element.lance"
+
+        if not element_path.exists():
+            raise HTTPException(status_code=404, detail="element.lance 不存在")
+
+        rows = read_element_manifest(element_path, columns=[
+            "sample_id", "block_idx", "block_type",
+            "paddle_text", "glm_text", "self_text",
+            "consistency_pattern", "block_diff_json",
+        ])
+
+        if tier:
+            rows = [r for r in rows if r.get("consistency_pattern") == tier]
+
+        page_stats: dict[str, dict] = {}
+        for row in rows:
+            sid = row["sample_id"]
+            if sid not in page_stats:
+                page_stats[sid] = {"sample_id": sid, "blocks": [], "worst_pattern": "all_agree"}
+            page_stats[sid]["blocks"].append(row)
+            pat = row.get("consistency_pattern", "")
+            if pat == "all_disagree":
+                page_stats[sid]["worst_pattern"] = "all_disagree"
+            elif pat == "partial_agree" and page_stats[sid]["worst_pattern"] != "all_disagree":
+                page_stats[sid]["worst_pattern"] = "partial_agree"
+
+        return {
+            "total_blocks": len(rows),
+            "total_pages": len(page_stats),
+            "pages": list(page_stats.values())[:100],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/cmcv/{source_id}/{batch_id}/sample/{sample_id}/compare")
+async def get_sample_compare(source_id: str, batch_id: str, sample_id: str):
+    """获取单样本的三模型对比"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        element_path = manifests_dir / "element.lance"
+
+        if not element_path.exists():
+            raise HTTPException(status_code=404, detail="element.lance 不存在")
+
+        rows = read_element_manifest(element_path)
+        sample_blocks = [r for r in rows if r.get("sample_id") == sample_id]
+        if not sample_blocks:
+            raise HTTPException(status_code=404, detail=f"样本 {sample_id} 无 block 数据")
+
+        return {
+            "sample_id": sample_id,
+            "blocks": sorted(sample_blocks, key=lambda r: r.get("block_idx", 0)),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bucket-samples/{source_id}")
+@app.get("/api/bucket-samples/{source_id}/{batch_id}")
+async def get_bucket_samples(source_id: str, batch_id: str = "", count: int = 10, force: bool = False):
+    """从向量索引的每个分区中随机抽取 N 个样本。结果缓存到 artifacts/bucket_samples.json。"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+        if not manifest_path:
+            raise HTTPException(status_code=404, detail="ingest manifest 不存在")
+
+        cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+
+        if not force and cache_path.exists():
+            try:
+                return json.loads(cache_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        if not force:
+            return {
+                "source_id": source_id, "batch_id": batch_id,
+                "count_per_bucket": count, "bucket_count": 0,
+                "bucket_sizes": {}, "total_sampled": 0, "buckets": {},
+            }
+
+        with _lance_write_lock:
+            ds = lance.dataset(str(manifest_path))
+
+            indices = ds.list_indices()
+            index_name = None
+            for idx in indices:
+                name = idx.get("name", "") if isinstance(idx, dict) else getattr(idx, "name", "")
+                if name:
+                    index_name = name
+                    break
+
+            if not index_name:
+                return {
+                    "source_id": source_id, "batch_id": batch_id,
+                    "count_per_bucket": count, "bucket_count": 0,
+                    "bucket_sizes": {}, "total_sampled": 0, "buckets": {},
+                    "error": "未找到向量索引，请先构建索引",
+                }
+
+            stats = ds.index_statistics(index_name)
+            indices_data = stats.get("indices", [{}])
+            partitions = indices_data[0].get("partitions", []) if indices_data else []
+            centroids = indices_data[0].get("centroids", []) if indices_data else []
+
+            buckets = {}
+            bucket_sizes = {}
+            for i, part_info in enumerate(partitions):
+                part_size = part_info.get("size", 0)
+                bucket_sizes[f"P{i}"] = part_size
+                if part_size == 0 or not centroids:
+                    continue
+                k = min(count, part_size)
+                try:
+                    centroid = centroids[i]
+                    query_vec = pa.array(centroid, type=pa.float32())
+                    scanner = ds.scanner(
+                        nearest={"column": "embedding", "q": query_vec, "k": k},
+                    )
+                    tbl = scanner.to_table()
+                    # 只取需要的列（nearest 查询会带 _distance 和 embedding）
+                    cols = [c for c in ["sample_id", "difficulty", "page_image", "input_type"] if c in tbl.column_names]
+                    rows = tbl.select(cols).to_pylist()
+                    buckets[f"P{i}"] = rows
+                except Exception as e:
+                    print(f"[bucket-samples] P{i} error: {e}", file=sys.stderr)
+
+        total_sampled = sum(len(v) for v in buckets.values())
+        result = {
+            "source_id": source_id,
+            "batch_id": batch_id,
+            "count_per_bucket": count,
+            "bucket_count": len(partitions),
+            "bucket_sizes": bucket_sizes,
+            "total_sampled": total_sampled,
+            "buckets": buckets,
+        }
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 重新抽样时清除旧 layout 结果
+        layout_cache = batch_dir / "artifacts" / "layout_results.json"
+        if layout_cache.exists():
+            layout_cache.unlink()
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/layout-preview")
+async def run_layout_preview(request: Request):
+    """对单个样本运行 pp-layout（同步，返回图片 + bbox）"""
+    try:
+        body = await request.json()
+        source_id: str = body["source_id"]
+        batch_id: str = body["batch_id"]
+        sample_ids: list[str] = body["sample_ids"]
+
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+        if not manifest_path:
+            raise HTTPException(status_code=404, detail="ingest manifest 不存在")
+
+        with _lance_write_lock:
+            ds = lance.dataset(str(manifest_path))
+            recs = ds.to_table(
+                columns=["sample_id", "image_data", "difficulty"],
+                filter=f"sample_id IN ({','.join(repr(s) for s in sample_ids)})",
+            ).to_pylist()
+        record_map = {r["sample_id"]: r for r in recs}
+
+        from data_engine.ocr.layout_provider import PPLayoutProvider
+        layout = PPLayoutProvider()
+
+        results = []
+        for sid in sample_ids:
+            rec = record_map.get(sid)
+            if not rec:
+                results.append({"sample_id": sid, "error": "not found"})
+                continue
+            image_bytes = rec.get("image_data")
+            if not image_bytes:
+                results.append({"sample_id": sid, "error": "no image_data"})
+                continue
+            try:
+                blocks = layout.detect_layout_from_bytes(image_bytes)
+                import base64
+                results.append({
+                    "sample_id": sid,
+                    "difficulty": rec.get("difficulty") or "unlabeled",
+                    "image_base64": base64.b64encode(image_bytes).decode("ascii"),
+                    "blocks": [
+                        {
+                            "block_type": b.block_type,
+                            "bbox": [round(c, 1) for c in b.bbox],
+                            "confidence": round(b.confidence, 3),
+                        }
+                        for b in blocks
+                    ],
+                    "block_count": len(blocks),
+                })
+            except Exception as exc:
+                results.append({"sample_id": sid, "error": str(exc)})
+
+        return {"results": results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/layout-batch")
+async def start_layout_batch(request: Request):
+    """批量运行 pp-layout（后台任务，有进度）"""
+    try:
+        body = await request.json()
+        source_id: str = body["source_id"]
+        batch_id: str = body["batch_id"]
+        sample_ids: list[str] = body["sample_ids"]
+
+        task_id = f"layout_batch_{source_id}_{batch_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
+
+        def execute():
+            try:
+                source = registry.get(source_id)
+                batch_dir = source.resolve_batch_dir(batch_id)
+                manifests_dir = batch_dir / "manifests"
+                manifest_path = find_stage_manifest(manifests_dir, "ingest")
+
+                with _lance_write_lock:
+                    ds = lance.dataset(str(manifest_path))
+                    recs = ds.to_table(
+                        columns=["sample_id", "image_data", "difficulty"],
+                        filter=f"sample_id IN ({','.join(repr(s) for s in sample_ids)})",
+                    ).to_pylist()
+                record_map = {r["sample_id"]: r for r in recs}
+
+                from data_engine.ocr.layout_provider import PPLayoutProvider
+                layout = PPLayoutProvider()
+
+                progress_tracker.start_task(
+                    task_id=task_id, task_type="layout_batch",
+                    source_id=source_id, batch_id=batch_id,
+                    total=len(sample_ids), message="开始 layout 检测",
+                )
+
+                all_results = []
+                for i, sid in enumerate(sample_ids):
+                    if progress_tracker.is_stopped(task_id):
+                        progress_tracker.stop_task(task_id, f"用户停止 {i}/{len(sample_ids)}")
+                        break
+
+                    rec = record_map.get(sid)
+                    if not rec or not rec.get("image_data"):
+                        all_results.append({"sample_id": sid, "error": "no image"})
+                        progress_tracker.update_progress(task_id, current=i + 1)
+                        continue
+                    try:
+                        blocks = layout.detect_layout_from_bytes(rec["image_data"])
+                        all_results.append({
+                            "sample_id": sid,
+                            "difficulty": rec.get("difficulty") or "unlabeled",
+                            "blocks": [
+                                {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                                for b in blocks
+                            ],
+                            "block_count": len(blocks),
+                        })
+                    except Exception as exc:
+                        all_results.append({"sample_id": sid, "error": str(exc)})
+
+                    progress_tracker.update_progress(task_id, current=i + 1, message=f"layout {i+1}/{len(sample_ids)}")
+
+                # 保存结果到缓存
+                result_path = batch_dir / "artifacts" / "layout_results.json"
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                result_path.write_text(json.dumps(all_results, ensure_ascii=False), encoding="utf-8")
+
+                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(all_results)} 个样本")
+            except Exception as e:
+                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
+
+        thread = threading.Thread(target=execute, name=task_id)
+        thread.daemon = True
+        thread.start()
+
+        return {"message": f"已启动 layout 批量检测", "task_id": task_id, "total": len(sample_ids)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/layout-batch/{source_id}/{batch_id}/results")
+async def get_layout_batch_results(source_id: str, batch_id: str):
+    """获取 layout 批量检测结果"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        result_path = batch_dir / "artifacts" / "layout_results.json"
+        if not result_path.exists():
+            return {"results": [], "total": 0}
+        results = json.loads(result_path.read_text(encoding="utf-8"))
+        return {"results": results, "total": len(results)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
+    import os
+    import signal
     import uvicorn
+
+    PID_FILE = Path("/tmp/data_engine_web_app.pid")
+
+    def _check_and_kill_old():
+        if not PID_FILE.exists():
+            return
+        try:
+            old_pid = int(PID_FILE.read_text().strip())
+            if old_pid == os.getpid():
+                return
+            os.kill(old_pid, 0)  # 检查进程是否存在
+            print(f"[web_app] 发现旧进程 pid={old_pid}，正在终止...", file=sys.stderr)
+            os.kill(old_pid, signal.SIGTERM)
+            import time
+            time.sleep(1)
+            try:
+                os.kill(old_pid, signal.SIGKILL)
+            except OSError:
+                pass
+        except (OSError, ValueError, ProcessLookupError):
+            pass
+
+    _check_and_kill_old()
+    PID_FILE.write_text(str(os.getpid()))
+
+    import atexit
+    atexit.register(lambda: PID_FILE.unlink(missing_ok=True))
+
     uvicorn.run(app, host="0.0.0.0", port=8001)

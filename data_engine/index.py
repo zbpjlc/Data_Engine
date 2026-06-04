@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
+import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,11 +56,74 @@ def load_index_stats(manifest_path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _create_index_with_progress(ds, task_id: str, total_rows: int, **kwargs) -> None:
+    """调用 ds.create_index 并捕获 tqdm 输出，实时更新 progress_tracker。
+    
+    Lance IVF_PQ 有多个阶段，每个阶段有独立 tqdm。显示阶段名 + 阶段内进度。
+    """
+    from data_engine.progress_tracker import progress_tracker
+
+    # 匹配 "阶段名: XX%|...| cur/total"
+    _RE_PHASE = re.compile(r"([\w ]+):\s*(\d+)%[^\n]*?(\d+)/(\d+)")
+
+    class _TqdmCapture:
+        def __init__(self, original_stderr):
+            self._orig = original_stderr
+            self._buf = ""
+
+        def write(self, s):
+            self._buf += s
+            while "\r" in self._buf:
+                line, self._buf = self._buf.split("\r", 1)
+                self._parse(line)
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                self._parse(line)
+            return len(s)
+
+        def _parse(self, line):
+            m = _RE_PHASE.search(line)
+            if not m:
+                return
+            phase = m.group(1).strip()
+            pct = int(m.group(2))
+            cur = m.group(3)
+            tot = m.group(4)
+            if pct >= 100:
+                msg = f"{phase} 完成，写入中..."
+            else:
+                msg = f"{phase} {pct}% ({cur}/{tot})"
+            progress_tracker.update_progress(
+                task_id,
+                current=int(cur),
+                total=int(tot),
+                message=msg,
+            )
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return False
+
+        def fileno(self):
+            return self._orig.fileno()
+
+    cap = _TqdmCapture(sys.stderr)
+    old_stderr = sys.stderr
+    sys.stderr = cap
+    try:
+        ds.create_index(**kwargs)
+    finally:
+        sys.stderr = old_stderr
+
+
 def build_ivf_pq_index(
     manifest_path: Path,
     num_partitions: int | None = None,
     num_sub_vectors: int | None = None,
     accelerator: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """在 Lance 数据集上构建 IVF_PQ 向量索引。
 
@@ -84,29 +149,52 @@ def build_ivf_pq_index(
         if "embedding" not in ds.schema.names:
             raise ValueError("数据集不包含 embedding 列，请先执行 embedding 提取")
 
-        ds.create_index(
-            column="embedding",
-            index_type="IVF_PQ",
-            name="idx_embedding_ivf",
-            num_partitions=num_partitions,
-            num_sub_vectors=num_sub_vectors,
-            replace=True,
-            accelerator=accelerator,
-        )
+    # 索引构建在锁外执行（耗时操作，避免阻塞其他读写）
+    if task_id:
+        from data_engine.progress_tracker import progress_tracker
+        progress_tracker.update_progress(task_id, current=0, message=f"正在构建 IVF_PQ 索引 ({total_rows} 条)...")
 
-        result = {
-            "success": True,
-            "index_name": "idx_embedding_ivf",
-            "index_type": "IVF_PQ",
-            "column": "embedding",
-            "num_partitions": num_partitions,
-            "num_sub_vectors": num_sub_vectors,
-            "total_rows": total_rows,
-            "lance_version": lance.__version__,
-            "manifest_path": str(manifest_path),
-        }
-        _save_index_stats(manifest_path, result)
-        return result
+    with _lance_write_lock:
+        ds = lance.dataset(str(manifest_path))
+
+        if task_id:
+            _create_index_with_progress(ds, task_id, total_rows,
+                column="embedding",
+                index_type="IVF_PQ",
+                name="idx_embedding_ivf",
+                num_partitions=num_partitions,
+                num_sub_vectors=num_sub_vectors,
+                replace=True,
+                accelerator=accelerator,
+            )
+        else:
+            ds.create_index(
+                column="embedding",
+                index_type="IVF_PQ",
+                name="idx_embedding_ivf",
+                num_partitions=num_partitions,
+                num_sub_vectors=num_sub_vectors,
+                replace=True,
+                accelerator=accelerator,
+            )
+
+    if task_id:
+        from data_engine.progress_tracker import progress_tracker
+        progress_tracker.update_progress(task_id, current=total_rows, message="索引构建完成")
+
+    result = {
+        "success": True,
+        "index_name": "idx_embedding_ivf",
+        "index_type": "IVF_PQ",
+        "column": "embedding",
+        "num_partitions": num_partitions,
+        "num_sub_vectors": num_sub_vectors,
+        "total_rows": total_rows,
+        "lance_version": lance.__version__,
+        "manifest_path": str(manifest_path),
+    }
+    _save_index_stats(manifest_path, result)
+    return result
 
 
 def get_index_stats(manifest_path: Path) -> dict[str, Any]:

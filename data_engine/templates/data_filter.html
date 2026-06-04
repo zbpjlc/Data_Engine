@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Data Engine - 数据筛选</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/static/tailwind.js"></script>
+    <script src="/static/chart.js"></script>
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
@@ -27,94 +27,164 @@
 
         <!-- Main Content -->
         <main class="max-w-7xl mx-auto px-4 sm:lg:px-8 py-8">
-            <!-- 向量索引卡片 -->
+
+            <!-- 统一卡片：数据源选择 + Tab 面板 -->
             <div class="bg-white rounded-lg shadow p-6 mb-8">
-                <h2 class="text-lg font-semibold text-gray-900 mb-6">向量索引</h2>
-                
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <!-- 左侧：索引构建 -->
-                    <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">数据源</label>
-                            <select id="index-source" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                                <option value="">选择数据源...</option>
-                                {% for source in sources %}
-                                <option value="{{ source.source_id }}">{{ source.source_id }} ({{ source.batch_count }} 批次)</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">批次</label>
-                            <select id="index-batch" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                                <option value="">全部批次</option>
-                            </select>
-                        </div>
-                        <div class="grid grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">分区数</label>
-                                <input id="index-partitions" type="number" value="256" min="16" max="1024" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                <!-- 共享数据源 / 批次选择器 -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6 pb-6 border-b">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">数据源</label>
+                        <select id="sel-source" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="">选择数据源...</option>
+                            {% for source in sources %}
+                            <option value="{{ source.source_id }}">{{ source.source_id }} ({{ source.batch_count }} 批次)</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">批次</label>
+                        <select id="sel-batch" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="">全部批次</option>
+                        </select>
+                    </div>
+                    <div class="flex items-end">
+                        <div id="source-info" class="text-sm text-gray-500 pb-2">选择数据源以开始</div>
+                    </div>
+                </div>
+
+                <!-- Tab 按钮 -->
+                <div class="flex space-x-1 mb-6">
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" data-panel="index">向量索引</button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="bucket">难度桶抽样 & Layout</button>
+                </div>
+
+                <!-- ====== Panel: 向量索引 ====== -->
+                <div id="panel-index" class="panel-content">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- 左侧：索引构建 -->
+                        <div class="space-y-4">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">分区数</label>
+                                    <input id="index-partitions" type="number" value="256" min="16" max="1024" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">子向量数</label>
+                                    <input id="index-subvectors" type="number" value="16" min="4" max="96" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                </div>
                             </div>
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">子向量数</label>
-                                <input id="index-subvectors" type="number" value="16" min="4" max="96" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                            </div>
-                        </div>
-                        <button id="btn-index" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium">
-                            构建向量索引
-                        </button>
+                            <button id="btn-index" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium">
+                                构建向量索引
+                            </button>
                         <div id="index-progress" class="hidden">
                             <div class="flex items-center justify-between text-sm mb-1">
                                 <span id="index-progress-msg" class="text-gray-600">准备中...</span>
-                                <span id="index-progress-pct" class="text-indigo-600 font-medium">0%</span>
+                                <span id="index-progress-ts" class="text-xs text-gray-400"></span>
                             </div>
                             <div class="w-full bg-gray-200 rounded-full h-2">
                                 <div id="index-progress-bar" class="bg-indigo-600 h-2 rounded-full transition-all" style="width:0%"></div>
                             </div>
                         </div>
+                        </div>
+                        <!-- 右侧：索引桶分布 -->
+                        <div>
+                            <div id="index-stats-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">
+                                构建索引后将在此显示桶分布
+                            </div>
+                            <div id="index-stats" class="hidden space-y-4">
+                                <div class="grid grid-cols-3 gap-3">
+                                    <div class="bg-indigo-50 rounded-lg p-3 text-center">
+                                        <div class="text-xs text-indigo-600 mb-1">分区数</div>
+                                        <div id="idx-partitions" class="text-xl font-bold text-indigo-800">-</div>
+                                    </div>
+                                    <div class="bg-blue-50 rounded-lg p-3 text-center">
+                                        <div class="text-xs text-blue-600 mb-1">总向量数</div>
+                                        <div id="idx-vectors" class="text-xl font-bold text-blue-800">-</div>
+                                    </div>
+                                    <div class="bg-green-50 rounded-lg p-3 text-center">
+                                        <div class="text-xs text-green-600 mb-1">平均桶大小</div>
+                                        <div id="idx-avg" class="text-xl font-bold text-green-800">-</div>
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-3 gap-3">
+                                    <div class="bg-yellow-50 rounded-lg p-2 text-center">
+                                        <div class="text-xs text-yellow-600">空桶</div>
+                                        <div id="idx-empty" class="text-lg font-bold text-yellow-800">-</div>
+                                    </div>
+                                    <div class="bg-orange-50 rounded-lg p-2 text-center">
+                                        <div class="text-xs text-orange-600">小簇(&lt;50)</div>
+                                        <div id="idx-small" class="text-lg font-bold text-orange-800">-</div>
+                                    </div>
+                                    <div class="bg-red-50 rounded-lg p-2 text-center">
+                                        <div class="text-xs text-red-600">大簇(&gt;3000)</div>
+                                        <div id="idx-large" class="text-lg font-bold text-red-800">-</div>
+                                    </div>
+                                </div>
+                                <div class="bg-gray-50 rounded-lg p-4">
+                                    <canvas id="index-chart" height="180"></canvas>
+                                </div>
+                                <div id="index-build-record" class="hidden bg-gray-50 rounded-lg p-3 text-xs text-gray-500">
+                                    <span id="idx-built-at"></span> | 分区 <span id="idx-rec-partitions"></span> | 子向量 <span id="idx-rec-subvectors"></span> | 版本 <span id="idx-rec-version"></span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
+                </div>
 
-                    <!-- 右侧：索引桶分布 -->
-                    <div>
-                        <div id="index-stats-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">
-                            构建索引后将在此显示桶分布
+                <!-- ====== Panel: 难度桶抽样 & Layout ====== -->
+                <div id="panel-bucket" class="panel-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <!-- 左侧：控制 -->
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">每桶抽样数</label>
+                                <input id="bucket-count" type="number" value="10" min="1" max="100" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <button id="btn-bucket-sample" class="w-full px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 font-medium">
+                                重新抽样
+                            </button>
+                            <button id="btn-run-layout" class="w-full px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 font-medium hidden">
+                                对抽样结果运行 pp-layout
+                            </button>
+                            <div id="layout-progress" class="hidden">
+                                <div class="flex items-center justify-between text-sm mb-1">
+                                    <span id="layout-progress-msg" class="text-gray-600">准备中...</span>
+                                </div>
+                                <div class="w-full bg-gray-200 rounded-full h-2">
+                                    <div id="layout-progress-bar" class="bg-orange-500 h-2 rounded-full transition-all" style="width:0%"></div>
+                                </div>
+                            </div>
                         </div>
-                        <div id="index-stats" class="hidden space-y-4">
-                            <div class="grid grid-cols-3 gap-3">
-                                <div class="bg-indigo-50 rounded-lg p-3 text-center">
-                                    <div class="text-xs text-indigo-600 mb-1">分区数</div>
-                                    <div id="idx-partitions" class="text-xl font-bold text-indigo-800">-</div>
-                                </div>
-                                <div class="bg-blue-50 rounded-lg p-3 text-center">
-                                    <div class="text-xs text-blue-600 mb-1">总向量数</div>
-                                    <div id="idx-vectors" class="text-xl font-bold text-blue-800">-</div>
-                                </div>
-                                <div class="bg-green-50 rounded-lg p-3 text-center">
-                                    <div class="text-xs text-green-600 mb-1">平均桶大小</div>
-                                    <div id="idx-avg" class="text-xl font-bold text-green-800">-</div>
-                                </div>
+                        <!-- 右侧：桶统计 -->
+                        <div class="lg:col-span-2">
+                            <div id="bucket-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">
+                                选择数据源和批次后点击"从各桶随机抽样"
                             </div>
-                            <div class="grid grid-cols-3 gap-3">
-                                <div class="bg-yellow-50 rounded-lg p-2 text-center">
-                                    <div class="text-xs text-yellow-600">空桶</div>
-                                    <div id="idx-empty" class="text-lg font-bold text-yellow-800">-</div>
-                                </div>
-                                <div class="bg-orange-50 rounded-lg p-2 text-center">
-                                    <div class="text-xs text-orange-600">小簇(&lt;50)</div>
-                                    <div id="idx-small" class="text-lg font-bold text-orange-800">-</div>
-                                </div>
-                                <div class="bg-red-50 rounded-lg p-2 text-center">
-                                    <div class="text-xs text-red-600">大簇(&gt;3000)</div>
-                                    <div id="idx-large" class="text-lg font-bold text-red-800">-</div>
-                                </div>
-                            </div>
-                            <div class="bg-gray-50 rounded-lg p-4">
-                                <canvas id="index-chart" height="180"></canvas>
-                            </div>
-                            <div id="index-build-record" class="hidden bg-gray-50 rounded-lg p-3 text-xs text-gray-500">
-                                <span id="idx-built-at"></span> | 分区 <span id="idx-rec-partitions"></span> | 子向量 <span id="idx-rec-subvectors"></span> | 版本 <span id="idx-rec-version"></span>
+                            <div id="bucket-summary" class="hidden">
+                                <div id="bucket-stats" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
                             </div>
                         </div>
                     </div>
+                    <!-- 抽样结果按桶分组展示 -->
+                    <div id="bucket-results" class="hidden mt-6 border-t pt-6">
+                        <div id="bucket-tab-content"></div>
+                        <div id="bucket-pagination" class="flex items-center justify-center gap-4 mt-4 pt-4 border-t">
+                            <button id="bucket-prev" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" disabled>&lt; 上一分区</button>
+                            <span id="bucket-page-info" class="text-sm text-gray-600 font-medium">P0 / 64</span>
+                            <button id="bucket-next" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50">下一分区 &gt;</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Layout 结果弹窗 -->
+            <div id="layout-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4">
+                <div class="bg-white rounded-lg shadow-xl w-full max-w-7xl max-h-[95vh] flex flex-col">
+                    <div class="flex items-center justify-between p-4 border-b">
+                        <h3 id="layout-modal-title" class="text-lg font-semibold">Layout 预览</h3>
+                        <button id="layout-modal-close" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+                    </div>
+                    <div id="layout-modal-body" class="p-4 overflow-auto flex-1"></div>
                 </div>
             </div>
 
@@ -240,93 +310,135 @@
         const batchData = {{ batches_json | tojson }};
         let indexChart = null;
 
-        // 索引数据源联动批次
-        document.getElementById('index-source').addEventListener('change', function() {
-            const sourceId = this.value;
-            const batchSelect = document.getElementById('index-batch');
-            batchSelect.innerHTML = '<option value="">全部批次</option>';
+        // ── 共享数据源 / 批次选择器 ──────────────────────────────────────────
+        const selSource = document.getElementById('sel-source');
+        const selBatch = document.getElementById('sel-batch');
+        let bucketSampleData = null;
+
+        function filterBatches() {
+            const sourceId = selSource.value;
+            selBatch.innerHTML = '<option value="">全部批次</option>';
             const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : [];
             filtered.forEach(b => {
-                batchSelect.innerHTML += `<option value="${b.batch_id}">${b.source_id}/${b.batch_id} (${b.sample_count} 样本)</option>`;
+                const opt = document.createElement('option');
+                opt.value = b.batch_id;
+                opt.textContent = b.batch_id + ' (' + b.sample_count.toLocaleString() + ' 样本)';
+                selBatch.appendChild(opt);
             });
-            // 选择数据源后自动加载索引统计
-            if (sourceId) {
-                const batchId = filtered.length > 0 ? filtered[0].batch_id : '';
-                loadIndexStats(sourceId, batchId);
-            }
-        });
+            document.getElementById('source-info').textContent = sourceId
+                ? filtered.length + ' 个批次 | 共 ' + filtered.reduce((s,b)=>s+b.sample_count,0).toLocaleString() + ' 样本'
+                : '选择数据源以开始';
 
-        // 索引批次选择变化时加载统计
-        document.getElementById('index-batch').addEventListener('change', function() {
-            const sourceId = document.getElementById('index-source').value;
+            // 清空旧的抽样结果
+            bucketSampleData = null;
+            document.getElementById('bucket-summary').classList.add('hidden');
+            document.getElementById('bucket-empty').classList.remove('hidden');
+            document.getElementById('bucket-results').classList.add('hidden');
+            document.getElementById('btn-run-layout').classList.add('hidden');
+
+            if (sourceId && filtered.length > 0) {
+                loadIndexStats(sourceId, filtered[0].batch_id);
+                loadCachedBucketSamples(sourceId, filtered[0].batch_id);
+            }
+        }
+
+        selSource.addEventListener('change', filterBatches);
+
+        if (batchData.length > 0) {
+            selSource.value = batchData[0].source_id;
+            filterBatches();
+        }
+
+        selBatch.addEventListener('change', function() {
+            const sourceId = selSource.value;
             const batchId = this.value;
             if (sourceId) {
                 loadIndexStats(sourceId, batchId || (batchData.filter(b => b.source_id === sourceId)[0]?.batch_id || ''));
             }
         });
 
-        // 构建向量索引
-        document.getElementById('btn-index').addEventListener('click', function() {
-            const sourceId = document.getElementById('index-source').value;
-            if (!sourceId) { alert('请选择数据源'); return; }
+        function getSourceId() { return selSource.value; }
+        function getBatchId() { return selBatch.value; }
 
-            const batchId = document.getElementById('index-batch').value;
+        // ── Tab 切换 ──────────────────────────────────────────────────────────
+        document.querySelectorAll('.panel-tab').forEach(tab => {
+            tab.addEventListener('click', function() {
+                document.querySelectorAll('.panel-tab').forEach(t => {
+                    t.className = 'panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700';
+                });
+                this.className = 'panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50';
+                document.querySelectorAll('.panel-content').forEach(p => p.classList.add('hidden'));
+                document.getElementById('panel-' + this.dataset.panel).classList.remove('hidden');
+            });
+        });
+
+        // ── 向量索引 ──────────────────────────────────────────────────────────
+        document.getElementById('btn-index').addEventListener('click', function() {
+            const sourceId = getSourceId();
+            if (!sourceId) { alert('请选择数据源'); return; }
+            const batchId = getBatchId();
             const partitions = document.getElementById('index-partitions').value;
             const subvectors = document.getElementById('index-subvectors').value;
-            const progressDiv = document.getElementById('index-progress');
-            const statsEmpty = document.getElementById('index-stats-empty');
-            const statsDiv = document.getElementById('index-stats');
 
-            progressDiv.classList.remove('hidden');
-            statsEmpty.classList.add('hidden');
-            statsDiv.classList.add('hidden');
+            document.getElementById('index-progress').classList.remove('hidden');
+            document.getElementById('index-stats-empty').classList.add('hidden');
+            document.getElementById('index-stats').classList.add('hidden');
             this.disabled = true;
             this.textContent = '构建中...';
+
+            // 重置进度条状态
+            const bar = document.getElementById('index-progress-bar');
+            bar.style.width = '0%';
+            bar.className = 'bg-indigo-600 h-2 rounded-full transition-all animate-pulse';
+            document.getElementById('index-progress-msg').textContent = '正在启动...';
+            document.getElementById('index-progress-ts').textContent = '';
 
             let url = `/api/index/${sourceId}?num_partitions=${partitions}&num_sub_vectors=${subvectors}`;
             if (batchId) url += `&batch_id=${batchId}`;
 
             fetch(url, { method: 'POST' })
                 .then(r => r.json())
-                .then(() => pollIndex(sourceId, batchId))
-                .catch(err => {
-                    alert('索引构建启动失败: ' + err.message);
-                    resetIndexBtn();
-                });
+                .then(data => {
+                    console.log('[index] POST response:', data);
+                    pollIndex(sourceId, batchId);
+                })
+                .catch(err => { console.error('[index] POST error:', err); alert('索引构建启动失败: ' + err.message); resetIndexBtn(); });
         });
 
         function pollIndex(sourceId, batchId) {
+            console.log('[pollIndex] started', sourceId, batchId);
             const interval = setInterval(() => {
                 fetch('/api/progress').then(r => r.json()).then(data => {
                     let tasks = Object.values(data.tasks || {}).filter(t => t.task_type === 'index');
                     if (sourceId && sourceId !== '__all__') tasks = tasks.filter(t => t.source_id === sourceId);
                     if (batchId) tasks = tasks.filter(t => t.batch_id === batchId);
-                    if (tasks.length === 0) return;
+                    if (tasks.length === 0) {
+                        console.log('[pollIndex] no matching tasks');
+                        return;
+                    }
 
-                    const totalAll = tasks.reduce((s, t) => s + (t.total || 0), 0);
-                    const currentAll = tasks.reduce((s, t) => s + (t.current || 0), 0);
-                    const pct = totalAll > 0 ? Math.round(currentAll / totalAll * 100) : 0;
-                    const running = tasks.filter(t => t.status === 'running');
-                    const failed = tasks.filter(t => t.status === 'failed');
-                    const lastMsg = tasks[tasks.length - 1].message;
-                    document.getElementById('index-progress-msg').textContent = `${lastMsg} (${tasks.length} 批次)`;
-                    document.getElementById('index-progress-pct').textContent = pct + '%';
-                    document.getElementById('index-progress-bar').style.width = pct + '%';
+                    const task = tasks[tasks.length - 1];
+                    console.log('[pollIndex]', task.status, task.message);
 
-                    if (running.length === 0 && failed.length === 0) {
+                    document.getElementById('index-progress-msg').textContent = task.message || '构建中...';
+                    document.getElementById('index-progress-ts').textContent = new Date().toLocaleTimeString();
+
+                    if (task.status === 'completed') {
+                        console.log('[pollIndex] COMPLETED, calling loadIndexStats');
                         clearInterval(interval);
-                        document.getElementById('index-progress-bar').classList.remove('bg-indigo-600');
+                        document.getElementById('index-progress-bar').classList.remove('animate-pulse', 'bg-indigo-600');
                         document.getElementById('index-progress-bar').classList.add('bg-green-500');
+                        document.getElementById('index-progress-msg').textContent = '索引构建完成';
                         loadIndexStats(sourceId, batchId);
                         resetIndexBtn();
-                    } else if (running.length === 0 && failed.length > 0) {
+                    } else if (task.status === 'failed' || task.status === 'stopped') {
                         clearInterval(interval);
-                        document.getElementById('index-progress-bar').classList.remove('bg-indigo-600');
+                        document.getElementById('index-progress-bar').classList.remove('animate-pulse', 'bg-indigo-600');
                         document.getElementById('index-progress-bar').classList.add('bg-red-500');
-                        document.getElementById('index-progress-msg').textContent = '失败: ' + failed[0].error_message;
+                        document.getElementById('index-progress-msg').textContent = '失败: ' + (task.error_message || task.message);
                         resetIndexBtn();
                     }
-                }).catch(() => {});
+                }).catch(err => console.error('[pollIndex] fetch error:', err));
             }, 1000);
         }
 
@@ -337,32 +449,36 @@
         }
 
         function loadIndexStats(sourceId, batchId) {
+            console.log('[loadIndexStats]', sourceId, batchId);
             if (!batchId) {
-                // 选择全部批次时，取第一个批次
                 const filtered = batchData.filter(b => b.source_id === sourceId);
                 if (filtered.length === 0) return;
                 batchId = filtered[0].batch_id;
             }
+            // 先清空旧数据
+            document.getElementById('index-stats-empty').classList.remove('hidden');
+            document.getElementById('index-stats-empty').textContent = '加载中...';
+            document.getElementById('index-stats').classList.add('hidden');
+            if (indexChart) { indexChart.destroy(); indexChart = null; }
 
             fetch(`/api/index/${sourceId}/${batchId}/stats`)
                 .then(r => r.json())
                 .then(data => {
+                    console.log('[loadIndexStats] response:', data.has_index, 'partitions:', data.total_partitions);
                     if (!data.has_index) {
+                        document.getElementById('index-stats-empty').classList.remove('hidden');
+                        document.getElementById('index-stats').classList.add('hidden');
                         document.getElementById('index-stats-empty').textContent = data.message;
                         return;
                     }
-
                     document.getElementById('index-stats-empty').classList.add('hidden');
                     document.getElementById('index-stats').classList.remove('hidden');
-
                     document.getElementById('idx-partitions').textContent = data.total_partitions;
                     document.getElementById('idx-vectors').textContent = data.total_vectors.toLocaleString();
                     document.getElementById('idx-avg').textContent = data.avg_bucket;
                     document.getElementById('idx-empty').textContent = data.empty_buckets;
                     document.getElementById('idx-small').textContent = data.small_buckets;
                     document.getElementById('idx-large').textContent = data.large_buckets;
-
-                    // 显示构建记录
                     if (data.build_record) {
                         document.getElementById('index-build-record').classList.remove('hidden');
                         document.getElementById('idx-built-at').textContent = data.build_record.built_at ? new Date(data.build_record.built_at).toLocaleString('zh-CN') : '-';
@@ -370,8 +486,6 @@
                         document.getElementById('idx-rec-subvectors').textContent = data.build_record.num_sub_vectors || '-';
                         document.getElementById('idx-rec-version').textContent = data.build_record.lance_version || '-';
                     }
-
-                    // 画柱状图
                     if (indexChart) indexChart.destroy();
                     const labels = data.buckets.map((_, i) => `P${i}`);
                     const colors = data.buckets.map(v => {
@@ -382,73 +496,35 @@
                     });
                     indexChart = new Chart(document.getElementById('index-chart'), {
                         type: 'bar',
-                        data: {
-                            labels: labels,
-                            datasets: [{ label: '桶大小', data: data.buckets, backgroundColor: colors }]
-                        },
+                        data: { labels, datasets: [{ label: '桶大小', data: data.buckets, backgroundColor: colors }] },
                         options: {
                             responsive: true,
-                            onClick: (e, elements) => {
-                                if (elements.length > 0) {
-                                    const idx = elements[0].index;
-                                    showPartitionSamples(sourceId, batchId, idx);
-                                }
-                            },
+                            onClick: (e, elements) => { if (elements.length > 0) showPartitionSamples(sourceId, batchId, elements[0].index); },
                             plugins: { legend: { display: false }, tooltip: { callbacks: { title: (items) => items[0].label, label: (item) => `${item.raw} 条` } } },
                             scales: { y: { beginAtZero: true, title: { display: true, text: '样本数' } }, x: { title: { display: true, text: '分区' } } }
                         }
                     });
                 })
-                .catch(err => {
-                    document.getElementById('index-stats-empty').textContent = '加载统计失败: ' + err.message;
-                });
-        }
-
-        // 页面加载时自动加载已有索引的桶分布
-        if (batchData.length > 0) {
-            // 优先选择有索引的批次
-            const indexSource = document.getElementById('index-source');
-            const indexBatch = document.getElementById('index-batch');
-            if (indexSource && indexSource.value) {
-                loadIndexStats(indexSource.value, indexBatch.value || '');
-            } else {
-                // 默认加载第一个批次
-                const firstBatch = batchData[0];
-                loadIndexStats(firstBatch.source_id, firstBatch.batch_id);
-            }
+                .catch(err => { console.error('[loadIndexStats] error:', err); document.getElementById('index-stats-empty').textContent = '加载统计失败: ' + err.message; });
         }
 
         // 分区样本查看
-        let currentPartitionPage = 1;
-        let currentPartitionSource = '';
-        let currentPartitionBatch = '';
-        let currentPartitionId = 0;
+        let currentPartitionPage = 1, currentPartitionSource = '', currentPartitionBatch = '', currentPartitionId = 0;
 
         function showPartitionSamples(sourceId, batchId, partitionId, page) {
             page = page || 1;
-            currentPartitionSource = sourceId;
-            currentPartitionBatch = batchId;
-            currentPartitionId = partitionId;
-            currentPartitionPage = page;
-
+            currentPartitionSource = sourceId; currentPartitionBatch = batchId; currentPartitionId = partitionId; currentPartitionPage = page;
             const modal = document.getElementById('partition-modal');
             const body = document.getElementById('partition-modal-body');
-            const title = document.getElementById('partition-modal-title');
-            const pagination = document.getElementById('partition-modal-pagination');
-
-            title.textContent = `分区 P${partitionId} 样本`;
+            document.getElementById('partition-modal-title').textContent = `分区 P${partitionId} 样本`;
             body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
-            pagination.innerHTML = '';
+            document.getElementById('partition-modal-pagination').innerHTML = '';
             modal.classList.remove('hidden');
 
             fetch(`/api/index/${sourceId}/${batchId}/partition/${partitionId}?page=${page}&page_size=20`)
                 .then(r => r.json())
                 .then(data => {
-                    if (!data.samples || data.samples.length === 0) {
-                        body.innerHTML = '<div class="text-gray-400 text-center">该分区无数据</div>';
-                        return;
-                    }
-
+                    if (!data.samples || data.samples.length === 0) { body.innerHTML = '<div class="text-gray-400 text-center">该分区无数据</div>'; return; }
                     const cols = Object.keys(data.samples[0]).filter(k => k !== 'embedding');
                     let html = '<table class="w-full text-sm"><thead><tr class="bg-gray-50">';
                     cols.forEach(c => { html += `<th class="px-3 py-2 text-left font-medium text-gray-600">${c}</th>`; });
@@ -457,111 +533,390 @@
                         html += `<tr class="${i % 2 ? 'bg-gray-50' : ''}">`;
                         cols.forEach(c => {
                             let v = row[c];
-                            if (c === 'image_data' && v && v.has_image) {
-                                v = `<button onclick="showSampleImage('${sourceId}','${batchId}','${row.sample_id}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${v.size} bytes</button>`;
-                            } else {
-                                if (v === null || v === undefined) v = '-';
-                                else if (typeof v === 'object') v = JSON.stringify(v);
-                                else v = String(v);
-                                if (v.length > 80) v = v.substring(0, 80) + '...';
-                            }
+                            if (c === 'image_data' && v && v.has_image) v = `<button onclick="showSampleImage('${sourceId}','${batchId}','${row.sample_id}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${v.size} bytes</button>`;
+                            else { if (v === null || v === undefined) v = '-'; else if (typeof v === 'object') v = JSON.stringify(v); else v = String(v); if (v.length > 80) v = v.substring(0, 80) + '...'; }
                             html += `<td class="px-3 py-2 border-t text-gray-700">${v}</td>`;
                         });
                         html += '</tr>';
                     });
                     html += '</tbody></table>';
                     body.innerHTML = html;
-
-                    // 分页
                     const totalPages = Math.ceil(data.total / data.page_size);
                     let pg = '';
                     if (page > 1) pg += `<button onclick="showPartitionSamples('${sourceId}','${batchId}',${partitionId},${page-1})" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 text-sm">上一页</button>`;
                     pg += `<span class="text-sm text-gray-500">${page} / ${totalPages}</span>`;
                     if (page < totalPages) pg += `<button onclick="showPartitionSamples('${sourceId}','${batchId}',${partitionId},${page+1})" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 text-sm">下一页</button>`;
-                    pagination.innerHTML = pg;
+                    document.getElementById('partition-modal-pagination').innerHTML = pg;
                 })
-                .catch(err => {
-                    body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`;
-                });
+                .catch(err => { body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`; });
         }
 
-        document.getElementById('partition-modal-close').addEventListener('click', function() {
-            document.getElementById('partition-modal').classList.add('hidden');
-        });
-        document.getElementById('partition-modal').addEventListener('click', function(e) {
-            if (e.target === this) this.classList.add('hidden');
-        });
+        document.getElementById('partition-modal-close').addEventListener('click', () => document.getElementById('partition-modal').classList.add('hidden'));
+        document.getElementById('partition-modal').addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
 
         // 图片查看
         function showSampleImage(sourceId, batchId, sampleId) {
             const modal = document.getElementById('image-modal');
             const img = document.getElementById('image-modal-img');
-            const title = document.getElementById('image-modal-title');
-            title.textContent = `图片 - ${sampleId}`;
-            img.src = '';
-            img.alt = '加载中...';
+            document.getElementById('image-modal-title').textContent = `图片 - ${sampleId}`;
+            img.src = ''; img.alt = '加载中...';
             modal.classList.remove('hidden');
-
             fetch(`/api/index/${sourceId}/${batchId}/sample/${sampleId}/image`)
-                .then(r => r.json())
-                .then(data => {
-                    img.src = `data:image/png;base64,${data.image_base64}`;
-                    img.alt = sampleId;
-                })
-                .catch(err => {
-                    img.alt = `加载失败: ${err.message}`;
-                });
+                .then(r => r.json()).then(data => { img.src = `data:image/png;base64,${data.image_base64}`; img.alt = sampleId; })
+                .catch(err => { img.alt = `加载失败: ${err.message}`; });
         }
 
-        document.getElementById('image-modal-close').addEventListener('click', function() {
-            document.getElementById('image-modal').classList.add('hidden');
-        });
-        document.getElementById('image-modal').addEventListener('click', function(e) {
-            if (e.target === this) this.classList.add('hidden');
+        document.getElementById('image-modal-close').addEventListener('click', () => document.getElementById('image-modal').classList.add('hidden'));
+        document.getElementById('image-modal').addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
+
+        // ── 难度桶抽样 ──────────────────────────────────────────────────────
+        function loadCachedBucketSamples(sourceId, batchId) {
+            let url = `/api/bucket-samples/${sourceId}`;
+            if (batchId) url += `/${batchId}`;
+            url += `?count=${parseInt(document.getElementById('bucket-count').value) || 10}`;
+            fetch(url)
+                .then(r => { if (!r.ok) return null; return r.json(); })
+                .then(data => {
+                    if (!data || !data.bucket_sizes) return;
+                    if (data.error) {
+                        document.getElementById('bucket-empty').textContent = data.error;
+                        document.getElementById('bucket-empty').classList.remove('hidden');
+                        document.getElementById('bucket-summary').classList.add('hidden');
+                        return;
+                    }
+                    const hasData = Object.values(data.buckets || {}).some(v => v.length > 0);
+                    if (!hasData) {
+                        document.getElementById('bucket-empty').textContent = '点击「重新抽样」开始抽样';
+                        document.getElementById('bucket-empty').classList.remove('hidden');
+                        document.getElementById('bucket-summary').classList.add('hidden');
+                        return;
+                    }
+                    bucketSampleData = data;
+                    // 同步输入框为缓存的抽样数
+                    document.getElementById('bucket-count').value = data.count_per_bucket || 10;
+                    renderBucketSummary(data);
+                    renderBucketResults(data);
+                    document.getElementById('btn-run-layout').classList.remove('hidden');
+                    // 自动加载已有的 layout 结果
+                    loadLayoutResults(sourceId, batchId);
+                })
+                .catch(() => {});
+        }
+
+        document.getElementById('btn-bucket-sample').addEventListener('click', function() {
+            const sourceId = getSourceId();
+            const batchId = getBatchId();
+            const count = parseInt(document.getElementById('bucket-count').value) || 10;
+            if (!sourceId) { alert('请选择数据源'); return; }
+
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = '抽样中...';
+
+            let url = `/api/bucket-samples/${sourceId}`;
+            if (batchId) url += `/${batchId}`;
+            url += `?count=${count}&force=true`;
+            fetch(url)
+                .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+                .then(data => {
+                    if (!data || !data.bucket_sizes) throw new Error('返回数据格式异常');
+                    if (data.error) { alert(data.error); return; }
+                    bucketSampleData = data;
+                    renderBucketSummary(data);
+                    renderBucketResults(data);
+                    document.getElementById('btn-run-layout').classList.remove('hidden');
+                })
+                .catch(err => alert('抽样失败: ' + err.message))
+                .finally(() => { btn.disabled = false; btn.textContent = '重新抽样'; });
         });
 
-        // 全选/清空
+        const TIER_COLORS = {
+            easy: {bg:'bg-green-50', border:'border-green-200', text:'text-green-700', badge:'bg-green-100 text-green-800'},
+            medium: {bg:'bg-yellow-50', border:'border-yellow-200', text:'text-yellow-700', badge:'bg-yellow-100 text-yellow-800'},
+            hard: {bg:'bg-red-50', border:'border-red-200', text:'text-red-700', badge:'bg-red-100 text-red-800'},
+            unlabeled: {bg:'bg-gray-50', border:'border-gray-200', text:'text-gray-700', badge:'bg-gray-100 text-gray-800'},
+        };
+        const TIER_LABELS = {easy:'Easy', medium:'Medium', hard:'Hard', unlabeled:'未标注'};
+
+        function renderBucketSummary(data) {
+            document.getElementById('bucket-empty').classList.add('hidden');
+            document.getElementById('bucket-summary').classList.remove('hidden');
+            const statsDiv = document.getElementById('bucket-stats');
+            const bucketCount = data.bucket_count || Object.keys(data.buckets || {}).length;
+            const perBucket = data.count_per_bucket || 0;
+            const totalSampled = data.total_sampled || 0;
+            const totalSize = Object.values(data.bucket_sizes || {}).reduce((s, v) => s + v, 0);
+            let html = `<div class="col-span-2 md:col-span-4 text-sm text-gray-600 mb-2">
+                每桶 <strong>${perBucket}</strong> 个 × <strong>${bucketCount}</strong> 个分区 = 共 <strong>${totalSampled}</strong> 个样本
+                <span class="text-gray-400 ml-2">(总向量 ${totalSize.toLocaleString()})</span>
+            </div>`;
+            if (data.error) {
+                html += `<div class="col-span-4 text-red-500 text-sm">${data.error}</div>`;
+            }
+            statsDiv.innerHTML = html;
+        }
+
+        function renderBucketResults(data) {
+            const container = document.getElementById('bucket-results');
+            container.classList.remove('hidden');
+            const tiers = Object.keys(data.buckets || {});
+            if (tiers.length === 0) { document.getElementById('bucket-tab-content').innerHTML = '<div class="text-gray-400 text-sm">无抽样结果</div>'; return; }
+
+            let currentIdx = 0;
+
+            function showPartition() {
+                const tier = tiers[currentIdx];
+                renderBucketTabContent(data, tier);
+                document.getElementById('bucket-page-info').textContent = `${tier} (${currentIdx + 1} / ${tiers.length})`;
+                document.getElementById('bucket-prev').disabled = currentIdx <= 0;
+                document.getElementById('bucket-next').disabled = currentIdx >= tiers.length - 1;
+            }
+
+            document.getElementById('bucket-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showPartition(); } };
+            document.getElementById('bucket-next').onclick = () => { if (currentIdx < tiers.length - 1) { currentIdx++; showPartition(); } };
+
+            showPartition();
+        }
+
+        function renderBucketTabContent(data, tier) {
+            const contentDiv = document.getElementById('bucket-tab-content');
+            const samples = data.buckets[tier] || [];
+            const partSize = (data.bucket_sizes || {})[tier] || 0;
+            if (samples.length === 0) { contentDiv.innerHTML = '<div class="text-gray-400 text-sm">该分区无抽样结果</div>'; return; }
+
+            const PER_PAGE = 12;
+            let page = 0;
+            const totalPages = Math.ceil(samples.length / PER_PAGE);
+
+            function render() {
+                const start = page * PER_PAGE;
+                const end = Math.min(start + PER_PAGE, samples.length);
+                let html = `<div class="flex items-center justify-between mb-3">
+                    <div class="text-sm text-gray-600"><strong>${tier}</strong> — 共 ${partSize.toLocaleString()} 个向量，抽样 ${samples.length} 个</div>
+                    <div class="flex items-center gap-2">
+                        <button class="sample-prev px-3 py-1 text-xs bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" ${page<=0?'disabled':''}>&lt;</button>
+                        <span class="text-xs text-gray-500">${page+1} / ${totalPages}</span>
+                        <button class="sample-next px-3 py-1 text-xs bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" ${page>=totalPages-1?'disabled':''}>&gt;</button>
+                    </div>
+                </div>`;
+                html += '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">';
+                for (let i = start; i < end; i++) {
+                    const s = samples[i];
+                    const hasLayout = s._layout_blocks && s._layout_blocks.length > 0;
+                    const blockInfo = hasLayout
+                        ? `<div class="text-xs text-green-700 mb-1">${s._layout_blocks.length} blocks: ${[...new Set(s._layout_blocks.map(b=>b.block_type))].join(', ')}</div>`
+                        : '';
+                    html += `<div class="border rounded-lg p-3 bg-white">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="text-xs font-mono text-gray-600 truncate" title="${s.sample_id}">${s.sample_id}</span>
+                            <span class="text-xs text-gray-400">${s.difficulty || '未标注'}</span>
+                        </div>
+                        <div class="text-xs text-gray-500 mb-1">${s.input_type || '-'}</div>
+                        ${blockInfo}
+                        <button onclick="viewLayoutSingle('${data.source_id}','${data.batch_id}','${s.sample_id}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${hasLayout ? '查看 Layout' : 'Layout 预览'}</button>
+                    </div>`;
+                }
+                html += '</div>';
+                contentDiv.innerHTML = html;
+                contentDiv.querySelector('.sample-prev').onclick = () => { if (page > 0) { page--; render(); } };
+                contentDiv.querySelector('.sample-next').onclick = () => { if (page < totalPages - 1) { page++; render(); } };
+            }
+            render();
+        }
+
+        // ── 运行 pp-layout ──────────────────────────────────────────────────
+        document.getElementById('btn-run-layout').addEventListener('click', function() {
+            if (!bucketSampleData) { alert('请先抽样'); return; }
+            const allIds = [];
+            for (const samples of Object.values(bucketSampleData.buckets)) samples.forEach(s => allIds.push(s.sample_id));
+            if (allIds.length === 0) { alert('无抽样样本'); return; }
+
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = '启动中...';
+            const progressDiv = document.getElementById('layout-progress');
+            progressDiv.classList.remove('hidden');
+            document.getElementById('layout-progress-bar').style.width = '0%';
+            document.getElementById('layout-progress-msg').textContent = `正在启动 layout 检测...`;
+
+            fetch('/api/layout-batch', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ source_id: bucketSampleData.source_id, batch_id: bucketSampleData.batch_id, sample_ids: allIds }),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'already_running') {
+                    document.getElementById('layout-progress-msg').textContent = '任务已在运行中';
+                }
+                pollLayoutBatch(data.task_id, allIds.length, btn);
+            })
+            .catch(err => {
+                document.getElementById('layout-progress-msg').textContent = '启动失败: ' + err.message;
+                btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout';
+            });
+        });
+
+        function pollLayoutBatch(taskId, total, btn) {
+            const interval = setInterval(() => {
+                fetch('/api/progress').then(r => r.json()).then(data => {
+                    const task = (data.tasks || {})[taskId];
+                    if (!task) return;
+                    const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                    document.getElementById('layout-progress-bar').style.width = pct + '%';
+                    document.getElementById('layout-progress-msg').textContent = task.message || '检测中...';
+
+                    if (task.status === 'completed') {
+                        clearInterval(interval);
+                        document.getElementById('layout-progress-bar').classList.add('bg-green-500');
+                        document.getElementById('layout-progress-bar').classList.remove('bg-orange-500');
+                        btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout';
+                        // 重新加载结果
+                        loadLayoutResults(bucketSampleData.source_id, bucketSampleData.batch_id);
+                    } else if (task.status === 'failed' || task.status === 'stopped') {
+                        clearInterval(interval);
+                        document.getElementById('layout-progress-bar').classList.add('bg-red-500');
+                        document.getElementById('layout-progress-bar').classList.remove('bg-orange-500');
+                        document.getElementById('layout-progress-msg').textContent = '失败: ' + (task.error_message || task.message);
+                        btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout';
+                    }
+                }).catch(() => {});
+            }, 1000);
+        }
+
+        function loadLayoutResults(sourceId, batchId) {
+            fetch(`/api/layout-batch/${sourceId}/${batchId}/results`)
+                .then(r => r.json())
+                .then(data => {
+                    const results = data.results || [];
+                    if (!results.length) return;
+                    // 合并到 bucketSampleData
+                    const resultMap = {};
+                    results.forEach(r => { resultMap[r.sample_id] = r; });
+                    for (const tier of Object.keys(bucketSampleData.buckets)) {
+                        bucketSampleData.buckets[tier].forEach(s => {
+                            const lr = resultMap[s.sample_id];
+                            if (lr) { s._layout_blocks = lr.blocks; s._layout_block_count = lr.block_count; }
+                        });
+                    }
+                    // 刷新当前分区显示
+                    const pageInfo = document.getElementById('bucket-page-info').textContent;
+                    const currentTier = pageInfo.split(' ')[0];
+                    if (currentTier) renderBucketTabContent(bucketSampleData, currentTier);
+                })
+                .catch(() => {});
+        }
+
+        // ── Layout 单样本预览弹窗 ──────────────────────────────────────────
+        function viewLayoutSingle(sourceId, batchId, sampleId) {
+            const modal = document.getElementById('layout-modal');
+            const body = document.getElementById('layout-modal-body');
+            document.getElementById('layout-modal-title').textContent = `Layout 预览 - ${sampleId}`;
+            body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
+            modal.classList.remove('hidden');
+
+            fetch('/api/layout-preview', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({source_id: sourceId, batch_id: batchId, sample_ids: [sampleId]}),
+            })
+            .then(r => r.json())
+            .then(data => {
+                const result = (data.results || [])[0] || {};
+                if (result.error) {
+                    body.innerHTML = `<div class="text-red-500 text-center">${result.error}</div>`;
+                    return;
+                }
+                renderLayoutPreview(body, result.image_base64, result.blocks || [], sampleId);
+            })
+            .catch(err => { body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`; });
+        }
+
+        const BLOCK_COLORS = {
+            text: {stroke:'#3b82f6', fill:'rgba(59,130,246,0.15)'},
+            table: {stroke:'#ef4444', fill:'rgba(239,68,68,0.15)'},
+            formula: {stroke:'#8b5cf6', fill:'rgba(139,92,246,0.15)'},
+            figure: {stroke:'#10b981', fill:'rgba(16,185,129,0.15)'},
+            paragraph_title: {stroke:'#f59e0b', fill:'rgba(245,158,11,0.15)'},
+            title: {stroke:'#f59e0b', fill:'rgba(245,158,11,0.15)'},
+            number: {stroke:'#6b7280', fill:'rgba(107,114,128,0.15)'},
+        };
+
+        function renderLayoutPreview(container, imageBase64, blocks, sampleId) {
+            const img = new Image();
+            img.onload = function() {
+                const maxW = Math.min(img.width, 1200);
+                const scale = maxW / img.width;
+                const dispW = Math.round(img.width * scale);
+                const dispH = Math.round(img.height * scale);
+
+                let html = `<div class="flex flex-col xl:flex-row gap-6">`;
+                html += `<div class="flex-shrink-0">`;
+                html += `<canvas id="layout-canvas" width="${dispW}" height="${dispH}" class="border rounded shadow" style="max-width:100%;height:auto"></canvas>`;
+                html += `</div><div class="xl:w-80 flex-shrink-0">`;
+                html += `<h4 class="font-medium text-gray-900 mb-3 text-base">检测到 ${blocks.length} 个 Block</h4>`;
+                html += `<div class="space-y-1 max-h-[80vh] overflow-y-auto pr-1">`;
+                blocks.forEach((b, i) => {
+                    const color = BLOCK_COLORS[b.block_type] || BLOCK_COLORS.text;
+                    html += `<div class="flex items-center gap-2 text-sm p-1.5 rounded hover:bg-gray-50">
+                        <span class="text-xs text-gray-400 w-5 text-right">${i+1}</span>
+                        <span class="w-3 h-3 rounded-full flex-shrink-0" style="background:${color.stroke}"></span>
+                        <span class="font-medium">${b.block_type}</span>
+                        <span class="text-gray-400 text-xs">${b.confidence}</span>
+                        <span class="text-gray-400 text-xs">[${b.bbox.map(v=>Math.round(v)).join(', ')}]</span>
+                    </div>`;
+                });
+                html += '</div></div></div>';
+                container.innerHTML = html;
+
+                const canvas = document.getElementById('layout-canvas');
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, dispW, dispH);
+                blocks.forEach((b, i) => {
+                    const color = BLOCK_COLORS[b.block_type] || BLOCK_COLORS.text;
+                    const [x1, y1, x2, y2] = b.bbox.map(v => v * scale);
+                    ctx.strokeStyle = color.stroke; ctx.lineWidth = 2;
+                    ctx.fillStyle = color.fill; ctx.fillRect(x1, y1, x2-x1, y2-y1);
+                    ctx.strokeRect(x1, y1, x2-x1, y2-y1);
+                    ctx.fillStyle = color.stroke;
+                    ctx.font = 'bold 13px sans-serif';
+                    ctx.fillText(`${i+1}. ${b.block_type} ${b.confidence}`, x1+4, y1+16);
+                });
+            };
+            img.src = 'data:image/jpeg;base64,' + imageBase64;
+        }
+
+        document.getElementById('layout-modal-close').addEventListener('click', () => document.getElementById('layout-modal').classList.add('hidden'));
+        document.getElementById('layout-modal').addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
+
+        // ── 筛选 / 导出 ──────────────────────────────────────────────────────
         document.getElementById('select-all').addEventListener('click', () => document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true));
         document.getElementById('clear-all').addEventListener('click', () => document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false));
 
-        // 应用筛选
         document.getElementById('apply-filter').addEventListener('click', function() {
             const sources = Array.from(document.querySelectorAll('.source-checkbox:checked')).map(cb => cb.value);
             const batches = Array.from(document.querySelectorAll('.batch-checkbox:checked')).map(cb => cb.value);
             const statuses = Array.from(document.querySelectorAll('.status-checkbox:checked')).map(cb => cb.value);
-
-            if (sources.length === 0 && batches.length === 0 && statuses.length === 0) {
-                alert('请至少选择一个筛选条件'); return;
-            }
-
+            if (sources.length === 0 && batches.length === 0 && statuses.length === 0) { alert('请至少选择一个筛选条件'); return; }
             const params = new URLSearchParams();
             if (sources.length) params.set('sources', sources.join(','));
             if (batches.length) params.set('batches', batches.join(','));
             if (statuses.length) params.set('statuses', statuses.join(','));
-            params.set('page', '1');
-            params.set('page_size', '10');
-
-            fetch(`/api/filter-data?${params}`)
-                .then(r => r.json())
-                .then(data => displayResults(data))
-                .catch(err => alert('筛选失败'));
+            params.set('page', '1'); params.set('page_size', '10');
+            fetch(`/api/filter-data?${params}`).then(r => r.json()).then(data => displayResults(data)).catch(() => alert('筛选失败'));
         });
 
-        // 导出
         document.getElementById('export-data').addEventListener('click', function() {
             const rows = document.querySelectorAll('#results-body tr');
             if (!rows.length || rows[0].querySelector('td[colspan]')) { alert('没有数据可导出'); return; }
-            let csv = 'Sample ID,Source ID,Batch ID,Type,Cluster ID,Difficulty\n';
+            let csv = 'Sample ID,Source ID,Batch ID,Type,Difficulty\n';
             rows.forEach(r => csv += Array.from(r.querySelectorAll('td')).map(c => c.textContent.trim()).join(',') + '\n');
             const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([csv], {type:'text/csv'})), download: 'filtered_data.csv' });
             a.click();
         });
 
-        // 结果显示
         let currentPage = 1, currentFilters = {};
         function displayResults(data) {
-            currentPage = data.page;
-            currentFilters = data;
+            currentPage = data.page; currentFilters = data;
             document.getElementById('filter-summary').innerHTML = `找到 <strong>${data.total}</strong> 个样本，显示第 <strong>${data.page}</strong> 页，共 <strong>${data.total_pages}</strong> 页`;
             const tbody = document.getElementById('results-body');
             tbody.innerHTML = '';
@@ -599,8 +954,7 @@
             if (currentFilters.sources) params.set('sources', currentFilters.sources);
             if (currentFilters.batches) params.set('batches', currentFilters.batches);
             if (currentFilters.statuses) params.set('statuses', currentFilters.statuses);
-            params.set('page', page);
-            params.set('page_size', '10');
+            params.set('page', page); params.set('page_size', '10');
             fetch(`/api/filter-data?${params}`).then(r => r.json()).then(data => displayResults(data));
         }
     </script>

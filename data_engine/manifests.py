@@ -326,3 +326,87 @@ def find_stage_manifest(manifests_dir: Path, stage: str) -> Path | None:
 
 def iso_now() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+# ─── Element lance I/O ────────────────────────────────────────────────────────
+
+def _element_record_to_arrow(record: dict) -> dict:
+    from data_engine.ocr import ELEMENT_SCHEMA, ELEMENT_JSON_FIELDS
+    row = {}
+    for field in ELEMENT_SCHEMA:
+        name = field.name
+        val = record.get(name)
+        if name in ELEMENT_JSON_FIELDS:
+            if val is None:
+                row[name] = None
+            elif isinstance(val, (dict, list)):
+                row[name] = json.dumps(val, ensure_ascii=False)
+            else:
+                row[name] = str(val)
+        elif name == "layout_confidence":
+            row[name] = float(val) if val is not None else 0.0
+        elif name == "block_idx":
+            row[name] = int(val) if val is not None else 0
+        elif name in ("paddle_confidence", "glm_confidence", "self_confidence"):
+            row[name] = float(val) if val is not None else None
+        elif isinstance(val, Enum):
+            row[name] = val.value
+        else:
+            row[name] = str(val) if val is not None else None
+    return row
+
+
+def _element_arrow_to_record(row: dict) -> dict:
+    from data_engine.ocr import ELEMENT_JSON_FIELDS
+    record = {}
+    for name, val in row.items():
+        if name in ELEMENT_JSON_FIELDS:
+            if val is None:
+                record[name] = None
+            else:
+                try:
+                    record[name] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    record[name] = val
+        else:
+            record[name] = val
+    return record
+
+
+def write_element_manifest(path: Path, records: list[dict]) -> None:
+    from data_engine.ocr import ELEMENT_SCHEMA
+    if not records:
+        return
+    rows = [_element_record_to_arrow(r) for r in records]
+    table = pa.Table.from_pylist(rows, schema=ELEMENT_SCHEMA)
+    _safe_write_lance(table, path, mode="overwrite")
+
+
+def append_element_manifest(path: Path, records: list[dict]) -> None:
+    from data_engine.ocr import ELEMENT_SCHEMA
+    if not records:
+        return
+    rows = [_element_record_to_arrow(r) for r in records]
+    table = pa.Table.from_pylist(rows, schema=ELEMENT_SCHEMA)
+    _safe_write_lance(table, path, mode="append")
+
+
+def read_element_manifest(path: Path, columns: list[str] | None = None) -> list[dict]:
+    if not path.exists():
+        return []
+    with _lance_write_lock:
+        ds = lance.dataset(str(path))
+        table = ds.to_table(columns=columns)
+        return [_element_arrow_to_record(row) for row in table.to_pylist()]
+
+
+def merge_insert_element(path: Path, records: list[dict], on_columns: list[str] | None = None) -> None:
+    from data_engine.ocr import ELEMENT_SCHEMA
+    if not records:
+        return
+    on_cols = on_columns or ["sample_id", "block_idx"]
+    rows = [_element_record_to_arrow(r) for r in records]
+    table = pa.Table.from_pylist(rows, schema=ELEMENT_SCHEMA)
+    with _lance_write_lock:
+        ds = lance.dataset(str(path))
+        ds.merge_insert(on_cols).when_matched_update_all().execute(table)

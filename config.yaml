@@ -36,3 +36,38 @@ clustering:
   default_n_clusters: 5
   random_state: 42
   max_clusters: 10
+
+ocr:
+  layout:
+    provider: pp_structure
+    model_name: PP-DocLayoutV3
+    model_dir: null
+    gpu_id: 0
+    score_threshold: 0.5
+
+  engines:
+    paddleocr:
+      api_url: "http://localhost:8080"
+      api_key: null
+      timeout: 30
+      max_retries: 3
+      lang: "ch"
+
+    glm_ocr:
+      api_url: "http://localhost:8081"
+      api_key: null
+      timeout: 60
+      max_retries: 3
+      max_tokens: 2048
+
+    self_ocr:
+      api_url: "http://localhost:8082"
+      api_key: null
+      timeout: 30
+      max_retries: 3
+
+  cmcv:
+    agreement_threshold: 0.9
+    text_threshold: null
+    table_threshold: null
+    formula_threshold: null

@@ -159,3 +159,32 @@ class BatchStatusSummary(BaseModel):
     lance_version: int = 0
     difficulty_histogram: dict[str, int] = Field(default_factory=dict)
     updated_at: datetime | None = None
+
+
+class ElementBlockRecord(BaseModel):
+    sample_id: str
+    block_idx: int
+    block_type: str
+    bbox: list[float]
+    layout_confidence: float
+
+    paddle_text: str | None = None
+    paddle_confidence: float | None = None
+    paddle_table: dict | None = None
+    paddle_formula: str | None = None
+    paddle_raw: dict | None = None
+
+    glm_text: str | None = None
+    glm_confidence: float | None = None
+    glm_table: dict | None = None
+    glm_formula: str | None = None
+    glm_raw: dict | None = None
+
+    self_text: str | None = None
+    self_confidence: float | None = None
+    self_table: dict | None = None
+    self_formula: str | None = None
+    self_raw: dict | None = None
+
+    consistency_pattern: str | None = None
+    block_diff: list[dict] | None = None

@@ -105,6 +105,20 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
 
 def _detect_stage_status(manifests_dir: Path) -> str:
     ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
+
+    element_manifest = find_stage_manifest(manifests_dir, "element")
+    if element_manifest and element_manifest.exists():
+        try:
+            with _lance_write_lock:
+                ds = lance.dataset(str(element_manifest))
+                sample = ds.to_table(limit=5, columns=["consistency_pattern"]).to_pylist()
+            has_cmcv = any(r.get("consistency_pattern") for r in sample) if sample else False
+            if has_cmcv:
+                return "bucketed"
+            return "inferred"
+        except Exception:
+            pass
+
     if ingest_manifest:
         if ingest_manifest.suffix == ".lance":
             try:
@@ -118,6 +132,9 @@ def _detect_stage_status(manifests_dir: Path) -> str:
             return "ingested"
 
         if sample_records:
+            has_difficulty = any(r.get("difficulty") for r in sample_records)
+            if has_difficulty:
+                return "bucketed"
             has_cluster = any(r.get("cluster_id") for r in sample_records)
             if has_cluster:
                 return "clustered"
