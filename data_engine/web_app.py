@@ -1244,116 +1244,195 @@ async def get_batch_progress(source_id: str, batch_id: str):
 
 
 @app.post("/api/ocr/{source_id}")
-async def start_ocr(source_id: str, batch_id: str = None, models: str = "paddleocr,glm_ocr,self_ocr", resume: bool = False):
-    """启动 OCR 推理任务 (pp-layout + 远程 OCR 服务)"""
+async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", batch_id: str = "", resume: bool = True):
+    """对指定批次的抽样样本运行 OCR，使用已有 layout 结果，支持断点续跑"""
     try:
-        task_id = f"element_sample_{source_id}_{batch_id}"
+        prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
+        prefix = prefix_map.get(model)
+        if not prefix:
+            raise HTTPException(status_code=400, detail=f"未知模型: {model}")
+
+        task_id = f"ocr_{model}_{source_id}_{batch_id}"
         existing = progress_tracker.get_task(task_id)
         if existing and existing.status.value in ["running", "pending"]:
             alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
             if task_id not in alive_threads:
                 progress_tracker.stop_task(task_id, "线程已终止，任务停止")
             else:
-                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+                return {"message": f"任务已在运行中", "task_id": task_id, "status": "already_running"}
 
-        model_names = [m.strip() for m in models.split(",") if m.strip()]
-
-        def execute_ocr_task():
+        def execute():
             try:
-                from data_engine.ocr.base import BaseOCREngine
-                from data_engine.ocr.layout_provider import PPLayoutProvider
-                from data_engine.ocr.normalizer import results_to_element_rows, ocr_results_to_ingest_fields
-                from data_engine.manifests import iso_now
-
                 source = registry.get(source_id)
                 batch_dir = source.resolve_batch_dir(batch_id)
-                manifests_dir = batch_dir / "manifests"
-                ingest_path = find_stage_manifest(manifests_dir, "ingest")
-                element_path = manifests_dir / "element.lance"
+                artifacts_dir = batch_dir / "artifacts"
+                element_path = batch_dir / "manifests" / "element.lance"
 
-                if not ingest_path or not ingest_path.exists():
-                    print("[OCR] ingest manifest 不存在", file=sys.stderr)
+                # 1. 读该批次的抽样结果
+                sample_cache = artifacts_dir / "bucket_samples.json"
+                if not sample_cache.exists():
+                    progress_tracker.fail_task(task_id, "无抽样数据，请先抽样")
                     return
 
-                engines: dict[str, BaseOCREngine] = {}
-                for name in model_names:
-                    if name == "paddleocr":
-                        from data_engine.ocr.paddle_ocr import PaddleOCREngine
-                        engines["paddle"] = PaddleOCREngine()
-                    elif name == "glm_ocr":
-                        from data_engine.ocr.glm_ocr import GLMOCREngine
-                        engines["glm"] = GLMOCREngine()
-                    elif name == "self_ocr":
-                        from data_engine.ocr.self_ocr import SelfOCREngine
-                        engines["self"] = SelfOCREngine()
+                cached = json.loads(sample_cache.read_text(encoding="utf-8"))
+                sample_map: dict[str, dict] = {}
+                for samples in cached.get("buckets", {}).values():
+                    for s in samples:
+                        sample_map[s["sample_id"]] = s
 
-                layout = PPLayoutProvider()
-                records = read_manifest(ingest_path)
-                now_str = iso_now()
+                # 2. 读 layout 结果
+                layout_cache = artifacts_dir / "layout_results.json"
+                layout_map: dict[str, list[dict]] = {}
+                _SKIP_BLOCK_TYPES = {"figure"}
+                if layout_cache.exists():
+                    for r in json.loads(layout_cache.read_text(encoding="utf-8")):
+                        if r.get("blocks"):
+                            filtered_blocks = [b for b in r["blocks"] if b.get("block_type") not in _SKIP_BLOCK_TYPES]
+                            if filtered_blocks:
+                                layout_map[r["sample_id"]] = filtered_blocks
+
+                if not layout_map:
+                    progress_tracker.fail_task(task_id, "无 layout 结果，请先运行 pp-layout")
+                    return
+
+                # 3. 初始化 OCR 引擎
+                if model == "paddleocr":
+                    from data_engine.ocr.paddle_ocr import PaddleOCREngine
+                    engine = PaddleOCREngine()
+                elif model == "glm_ocr":
+                    from data_engine.ocr.glm_ocr import GLMOCREngine
+                    engine = GLMOCREngine()
+                else:
+                    from data_engine.ocr.self_ocr import SelfOCREngine
+                    engine = SelfOCREngine()
+
+                # 4. 断点续跑：跳过已有结果
+                done_ids: set[str] = set()
+                if resume and element_path.exists():
+                    try:
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(element_path))
+                            col = f"{prefix}_text"
+                            if col in ds.schema.names:
+                                existing_rows = ds.to_table(columns=["sample_id", col]).to_pylist()
+                                done_ids = {r["sample_id"] for r in existing_rows if r.get(col)}
+                    except Exception:
+                        pass
+
+                # 5. 读图片数据
+                ids_to_load = [sid for sid in layout_map if sid in sample_map]
+                image_map: dict[str, bytes] = {}
+                try:
+                    ipath = find_stage_manifest(batch_dir / "manifests", "ingest")
+                    if ipath:
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(ipath))
+                            ids_str = ",".join(repr(s) for s in ids_to_load)
+                            try:
+                                recs = ds.to_table(columns=["sample_id", "image_data"], filter=f"sample_id IN ({ids_str})").to_pylist()
+                            except Exception:
+                                recs = ds.to_table(columns=["sample_id", "image_data"]).to_pylist()
+                                recs = [r for r in recs if r["sample_id"] in set(ids_to_load)]
+                        for r in recs:
+                            if r.get("image_data"):
+                                image_map[r["sample_id"]] = r["image_data"]
+                except Exception as e:
+                    print(f"[OCR] 读图失败: {e}", file=sys.stderr)
+
+                # 6. 处理
+                pending = [sid for sid in layout_map if sid not in done_ids and sid in image_map]
+                total = len(layout_map)
+                skipped = total - len(pending)
 
                 progress_tracker.start_task(
-                    task_id=task_id,
-                    task_type="element_sample",
-                    source_id=source_id,
-                    batch_id=batch_id,
-                    total=len(records),
-                    message=f"开始 OCR: {len(records)} 页面",
+                    task_id=task_id, task_type="element_sample",
+                    source_id=source_id, batch_id=batch_id,
+                    total=total,
+                    message=f"{model}: 跳过 {skipped}，剩余 {len(pending)}",
                 )
+                if skipped > 0:
+                    progress_tracker.update_progress(task_id=task_id, current=skipped)
 
-                all_element_rows: list[dict] = []
-                for page_idx, record in enumerate(records):
+                from data_engine.ocr.base import LayoutBlock
+                from data_engine.ocr.normalizer import results_to_element_rows
+
+                all_rows: list[dict] = []
+                save_interval = int(get_config("ocr", "save_interval", default=100))
+                fail_count = 0
+                skip_count = 0
+
+                for idx, sid in enumerate(pending):
                     if progress_tracker.is_stopped(task_id):
-                        progress_tracker.stop_task(task_id, f"用户停止 {page_idx}/{len(records)}")
+                        progress_tracker.stop_task(task_id, f"停止 {idx}/{len(pending)}")
                         break
 
-                    sample_id = record["sample_id"]
-                    image_path = batch_dir / record.get("page_image", "")
-                    if not image_path.exists():
+                    if sid not in layout_map:
+                        skip_count += 1
+                        continue
+                    if sid not in image_map:
+                        skip_count += 1
                         continue
 
-                    blocks = layout.detect_layout(image_path)
-                    engine_results: dict[str, list] = {}
-                    for prefix, engine in engines.items():
-                        try:
-                            engine_results[prefix] = engine.recognize_regions(image_path, blocks)
-                        except Exception as exc:
-                            print(f"[{prefix}] failed sample={sample_id}: {exc}", file=sys.stderr)
-                            engine_results[prefix] = []
+                    blocks = [
+                        LayoutBlock(block_type=b["block_type"], bbox=b["bbox"], confidence=b.get("confidence", 0))
+                        for b in layout_map[sid]
+                    ]
+                    image_bytes = image_map[sid]
 
-                    element_rows = results_to_element_rows(
-                        sample_id=sample_id, blocks=blocks,
-                        engine_results=engine_results, created_at=now_str,
+                    try:
+                        import tempfile, os
+                        fd, tmp = tempfile.mkstemp(suffix=".png")
+                        os.write(fd, image_bytes)
+                        os.close(fd)
+                        results = engine.recognize_regions(Path(tmp), blocks)
+                        os.unlink(tmp)
+                    except Exception as exc:
+                        fail_count += 1
+                        if fail_count <= 3:
+                            print(f"[{model}] failed {sid}: {exc}", file=sys.stderr)
+                        continue
+
+                    rows = results_to_element_rows(
+                        sample_id=sid, blocks=blocks,
+                        engine_results={prefix: results},
                     )
-                    all_element_rows.extend(element_rows)
+                    all_rows.extend(rows)
 
-                    paddle_results = engine_results.get("paddle", [])
-                    if paddle_results:
-                        ingest_fields = ocr_results_to_ingest_fields(paddle_results)
-                        for key, val in ingest_fields.items():
-                            record[key] = val
+                    progress_tracker.update_progress(
+                        task_id=task_id, current=skipped + idx + 1,
+                        message=f"{model}: {skipped + idx + 1}/{total}",
+                    )
 
-                    progress_tracker.update_progress(task_id=task_id, current=page_idx + 1)
+                    # 定期保存，避免丢失进度
+                    if len(all_rows) >= save_interval:
+                        if element_path.exists():
+                            merge_insert_element(element_path, all_rows)
+                        else:
+                            write_element_manifest(element_path, all_rows)
+                        all_rows = []
 
-                if all_element_rows:
-                    if resume and element_path.exists():
-                        merge_insert_element(element_path, all_element_rows)
+                # 保存剩余
+                if all_rows:
+                    if element_path.exists():
+                        merge_insert_element(element_path, all_rows)
                     else:
-                        write_element_manifest(element_path, all_element_rows)
-                    write_manifest(ingest_path, records)
+                        write_element_manifest(element_path, all_rows)
 
-                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(all_element_rows)} block")
+                print(f"[{model}] 完成: pending={len(pending)} rows={len(all_rows)} skipped={skip_count} failed={fail_count}", file=sys.stderr)
+                progress_tracker.complete_task(task_id=task_id, message=f"{model} 完成: +{len(all_rows)} block (skip={skip_count}, fail={fail_count})")
                 invalidate_status_cache()
-
             except Exception as e:
-                print(f"[OCR] 任务失败: {e}", file=sys.stderr)
+                print(f"[OCR] {model} 失败: {e}", file=sys.stderr)
                 traceback.print_exc()
                 progress_tracker.fail_task(task_id=task_id, error_message=str(e))
 
-        thread = threading.Thread(target=execute_ocr_task, name=task_id)
+        thread = threading.Thread(target=execute, name=task_id)
         thread.daemon = True
         thread.start()
 
-        return {"message": f"已启动 {source_id} 的 OCR 任务", "status": "started", "models": model_names}
+        return {"message": f"已启动 {model}", "task_id": task_id, "status": "started"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

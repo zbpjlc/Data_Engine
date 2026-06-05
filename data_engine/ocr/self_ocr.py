@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import json
 import logging
 from pathlib import Path
 
@@ -11,6 +9,23 @@ from data_engine.config import get_config
 from data_engine.ocr.base import BaseOCREngine, LayoutBlock, OCRResult
 
 logger = logging.getLogger(__name__)
+
+_TASK_MAP = {
+    "text": "text",
+    "title": "text",
+    "paragraph_title": "text",
+    "number": "text",
+    "header": "text",
+    "footer": "text",
+    "table": "table",
+    "formula": "formula",
+}
+
+_ENDPOINTS = {
+    "text": {"url": "/ocr", "prompt": "OCR:"},
+    "table": {"url": "/tsr", "prompt": "Table Recognition:"},
+    "formula": {"url": "/formula_infer", "prompt": "Formula Recognition:"},
+}
 
 
 class SelfOCREngine(BaseOCREngine):
@@ -22,9 +37,11 @@ class SelfOCREngine(BaseOCREngine):
         timeout: int | None = None,
         max_retries: int | None = None,
     ) -> None:
-        self._api_url = api_url or get_config("ocr", "engines", "self_ocr", "api_url", default="http://localhost:8082")
-        self._api_key = api_key or get_config("ocr", "engines", "self_ocr", "api_key", default=None)
-        self._timeout = timeout or int(get_config("ocr", "engines", "self_ocr", "timeout", default=30))
+        self._api_url = api_url or get_config("ocr", "engines", "self_ocr", "api_url", default="http://10.112.64.56:8801")
+        self._formula_url = get_config("ocr", "engines", "self_ocr", "formula_url", default="http://10.112.64.56:20107")
+        self._table_url = get_config("ocr", "engines", "self_ocr", "table_url", default="http://10.112.64.56:8801")
+        self._api_key = api_key or get_config("ocr", "engines", "self_ocr", "api_key", default="")
+        self._timeout = timeout or int(get_config("ocr", "engines", "self_ocr", "timeout", default=60))
         self._max_retries = max_retries or int(get_config("ocr", "engines", "self_ocr", "max_retries", default=3))
 
     @property
@@ -40,53 +57,64 @@ class SelfOCREngine(BaseOCREngine):
         image_path: Path,
         regions: list[LayoutBlock],
     ) -> list[OCRResult]:
-        image_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
-        payload = {
-            "image": image_b64,
-            "regions": [
-                {"type": r.block_type, "bbox": r.bbox}
-                for r in regions
-            ],
-        }
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        import io
+        from PIL import Image
 
-        raw_text = self._post_with_retry(payload, headers)
-        raw_json = json.loads(raw_text) if raw_text else {}
-        return self._parse_response(raw_json, regions)
+        img = Image.open(image_path)
+        out: list[OCRResult] = []
 
-    def _post_with_retry(self, payload: dict, headers: dict) -> str:
+        for region in regions:
+            task = _TASK_MAP.get(region.block_type, "text")
+            endpoint = _ENDPOINTS[task]
+
+            x1, y1, x2, y2 = [int(c) for c in region.bbox]
+            cropped = img.crop((x1, y1, x2, y2))
+
+            buf = io.BytesIO()
+            cropped.save(buf, format="PNG")
+            buf.seek(0)
+
+            # 选择对应的 URL
+            if task == "formula":
+                base_url = self._formula_url
+            elif task == "table":
+                base_url = self._table_url
+            else:
+                base_url = self._api_url
+
+            url = base_url + endpoint["url"]
+            files = {"image_binary": ("image.png", buf, "image/png")}
+
+            try:
+                raw_json = self._post_with_retry(url, files)
+            except Exception as exc:
+                logger.warning("SelfOCR failed for region %s: %s", region.block_type, exc)
+                raw_json = {}
+
+            text = str(raw_json.get("text", raw_json.get("result", raw_json.get("formula", ""))))
+            table_data = raw_json.get("table") if task == "table" else None
+            formula = text if task == "formula" else ""
+
+            out.append(OCRResult(
+                block_type=region.block_type,
+                bbox=region.bbox,
+                text_content=text if task not in ("table", "formula") else "",
+                confidence=region.confidence,
+                table_structure=table_data,
+                formula_latex=formula,
+                raw_output=raw_json,
+            ))
+
+        return out
+
+    def _post_with_retry(self, url: str, files: dict) -> dict:
         last_exc: Exception | None = None
         for attempt in range(self._max_retries):
             try:
-                resp = requests.post(
-                    f"{self._api_url}/recognize",
-                    json=payload,
-                    headers=headers,
-                    timeout=self._timeout,
-                )
+                resp = requests.post(url, files=files, timeout=self._timeout)
                 resp.raise_for_status()
-                return resp.text
+                return resp.json()
             except Exception as exc:
                 last_exc = exc
                 logger.warning("SelfOCR attempt %d failed: %s", attempt + 1, exc)
         raise RuntimeError(f"SelfOCR failed after {self._max_retries} retries: {last_exc}")
-
-    def _parse_response(self, raw: dict, regions: list[LayoutBlock]) -> list[OCRResult]:
-        results_raw = raw.get("results", raw.get("data", []))
-        if not isinstance(results_raw, list):
-            results_raw = [results_raw]
-        out: list[OCRResult] = []
-        for idx, region in enumerate(regions):
-            item = results_raw[idx] if idx < len(results_raw) else {}
-            out.append(OCRResult(
-                block_type=region.block_type,
-                bbox=region.bbox,
-                text_content=str(item.get("text", "")),
-                confidence=float(item.get("confidence", 0)),
-                table_structure=item.get("table") if region.block_type == "table" else None,
-                formula_latex=str(item.get("formula", "")) if region.block_type == "formula" else "",
-                raw_output=item,
-            ))
-        return out

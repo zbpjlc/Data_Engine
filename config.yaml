@@ -47,23 +47,25 @@ ocr:
 
   engines:
     paddleocr:
-      api_url: "http://localhost:8080"
-      api_key: null
-      timeout: 30
-      max_retries: 3
-      lang: "ch"
-
-    glm_ocr:
-      api_url: "http://localhost:8081"
-      api_key: null
+      api_url: "http://localhost:8085"
+      api_key: ""
       timeout: 60
       max_retries: 3
-      max_tokens: 2048
+      model: "PaddleOCR-VL-1.5-0.9B"
+
+    glm_ocr:
+      api_url: "http://localhost:8089"
+      api_key: ""
+      timeout: 60
+      max_retries: 3
+      model: null
 
     self_ocr:
-      api_url: "http://localhost:8082"
-      api_key: null
-      timeout: 30
+      api_url: "http://10.112.64.56:8801"
+      formula_url: "http://10.112.64.56:20107"
+      table_url: "http://10.112.64.56:8801"
+      api_key: ""
+      timeout: 60
       max_retries: 3
 
   cmcv:
@@ -71,3 +73,5 @@ ocr:
     text_threshold: null
     table_threshold: null
     formula_threshold: null
+
+  save_interval: 100

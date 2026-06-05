@@ -35,7 +35,7 @@
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">数据源</label>
                         <select id="sel-source" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                            <option value="">选择数据源...</option>
+                            <option value="">全部数据源</option>
                             {% for source in sources %}
                             <option value="{{ source.source_id }}">{{ source.source_id }} ({{ source.batch_count }} 批次)</option>
                             {% endfor %}
@@ -56,6 +56,7 @@
                 <div class="flex space-x-1 mb-6">
                     <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" data-panel="index">向量索引</button>
                     <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="bucket">难度桶抽样 & Layout</button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="ocr">三模型 OCR</button>
                 </div>
 
                 <!-- ====== Panel: 向量索引 ====== -->
@@ -83,8 +84,8 @@
                             </div>
                             <div class="w-full bg-gray-200 rounded-full h-2">
                                 <div id="index-progress-bar" class="bg-indigo-600 h-2 rounded-full transition-all" style="width:0%"></div>
-                            </div>
-                        </div>
+                    </div>
+                </div>
                         </div>
                         <!-- 右侧：索引桶分布 -->
                         <div>
@@ -172,6 +173,69 @@
                             <button id="bucket-prev" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" disabled>&lt; 上一分区</button>
                             <span id="bucket-page-info" class="text-sm text-gray-600 font-medium">P0 / 64</span>
                             <button id="bucket-next" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50">下一分区 &gt;</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ====== Panel: 三模型 OCR ====== -->
+                <div id="panel-ocr" class="panel-content hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div class="space-y-4">
+                            <div class="text-sm font-medium text-gray-700 mb-2">OCR 模型（独立运行，断点续跑）</div>
+
+                            <div>
+                                <label class="text-xs text-gray-500 mb-1 block">选择数据批次</label>
+                                <div id="ocr-batch-select" class="border rounded p-2 text-xs space-y-1">
+                                    <div class="text-gray-400">选择数据源后显示</div>
+                                </div>
+                            </div>
+
+                            <div class="border rounded-lg p-3 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="font-medium text-blue-700">PaddleOCR VL</span>
+                                    <div class="flex gap-1">
+                                        <button class="btn-ocr-run px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" data-model="paddleocr">运行</button>
+                                        <button class="btn-ocr-stop px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="paddleocr">停止</button>
+                                    </div>
+                                </div>
+                                <div id="paddleocr-tasks" class="space-y-1"></div>
+                            </div>
+
+                            <div class="border rounded-lg p-3 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="font-medium text-green-700">GLM OCR</span>
+                                    <div class="flex gap-1">
+                                        <button class="btn-ocr-run px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700" data-model="glm_ocr">运行</button>
+                                        <button class="btn-ocr-stop px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="glm_ocr">停止</button>
+                                    </div>
+                                </div>
+                                <div id="glm_ocr-tasks" class="space-y-1"></div>
+                            </div>
+
+                            <div class="border rounded-lg p-3 space-y-2">
+                                <div class="flex items-center justify-between">
+                                    <span class="font-medium text-purple-700">自研 OCR</span>
+                                    <div class="flex gap-1">
+                                        <button class="btn-ocr-run px-2 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700" data-model="self_ocr">运行</button>
+                                        <button class="btn-ocr-stop px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="self_ocr">停止</button>
+                                    </div>
+                                </div>
+                                <div id="self_ocr-tasks" class="space-y-1"></div>
+                            </div>
+
+                            <button id="btn-run-cmcv" class="w-full px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium hidden">运行 CMCV 一致性比较</button>
+                        </div>
+                        <div class="lg:col-span-2">
+                            <div id="ocr-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">点击左侧「运行」启动单个 OCR 模型</div>
+                            <div id="ocr-results" class="hidden">
+                                <div class="mb-3 text-sm text-gray-600">共 <strong id="ocr-total-blocks">0</strong> 个 block，<span id="ocr-total-samples">0</span> 个样本</div>
+                                <div id="ocr-sample-list"></div>
+                                <div id="ocr-pagination" class="flex items-center justify-center gap-4 mt-4 pt-4 border-t">
+                                    <button id="ocr-prev" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" disabled>&lt; 上一个</button>
+                                    <span id="ocr-page-info" class="text-sm text-gray-600">1 / 1</span>
+                                    <button id="ocr-next" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50">下一个 &gt;</button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -318,46 +382,84 @@
         function filterBatches() {
             const sourceId = selSource.value;
             selBatch.innerHTML = '<option value="">全部批次</option>';
-            const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : [];
+            const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
             filtered.forEach(b => {
                 const opt = document.createElement('option');
                 opt.value = b.batch_id;
-                opt.textContent = b.batch_id + ' (' + b.sample_count.toLocaleString() + ' 样本)';
+                const label = sourceId ? b.batch_id : `${b.source_id}/${b.batch_id}`;
+                opt.textContent = label + ' (' + b.sample_count.toLocaleString() + ' 样本)';
+                opt.dataset.source = b.source_id;
                 selBatch.appendChild(opt);
             });
+            const totalSamples = filtered.reduce((s,b)=>s+b.sample_count, 0);
             document.getElementById('source-info').textContent = sourceId
-                ? filtered.length + ' 个批次 | 共 ' + filtered.reduce((s,b)=>s+b.sample_count,0).toLocaleString() + ' 样本'
-                : '选择数据源以开始';
+                ? filtered.length + ' 个批次 | 共 ' + totalSamples.toLocaleString() + ' 样本'
+                : '全部 ' + filtered.length + ' 个批次 | 共 ' + totalSamples.toLocaleString() + ' 样本';
 
-            // 清空旧的抽样结果
+            // 清空旧数据
+            bucketSampleData = null;
+            document.getElementById('bucket-summary').classList.add('hidden');
+            document.getElementById('bucket-empty').classList.remove('hidden');
+            document.getElementById('bucket-results').classList.add('hidden');
+            document.getElementById('btn-run-layout').classList.add('hidden');
+            updateOcrBatchSelect();
+        }
+
+        selBatch.addEventListener('change', function() {
+            const batchId = this.value;
+            const opt = this.options[this.selectedIndex];
+            const sourceId = opt.dataset.source || selSource.value;
+
+            // 清空旧数据
             bucketSampleData = null;
             document.getElementById('bucket-summary').classList.add('hidden');
             document.getElementById('bucket-empty').classList.remove('hidden');
             document.getElementById('bucket-results').classList.add('hidden');
             document.getElementById('btn-run-layout').classList.add('hidden');
 
-            if (sourceId && filtered.length > 0) {
-                loadIndexStats(sourceId, filtered[0].batch_id);
-                loadCachedBucketSamples(sourceId, filtered[0].batch_id);
+            if (batchId && sourceId) {
+                document.getElementById('source-info').textContent = `${sourceId}/${batchId}`;
+                loadIndexStats(sourceId, batchId);
+                loadCachedBucketSamples(sourceId, batchId);
+            } else {
+                const totalSamples = batchData.reduce((s,b)=>s+b.sample_count, 0);
+                document.getElementById('source-info').textContent = `全部 ${batchData.length} 个批次 | 共 ${totalSamples.toLocaleString()} 样本`;
             }
-        }
+            updateOcrBatchSelect();
+        });
 
         selSource.addEventListener('change', filterBatches);
 
         if (batchData.length > 0) {
-            selSource.value = batchData[0].source_id;
             filterBatches();
         }
 
-        selBatch.addEventListener('change', function() {
-            const sourceId = selSource.value;
-            const batchId = this.value;
-            if (sourceId) {
-                loadIndexStats(sourceId, batchId || (batchData.filter(b => b.source_id === sourceId)[0]?.batch_id || ''));
-            }
-        });
+        // 页面加载后检查正在运行的 OCR 任务
+        setTimeout(function() {
+            fetch('/api/progress').then(r => r.json()).then(data => {
+                const tasks = data.tasks || {};
+                const OCR_MODELS_LOCAL = ['paddleocr', 'glm_ocr', 'self_ocr'];
+                for (const [tid, task] of Object.entries(tasks)) {
+                    if (!tid.startsWith('ocr_')) continue;
+                    if (task.status !== 'running') continue;
+                    let model = null;
+                    for (const m of OCR_MODELS_LOCAL) {
+                        if (tid.startsWith('ocr_' + m + '_')) { model = m; break; }
+                    }
+                    if (!model) continue;
+                    pollOcrModel(model, tid, null);
+                    console.log('[restore]', model, tid, task.message);
+                }
+            }).catch(() => {});
+        }, 1000);
 
-        function getSourceId() { return selSource.value; }
+        function getSourceId() {
+            // 如果选了具体数据源，直接返回；否则从批次 option 的 data-source 取
+            const src = selSource.value;
+            if (src) return src;
+            const opt = selBatch.options[selBatch.selectedIndex];
+            return opt ? (opt.dataset.source || '') : '';
+        }
         function getBatchId() { return selBatch.value; }
 
         // ── Tab 切换 ──────────────────────────────────────────────────────────
@@ -597,6 +699,7 @@
                     renderBucketSummary(data);
                     renderBucketResults(data);
                     document.getElementById('btn-run-layout').classList.remove('hidden');
+                    updateOcrBatchSelect();
                     // 自动加载已有的 layout 结果
                     loadLayoutResults(sourceId, batchId);
                 })
@@ -625,6 +728,7 @@
                     renderBucketSummary(data);
                     renderBucketResults(data);
                     document.getElementById('btn-run-layout').classList.remove('hidden');
+                    updateOcrBatchSelect();
                 })
                 .catch(err => alert('抽样失败: ' + err.message))
                 .finally(() => { btn.disabled = false; btn.textContent = '重新抽样'; });
@@ -887,6 +991,214 @@
 
         document.getElementById('layout-modal-close').addEventListener('click', () => document.getElementById('layout-modal').classList.add('hidden'));
         document.getElementById('layout-modal').addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
+
+        // ── 三模型 OCR（独立运行，断点续跑）──────────────────────────────────
+        const OCR_MODELS = ['paddleocr', 'glm_ocr', 'self_ocr'];
+        const ocrIntervals = {};
+
+        function updateOcrBatchSelect() {
+            const container = document.getElementById('ocr-batch-select');
+            const sourceId = selSource.value;
+            const batchId = selBatch.value;
+            // 选了具体批次就只显示那个，否则显示当前源的全部批次
+            let filtered;
+            if (batchId) {
+                filtered = batchData.filter(b => b.batch_id === batchId && (!sourceId || b.source_id === sourceId));
+            } else if (sourceId) {
+                filtered = batchData.filter(b => b.source_id === sourceId);
+            } else {
+                filtered = batchData;
+            }
+            if (!filtered.length) {
+                container.innerHTML = '<div class="text-gray-400">无批次</div>';
+                return;
+            }
+            container.innerHTML = '<div class="text-gray-400">加载中...</div>';
+            Promise.all(filtered.map(b =>
+                fetch(`/api/bucket-samples/${b.source_id}/${b.batch_id}`)
+                    .then(r => r.ok ? r.json() : null)
+                    .then(data => ({...b, cached: data && data.total_sampled > 0, sampled: data ? data.total_sampled : 0}))
+                    .catch(() => ({...b, cached: false, sampled: 0}))
+            )).then(results => {
+                let html = '';
+                results.forEach(b => {
+                    const label = sourceId ? b.batch_id : `${b.source_id}/${b.batch_id}`;
+                    const status = b.cached ? `<span class="text-green-600">已抽样 ${b.sampled} 个</span>` : '<span class="text-gray-400">未抽样</span>';
+                    html += `<label class="flex items-center gap-2 cursor-pointer hover:bg-gray-50 px-2 py-1.5 rounded ${b.cached ? '' : 'opacity-50'}">
+                        <input type="checkbox" class="ocr-batch-cb rounded" value="${b.batch_id}" data-source="${b.source_id}" ${b.cached ? 'checked' : 'disabled'}>
+                        <div class="flex-1">
+                            <div class="font-medium">${label}</div>
+                            <div class="text-gray-400">${b.sample_count.toLocaleString()} 样本 · ${status}</div>
+                        </div>
+                    </label>`;
+                });
+                container.innerHTML = html;
+            });
+        }
+
+        function getSelectedOcrBatches() {
+            const batches = [];
+            document.querySelectorAll('.ocr-batch-cb:checked').forEach(cb => {
+                batches.push({source_id: cb.dataset.source, batch_id: cb.value});
+            });
+            return batches;
+        }
+
+        document.querySelectorAll('.btn-ocr-run').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const model = this.dataset.model;
+                const selectedBatches = getSelectedOcrBatches();
+                if (selectedBatches.length === 0) { alert('请勾选已抽样的批次'); return; }
+
+                this.disabled = true;
+                this.textContent = '启动中...';
+                const batchLabel = selectedBatches.length === 1 ? selectedBatches[0].batch_id : `${selectedBatches.length} 个批次`;
+
+                // 为每个批次启动独立的 OCR 任务
+                selectedBatches.forEach(b => {
+                    fetch(`/api/ocr/${b.source_id}?model=${model}&batch_id=${b.batch_id}&resume=true`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                    })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.task_id) pollOcrModel(model, data.task_id, btn);
+                    })
+                    .catch(err => {
+                        console.error('[OCR] 启动失败:', err);
+                    });
+                });
+                btn.disabled = false; btn.textContent = '运行';
+            });
+        });
+
+        document.querySelectorAll('.btn-ocr-stop').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const model = this.dataset.model;
+                fetch('/api/stop', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({task_id: `ocr_${model}_${getSourceId()}_${getBatchId()}`}),
+                }).catch(() => {});
+            });
+        });
+
+        function pollOcrModel(model, taskId, btn) {
+            const tasksDiv = document.getElementById(`${model}-tasks`);
+            if (ocrIntervals[taskId]) clearInterval(ocrIntervals[taskId]);
+
+            ocrIntervals[taskId] = setInterval(() => {
+                fetch('/api/progress').then(r => r.json()).then(data => {
+                    const task = (data.tasks || {})[taskId];
+                    if (!task) return;
+                    const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                    const barColor = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500';
+
+                    // 更新或创建该任务的进度条
+                    let taskEl = document.getElementById(`task-${taskId}`);
+                    if (!taskEl) {
+                        taskEl = document.createElement('div');
+                        taskEl.id = `task-${taskId}`;
+                        taskEl.className = 'text-xs';
+                        tasksDiv.appendChild(taskEl);
+                    }
+
+                    const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
+                    taskEl.innerHTML = `<div class="flex justify-between mb-0.5">
+                        <span class="text-gray-600">${taskId.split('_').slice(2).join('_')}</span>
+                        <span>${statusIcon} ${task.message || ''}</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-1.5">
+                        <div class="${barColor} h-1.5 rounded-full transition-all" style="width:${pct}%"></div>
+                    </div>`;
+
+                    if (task.status === 'completed') {
+                        clearInterval(ocrIntervals[taskId]);
+                        loadOcrResults();
+                        checkAllOcrDone();
+                    } else if (task.status === 'failed' || task.status === 'stopped') {
+                        clearInterval(ocrIntervals[taskId]);
+                    }
+                }).catch(() => {});
+            }, 1000);
+        }
+
+        function checkAllOcrDone() {
+            fetch('/api/progress').then(r => r.json()).then(data => {
+                const tasks = data.tasks || {};
+                let anyDone = false;
+                for (const model of OCR_MODELS) {
+                    for (const [tid, t] of Object.entries(tasks)) {
+                        if (tid.startsWith(`ocr_${model}_`) && t.status === 'completed') {
+                            anyDone = true;
+                        }
+                    }
+                }
+                if (anyDone) document.getElementById('btn-run-cmcv').classList.remove('hidden');
+            }).catch(() => {});
+        }
+
+        function loadOcrResults() {
+            const sourceId = getSourceId();
+            const batchId = getBatchId();
+            if (!sourceId) return;
+            fetch(`/api/cmcv/${sourceId}/${batchId}/results`)
+                .then(r => r.json())
+                .then(data => {
+                    const pages = data.pages || [];
+                    if (!pages.length) return;
+                    document.getElementById('ocr-empty').classList.add('hidden');
+                    document.getElementById('ocr-results').classList.remove('hidden');
+                    document.getElementById('ocr-total-blocks').textContent = data.total_blocks || 0;
+                    document.getElementById('ocr-total-samples').textContent = pages.length;
+
+                    let currentIdx = 0;
+                    function showSample() {
+                        const page = pages[currentIdx];
+                        const blocks = page.blocks || [];
+                        let html = `<div class="mb-2 text-sm font-medium">${page.sample_id} — ${blocks.length} blocks</div>`;
+                        html += '<div class="space-y-2 max-h-[60vh] overflow-y-auto">';
+                        blocks.forEach(b => {
+                            const pat = b.consistency_pattern || '-';
+                            const patColor = pat === 'all_agree' ? 'text-green-700' : pat === 'partial_agree' ? 'text-yellow-700' : 'text-red-700';
+                            html += `<div class="border rounded p-2 bg-white text-xs">
+                                <div class="flex justify-between mb-1">
+                                    <span class="font-medium">${b.block_type} #${b.block_idx}</span>
+                                    <span class="${patColor} font-medium">${pat}</span>
+                                </div>
+                                <div class="grid grid-cols-3 gap-2">
+                                    <div><span class="text-blue-600">Paddle:</span> ${(b.paddle_text || '').substring(0, 80)}</div>
+                                    <div><span class="text-green-600">GLM:</span> ${(b.glm_text || '').substring(0, 80)}</div>
+                                    <div><span class="text-purple-600">Self:</span> ${(b.self_text || '').substring(0, 80)}</div>
+                                </div>
+                            </div>`;
+                        });
+                        html += '</div>';
+                        document.getElementById('ocr-sample-list').innerHTML = html;
+                        document.getElementById('ocr-page-info').textContent = `${currentIdx + 1} / ${pages.length}`;
+                        document.getElementById('ocr-prev').disabled = currentIdx <= 0;
+                        document.getElementById('ocr-next').disabled = currentIdx >= pages.length - 1;
+                    }
+
+                    document.getElementById('ocr-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showSample(); } };
+                    document.getElementById('ocr-next').onclick = () => { if (currentIdx < pages.length - 1) { currentIdx++; showSample(); } };
+                    showSample();
+                })
+                .catch(() => {});
+        }
+
+        // CMCV
+        document.getElementById('btn-run-cmcv').addEventListener('click', function() {
+            const sourceId = getSourceId();
+            const batchId = getBatchId();
+            if (!sourceId) return;
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = '一致性比较中...';
+            fetch('/api/cmcv/' + sourceId + '?batch_id=' + batchId, { method: 'POST' })
+                .then(r => r.json())
+                .then(() => { btn.textContent = 'CMCV 完成'; loadOcrResults(); })
+                .catch(err => { alert('CMCV 失败: ' + err.message); btn.disabled = false; btn.textContent = '运行 CMCV 一致性比较'; });
+        });
 
         // ── 筛选 / 导出 ──────────────────────────────────────────────────────
         document.getElementById('select-all').addEventListener('click', () => document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true));
