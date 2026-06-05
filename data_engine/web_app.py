@@ -1405,7 +1405,7 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                             import pyarrow as pa
                             table = pa.Table.from_pylist(arrow_rows, schema=ELEMENT_SCHEMA)
                             ds_el = lance.dataset(str(element_path))
-                            ds_el.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(table)
+                            ds_el.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)
                         else:
                             write_element_manifest(element_path, rows_to_save)
 

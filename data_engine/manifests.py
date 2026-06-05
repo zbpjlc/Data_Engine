@@ -409,4 +409,4 @@ def merge_insert_element(path: Path, records: list[dict], on_columns: list[str] 
     table = pa.Table.from_pylist(rows, schema=ELEMENT_SCHEMA)
     with _lance_write_lock:
         ds = lance.dataset(str(path))
-        ds.merge_insert(on_cols).when_matched_update_all().execute(table)
+        ds.merge_insert(on_cols).when_matched_update_all().when_not_matched_insert_all().execute(table)
