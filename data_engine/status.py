@@ -89,6 +89,28 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
         except Exception:
             pass
 
+    element_path = manifests_dir / "element.lance"
+    element_exists = element_path.exists()
+    element_count = 0
+    element_models: list[str] = []
+    if element_exists:
+        try:
+            with _lance_write_lock:
+                ds = lance.dataset(str(element_path))
+                element_count = ds.count_rows()
+                col_names = set(ds.schema.names)
+                for prefix in ("paddle", "glm", "self"):
+                    col = f"{prefix}_text"
+                    if col in col_names:
+                        try:
+                            non_null = ds.count_rows(filter=f"{col} IS NOT NULL")
+                            if non_null > 0:
+                                element_models.append(prefix)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     return BatchStatusSummary(
         source_id=source_id,
         category=category,
@@ -100,6 +122,9 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
         lance_version=lance_version,
         difficulty_histogram=difficulty_histogram,
         updated_at=updated_at,
+        element_exists=element_exists,
+        element_count=element_count,
+        element_models=element_models,
     )
 
 

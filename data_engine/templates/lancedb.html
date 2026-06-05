@@ -103,6 +103,7 @@
         let selectedColumns = [];
         let currentSourceId = '';
         let currentBatchId = '';
+        let currentDataset = 'ingest';
         let currentVersion = '';
 
         async function init() {
@@ -114,8 +115,9 @@
                 sel.innerHTML = '<option value="">选择批次...</option>';
                 allSources.forEach(s => {
                     const opt = document.createElement('option');
-                    opt.value = `${s.source_id}/${s.batch_id}`;
-                    opt.textContent = `${s.source_id} / ${s.batch_id}  (${s.category}, ${s.sample_count}条, ${s.stage_status})`;
+                    opt.value = `${s.source_id}/${s.batch_id}/${s.dataset}`;
+                    const dsLabel = s.dataset === 'element' ? 'Element' : 'Ingest';
+                    opt.textContent = `${s.source_id} / ${s.batch_id} [${dsLabel}]  (${s.sample_count}条, ${s.stage_status})`;
                     sel.appendChild(opt);
                 });
                 sel.addEventListener('change', onBatchChange);
@@ -135,9 +137,13 @@
                 document.getElementById('info-badge').classList.add('hidden');
                 return;
             }
-            const [sourceId, batchId] = val.split('/');
-            const src = allSources.find(s => s.source_id === sourceId && s.batch_id === batchId);
+            const [sourceId, batchId, dataset] = val.split('/');
+            const src = allSources.find(s => s.source_id === sourceId && s.batch_id === batchId && s.dataset === dataset);
             if (!src) return;
+
+            currentSourceId = sourceId;
+            currentBatchId = batchId;
+            currentDataset = dataset || 'ingest';
 
             // Populate version selector
             const verSel = document.getElementById('version-select');
@@ -192,7 +198,10 @@
         async function loadData() {
             const val = document.getElementById('batch-select').value;
             if (!val) return;
-            const [sourceId, batchId] = val.split('/');
+            const parts = val.split('/');
+            const sourceId = parts[0];
+            const batchId = parts[1];
+            const dataset = parts[2] || 'ingest';
             const search = document.getElementById('search-input').value.trim();
             const searchCol = document.getElementById('search-column').value;
             const pageSize = document.getElementById('page-size').value;
@@ -200,9 +209,10 @@
 
             currentSourceId = sourceId;
             currentBatchId = batchId;
+            currentDataset = dataset;
             currentVersion = version;
 
-            let url = `/api/lancedb/${sourceId}/${batchId}/data?page=${currentPage}&page_size=${pageSize}`;
+            let url = `/api/lancedb/${sourceId}/${batchId}/data?page=${currentPage}&page_size=${pageSize}&dataset=${dataset}`;
             if (version) url += `&version=${version}`;
             if (selectedColumns.length > 0) {
                 url += `&columns=${encodeURIComponent(selectedColumns.join(','))}`;
@@ -246,8 +256,13 @@
                 tbody.innerHTML = '<tr><td class="px-4 py-8 text-center text-gray-400" colspan="' + (columns.length + 1) + '">无数据</td></tr>';
             } else {
                 const startIdx = (data.page - 1) * data.page_size;
-                tbody.innerHTML = rows.map((row, i) =>
-                    '<tr class="hover:bg-gray-50">' +
+                const isElement = currentDataset === 'element';
+                tbody.innerHTML = rows.map((row, i) => {
+                    let actionCell = '';
+                    if (isElement && row['sample_id']) {
+                        actionCell = `<td class="px-2 py-1"><button onclick="showElementViz('${row['sample_id']}', ${row['block_idx'] || 0})" class="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">查看</button></td>`;
+                    }
+                    return '<tr class="hover:bg-gray-50">' +
                     '<td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">' + (startIdx + i + 1) + '</td>' +
                     columns.map(col => {
                         const val = row[col];
@@ -264,8 +279,9 @@
                         }
                         return `<td class="${cls}" title="${escapeHtml(typeof val === 'object' ? JSON.stringify(val) : val)}">${display}</td>`;
                     }).join('') +
-                    '</tr>'
-                ).join('');
+                    actionCell +
+                    '</tr>';
+                }).join('');
             }
 
             // Pagination
@@ -330,7 +346,127 @@
             modal.classList.remove('flex');
             document.getElementById('modal-image').src = '';
         }
+
+        // element.lance 可视化：图片 + bbox 叠加
+        const BLOCK_COLORS = {
+            text: {stroke:'#3b82f6', fill:'rgba(59,130,246,0.15)'},
+            table: {stroke:'#ef4444', fill:'rgba(239,68,68,0.15)'},
+            formula: {stroke:'#8b5cf6', fill:'rgba(139,92,246,0.15)'},
+            figure: {stroke:'#10b981', fill:'rgba(16,185,129,0.15)'},
+            paragraph_title: {stroke:'#f59e0b', fill:'rgba(245,158,11,0.15)'},
+            title: {stroke:'#f59e0b', fill:'rgba(245,158,11,0.15)'},
+            number: {stroke:'#6b7280', fill:'rgba(107,114,128,0.15)'},
+            header: {stroke:'#ec4899', fill:'rgba(236,72,153,0.15)'},
+            footer: {stroke:'#14b8a6', fill:'rgba(20,184,166,0.15)'},
+            vision_footnote: {stroke:'#6366f1', fill:'rgba(99,102,241,0.15)'},
+        };
+
+        async function showElementViz(sampleId, blockIdx) {
+            const modal = document.getElementById('viz-modal');
+            const body = document.getElementById('viz-modal-body');
+            body.innerHTML = '<div class="text-gray-400 text-center p-8">加载中...</div>';
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+
+            try {
+                // 1. 获取整页图片（返回原始字节）
+                const imgRes = await fetch(`/api/lancedb/${currentSourceId}/${currentBatchId}/image/${sampleId}?dataset=ingest`);
+                if (!imgRes.ok) { body.innerHTML = '<div class="text-red-500 p-8">图片加载失败</div>'; return; }
+                const imgBuf = await imgRes.arrayBuffer();
+                const bytes = new Uint8Array(imgBuf);
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                const imgBase64 = btoa(binary);
+
+                // 2. 获取该 sample 的所有 block
+                const blkRes = await fetch(`/api/lancedb/${currentSourceId}/${currentBatchId}/data?page=1&page_size=200&dataset=element&search=${sampleId}&search_col=sample_id`);
+                const blkData = await blkRes.json();
+                const blocks = (blkData.data || []).filter(b => b.sample_id === sampleId);
+                if (!blocks.length) { body.innerHTML = '<div class="text-gray-400 p-8">无 block 数据</div>'; return; }
+
+                // 3. 加载图片并裁剪每个 block
+                const img = new Image();
+                img.onload = function() {
+                    let html = `<div class="text-sm font-medium mb-3">${sampleId} — ${blocks.length} blocks</div>`;
+                    html += '<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">';
+
+                    blocks.forEach((b, i) => {
+                        let bbox = b.bbox_json;
+                        if (typeof bbox === 'string') bbox = JSON.parse(bbox);
+                        if (!bbox || bbox.length < 4) return;
+
+                        const [x1, y1, x2, y2] = bbox.map(v => Math.round(v));
+                        const w = x2 - x1, h = y2 - y1;
+                        if (w <= 0 || h <= 0) return;
+
+                        // 裁剪 block 图片
+                        const cropCanvas = document.createElement('canvas');
+                        cropCanvas.width = w;
+                        cropCanvas.height = h;
+                        const cropCtx = cropCanvas.getContext('2d');
+                        cropCtx.drawImage(img, x1, y1, w, h, 0, 0, w, h);
+                        const cropDataUrl = cropCanvas.toDataURL('image/jpeg', 0.9);
+
+                        const isActive = b.block_idx === blockIdx;
+                        const border = isActive ? 'border-2 border-blue-500' : 'border';
+
+                        html += `<div class="${border} rounded-lg p-3 bg-white">
+                            <div class="flex gap-3">
+                                <div class="flex-shrink-0">
+                                    <img src="${cropDataUrl}" class="max-w-[280px] max-h-[200px] object-contain border rounded" />
+                                    <div class="text-xs text-gray-400 mt-1">${w}×${h}px</div>
+                                </div>
+                                <div class="flex-1 min-w-0 space-y-2">
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-medium text-sm">${b.block_type}</span>
+                                        <span class="text-xs text-gray-400">#${b.block_idx}</span>
+                                        ${b.consistency_pattern ? `<span class="text-xs px-1.5 py-0.5 rounded ${b.consistency_pattern === 'all_agree' ? 'bg-green-100 text-green-700' : b.consistency_pattern === 'partial_agree' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}">${b.consistency_pattern}</span>` : ''}
+                                    </div>
+                                    <div class="space-y-1.5 text-xs">
+                                        <div class="bg-blue-50 rounded p-2">
+                                            <div class="text-blue-600 font-medium mb-0.5">PaddleOCR VL</div>
+                                            <div class="text-gray-700 break-words">${b.paddle_text || '<span class="text-gray-300">空</span>'}</div>
+                                        </div>
+                                        <div class="bg-green-50 rounded p-2">
+                                            <div class="text-green-600 font-medium mb-0.5">GLM OCR</div>
+                                            <div class="text-gray-700 break-words">${b.glm_text || '<span class="text-gray-300">空</span>'}</div>
+                                        </div>
+                                        <div class="bg-purple-50 rounded p-2">
+                                            <div class="text-purple-600 font-medium mb-0.5">自研 OCR</div>
+                                            <div class="text-gray-700 break-words">${b.self_text || '<span class="text-gray-300">空</span>'}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>`;
+                    });
+
+                    html += '</div>';
+                    body.innerHTML = html;
+                };
+                img.src = `data:image/jpeg;base64,${imgBase64}`;
+            } catch(e) {
+                body.innerHTML = `<div class="text-red-500 p-8">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        function closeVizModal() {
+            const modal = document.getElementById('viz-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
     </script>
+
+    <!-- Element Visualization Modal -->
+    <div id="viz-modal" class="fixed inset-0 bg-black bg-opacity-75 z-50 hidden items-center justify-center p-4" onclick="closeVizModal()">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-7xl max-h-[95vh] flex flex-col overflow-hidden" onclick="event.stopPropagation()">
+            <div class="flex items-center justify-between px-4 py-3 border-b">
+                <span class="text-sm font-medium text-gray-700">Block 可视化</span>
+                <button onclick="closeVizModal()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+            </div>
+            <div id="viz-modal-body" class="p-4 overflow-auto flex-1"></div>
+        </div>
+    </div>
 
     <!-- Image Modal -->
     <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-70 z-50 hidden items-center justify-center" onclick="closeImageModal()">

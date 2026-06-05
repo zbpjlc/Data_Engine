@@ -159,6 +159,9 @@ class BatchStatusSummary(BaseModel):
     lance_version: int = 0
     difficulty_histogram: dict[str, int] = Field(default_factory=dict)
     updated_at: datetime | None = None
+    element_exists: bool = False
+    element_count: int = 0
+    element_models: list[str] = Field(default_factory=list)
 
 
 class ElementBlockRecord(BaseModel):

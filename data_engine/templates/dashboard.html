@@ -134,6 +134,7 @@
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">阶段</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">样本数</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Lance版本</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Element</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">当前进度</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">操作</th>
                             </tr>
@@ -147,6 +148,14 @@
                                 <td class="px-4 py-3 whitespace-nowrap"><span class="px-2 text-xs rounded-full bg-blue-100 text-blue-800">{{ batch.stage_status }}</span></td>
                                 <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">{{ batch.sample_count }}</td>
                                 <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">v{{ batch.lance_version }}</td>
+                                <td class="px-4 py-3 whitespace-nowrap text-xs">
+                                    {% if batch.element_exists %}
+                                    <div class="text-gray-700">{{ batch.element_count }} blocks</div>
+                                    <div class="text-gray-400">{{ batch.element_models | join(', ') if batch.element_models else '无OCR' }}</div>
+                                    {% else %}
+                                    <span class="text-gray-300">-</span>
+                                    {% endif %}
+                                </td>
                                 <td class="px-4 py-3 text-sm" data-progress-cell data-source="{{ batch.source_id }}" data-batch="{{ batch.batch_id }}">
                                     <div class="text-xs text-gray-400">无任务</div>
                                 </td>

@@ -987,7 +987,7 @@ async def lancedb_view(request: Request):
 
 @app.get("/api/lancedb/sources")
 async def lancedb_list_sources():
-    """列出所有有Lance数据的数据源和批次"""
+    """列出所有有Lance数据的数据源和批次（ingest + element）"""
     try:
         global_status = collect_global_status(registry)
         result = []
@@ -995,12 +995,16 @@ async def lancedb_list_sources():
             source_config = registry.get(batch.source_id)
             batch_dir = source_config.resolve_batch_dir(batch.batch_id)
             manifests_dir = batch_dir / "manifests"
-            manifest_path = find_stage_manifest(manifests_dir, "ingest")
-            if manifest_path and manifest_path.suffix == ".lance" and manifest_path.exists():
+
+            for dataset_name in ["ingest", "element"]:
+                manifest_path = find_stage_manifest(manifests_dir, dataset_name)
+                if not manifest_path or manifest_path.suffix != ".lance" or not manifest_path.exists():
+                    continue
                 try:
                     with _lance_write_lock:
                         ds = lance.dataset(str(manifest_path))
                         schema_fields = [f.name for f in ds.schema]
+                        row_count = ds.count_rows()
                         versions = []
                         for v in ds.versions():
                             ts = v.get("timestamp")
@@ -1012,9 +1016,10 @@ async def lancedb_list_sources():
                         result.append({
                             "source_id": batch.source_id,
                             "batch_id": batch.batch_id,
+                            "dataset": dataset_name,
                             "category": batch.category,
                             "stage_status": batch.stage_status,
-                            "sample_count": batch.sample_count,
+                            "sample_count": row_count,
                             "current_version": getattr(ds, "version", None),
                             "columns": schema_fields,
                             "versions": versions,
@@ -1036,8 +1041,9 @@ async def lancedb_query_data(
     search: str = None,
     search_col: str = None,
     version: int = None,
+    dataset: str = "ingest",
 ):
-    """查询Lance数据"""
+    """查询Lance数据（支持 ingest / element）"""
     try:
         global_status = collect_global_status(registry)
         batch = next(
@@ -1050,9 +1056,9 @@ async def lancedb_query_data(
         source_config = registry.get(source_id)
         batch_dir = source_config.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
-        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+        manifest_path = find_stage_manifest(manifests_dir, dataset)
         if not manifest_path or manifest_path.suffix != ".lance":
-            raise HTTPException(status_code=404, detail="No Lance data found")
+            raise HTTPException(status_code=404, detail=f"{dataset}.lance 不存在")
 
         with _lance_write_lock:
             if version:
@@ -1128,15 +1134,16 @@ async def lancedb_query_data(
 
 
 @app.get("/api/lancedb/{source_id}/{batch_id}/image/{sample_id}")
-async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, version: int = None):
-    """获取样本图片"""
+async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, version: int = None, dataset: str = "ingest"):
+    """获取样本图片（始终从 ingest.lance 读取 image_data）"""
     try:
         source_config = registry.get(source_id)
         batch_dir = source_config.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
+        # 图片始终从 ingest.lance 读取
         manifest_path = find_stage_manifest(manifests_dir, "ingest")
         if not manifest_path or manifest_path.suffix != ".lance":
-            raise HTTPException(status_code=404, detail="No Lance data found")
+            raise HTTPException(status_code=404, detail="ingest.lance 不存在")
 
         with _lance_write_lock:
             if version:
@@ -1306,18 +1313,19 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                     from data_engine.ocr.self_ocr import SelfOCREngine
                     engine = SelfOCREngine()
 
-                # 4. 断点续跑：跳过已有结果
+                # 4. 断点续跑：跳过 element.lance 中已有的 sample
                 done_ids: set[str] = set()
                 if resume and element_path.exists():
                     try:
                         with _lance_write_lock:
                             ds = lance.dataset(str(element_path))
-                            col = f"{prefix}_text"
-                            if col in ds.schema.names:
-                                existing_rows = ds.to_table(columns=["sample_id", col]).to_pylist()
-                                done_ids = {r["sample_id"] for r in existing_rows if r.get(col)}
-                    except Exception:
-                        pass
+                            existing_rows = ds.to_table(columns=["sample_id"]).to_pylist()
+                            done_ids = {r["sample_id"] for r in existing_rows}
+                        print(f"[{model}] resume: element.lance 有 {len(done_ids)} 个唯一 sample_id", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[{model}] resume 读取 element.lance 失败: {e}", file=sys.stderr)
+                else:
+                    print(f"[{model}] resume={resume} element.exists={element_path.exists()}", file=sys.stderr)
 
                 # 5. 读图片数据
                 ids_to_load = [sid for sid in layout_map if sid in sample_map]
@@ -1343,6 +1351,7 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                 pending = [sid for sid in layout_map if sid not in done_ids and sid in image_map]
                 total = len(layout_map)
                 skipped = total - len(pending)
+                print(f"[{model}] layout_map={len(layout_map)} image_map={len(image_map)} done_ids={len(done_ids)} pending={len(pending)} skipped={skipped}", file=sys.stderr)
 
                 progress_tracker.start_task(
                     task_id=task_id, task_type="element_sample",
@@ -1357,20 +1366,14 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                 from data_engine.ocr.normalizer import results_to_element_rows
 
                 all_rows: list[dict] = []
-                save_interval = int(get_config("ocr", "save_interval", default=100))
                 fail_count = 0
-                skip_count = 0
 
                 for idx, sid in enumerate(pending):
                     if progress_tracker.is_stopped(task_id):
-                        progress_tracker.stop_task(task_id, f"停止 {idx}/{len(pending)}")
+                        progress_tracker.stop_task(task_id, f"停止 {skipped + idx}/{total}")
                         break
 
-                    if sid not in layout_map:
-                        skip_count += 1
-                        continue
-                    if sid not in image_map:
-                        skip_count += 1
+                    if sid not in layout_map or sid not in image_map:
                         continue
 
                     blocks = [
@@ -1403,8 +1406,8 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                         message=f"{model}: {skipped + idx + 1}/{total}",
                     )
 
-                    # 定期保存，避免丢失进度
-                    if len(all_rows) >= save_interval:
+                    # 每个 sample 处理完就保存
+                    if all_rows:
                         if element_path.exists():
                             merge_insert_element(element_path, all_rows)
                         else:
@@ -1417,9 +1420,17 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                         merge_insert_element(element_path, all_rows)
                     else:
                         write_element_manifest(element_path, all_rows)
+                        all_rows = []
 
-                print(f"[{model}] 完成: pending={len(pending)} rows={len(all_rows)} skipped={skip_count} failed={fail_count}", file=sys.stderr)
-                progress_tracker.complete_task(task_id=task_id, message=f"{model} 完成: +{len(all_rows)} block (skip={skip_count}, fail={fail_count})")
+                # 保存剩余
+                if all_rows:
+                    if element_path.exists():
+                        merge_insert_element(element_path, all_rows)
+                    else:
+                        write_element_manifest(element_path, all_rows)
+
+                print(f"[{model}] 完成: pending={len(pending)} rows saved skipped={skipped} failed={fail_count}", file=sys.stderr)
+                progress_tracker.complete_task(task_id=task_id, message=f"{model} 完成: skip={skipped} fail={fail_count}")
                 invalidate_status_cache()
             except Exception as e:
                 print(f"[OCR] {model} 失败: {e}", file=sys.stderr)

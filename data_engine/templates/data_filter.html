@@ -179,62 +179,65 @@
 
                 <!-- ====== Panel: 三模型 OCR ====== -->
                 <div id="panel-ocr" class="panel-content hidden">
-                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                        <div class="space-y-4">
-                            <div class="text-sm font-medium text-gray-700 mb-2">OCR 模型（独立运行，断点续跑）</div>
-
-                            <div>
-                                <label class="text-xs text-gray-500 mb-1 block">选择数据批次</label>
-                                <div id="ocr-batch-select" class="border rounded p-2 text-xs space-y-1">
-                                    <div class="text-gray-400">选择数据源后显示</div>
-                                </div>
+                    <!-- 批次选择 + CMCV -->
+                    <div class="flex flex-wrap items-center gap-4 mb-4 pb-4 border-b">
+                        <div class="flex-1 min-w-[300px]">
+                            <label class="text-xs text-gray-500 mb-1.5 block">选择数据批次（勾选要 OCR 的批次）</label>
+                            <div id="ocr-batch-select" class="flex flex-wrap gap-2">
+                                <div class="text-gray-400 text-xs">选择数据源后显示</div>
                             </div>
-
-                            <div class="border rounded-lg p-3 space-y-2">
-                                <div class="flex items-center justify-between">
-                                    <span class="font-medium text-blue-700">PaddleOCR VL</span>
-                                    <div class="flex gap-1">
-                                        <button class="btn-ocr-run px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" data-model="paddleocr">运行</button>
-                                        <button class="btn-ocr-stop px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="paddleocr">停止</button>
-                                    </div>
-                                </div>
-                                <div id="paddleocr-tasks" class="space-y-1"></div>
-                            </div>
-
-                            <div class="border rounded-lg p-3 space-y-2">
-                                <div class="flex items-center justify-between">
-                                    <span class="font-medium text-green-700">GLM OCR</span>
-                                    <div class="flex gap-1">
-                                        <button class="btn-ocr-run px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700" data-model="glm_ocr">运行</button>
-                                        <button class="btn-ocr-stop px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="glm_ocr">停止</button>
-                                    </div>
-                                </div>
-                                <div id="glm_ocr-tasks" class="space-y-1"></div>
-                            </div>
-
-                            <div class="border rounded-lg p-3 space-y-2">
-                                <div class="flex items-center justify-between">
-                                    <span class="font-medium text-purple-700">自研 OCR</span>
-                                    <div class="flex gap-1">
-                                        <button class="btn-ocr-run px-2 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700" data-model="self_ocr">运行</button>
-                                        <button class="btn-ocr-stop px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="self_ocr">停止</button>
-                                    </div>
-                                </div>
-                                <div id="self_ocr-tasks" class="space-y-1"></div>
-                            </div>
-
-                            <button id="btn-run-cmcv" class="w-full px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium hidden">运行 CMCV 一致性比较</button>
                         </div>
-                        <div class="lg:col-span-2">
-                            <div id="ocr-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">点击左侧「运行」启动单个 OCR 模型</div>
-                            <div id="ocr-results" class="hidden">
-                                <div class="mb-3 text-sm text-gray-600">共 <strong id="ocr-total-blocks">0</strong> 个 block，<span id="ocr-total-samples">0</span> 个样本</div>
-                                <div id="ocr-sample-list"></div>
-                                <div id="ocr-pagination" class="flex items-center justify-center gap-4 mt-4 pt-4 border-t">
-                                    <button id="ocr-prev" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" disabled>&lt; 上一个</button>
-                                    <span id="ocr-page-info" class="text-sm text-gray-600">1 / 1</span>
-                                    <button id="ocr-next" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50">下一个 &gt;</button>
-                                </div>
+                        <button id="btn-run-cmcv" class="px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium text-sm hidden">运行 CMCV</button>
+                    </div>
+
+                    <!-- 三个模型按列显示 -->
+                    <div class="grid grid-cols-1 gap-3 mb-4">
+                        <div class="flex items-center gap-4 border rounded-lg p-3">
+                            <div class="w-28 flex-shrink-0">
+                                <span class="font-medium text-blue-700">PaddleOCR VL</span>
+                            </div>
+                            <div id="paddleocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div class="flex gap-1 flex-shrink-0">
+                                <button class="btn-ocr-run px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" data-model="paddleocr">运行</button>
+                                <button class="btn-ocr-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="paddleocr">停止</button>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-4 border rounded-lg p-3">
+                            <div class="w-28 flex-shrink-0">
+                                <span class="font-medium text-green-700">GLM OCR</span>
+                            </div>
+                            <div id="glm_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div class="flex gap-1 flex-shrink-0">
+                                <button class="btn-ocr-run px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700" data-model="glm_ocr">运行</button>
+                                <button class="btn-ocr-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="glm_ocr">停止</button>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-4 border rounded-lg p-3">
+                            <div class="w-28 flex-shrink-0">
+                                <span class="font-medium text-purple-700">自研 OCR</span>
+                            </div>
+                            <div id="self_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div class="flex gap-1 flex-shrink-0">
+                                <button class="btn-ocr-run px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700" data-model="self_ocr">运行</button>
+                                <button class="btn-ocr-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="self_ocr">停止</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- OCR 结果区域 -->
+                    <div class="border-t pt-4">
+                        <div id="ocr-empty" class="text-center text-gray-400 text-sm py-8">点击上方「运行」启动 OCR，完成后在此显示三模型对比结果</div>
+                        <div id="ocr-results" class="hidden">
+                            <div class="flex items-center justify-between mb-3">
+                                <div class="text-sm text-gray-600">共 <strong id="ocr-total-blocks">0</strong> 个 block，<span id="ocr-total-samples">0</span> 个样本</div>
+                            </div>
+                            <div id="ocr-sample-list"></div>
+                            <div id="ocr-pagination" class="flex items-center justify-center gap-4 mt-4 pt-4 border-t">
+                                <button id="ocr-prev" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" disabled>&lt; 上一个</button>
+                                <span id="ocr-page-info" class="text-sm text-gray-600">1 / 1</span>
+                                <button id="ocr-next" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50">下一个 &gt;</button>
                             </div>
                         </div>
                     </div>
@@ -434,21 +437,25 @@
             filterBatches();
         }
 
-        // 页面加载后检查正在运行的 OCR 任务
+        // 页面加载后检查所有 OCR 任务状态
         setTimeout(function() {
+            // 先清空旧的任务显示
+            for (const model of ['paddleocr', 'glm_ocr', 'self_ocr']) {
+                const tasksDiv = document.getElementById(`${model}-tasks`);
+                if (tasksDiv) tasksDiv.innerHTML = '';
+            }
             fetch('/api/progress').then(r => r.json()).then(data => {
                 const tasks = data.tasks || {};
                 const OCR_MODELS_LOCAL = ['paddleocr', 'glm_ocr', 'self_ocr'];
                 for (const [tid, task] of Object.entries(tasks)) {
                     if (!tid.startsWith('ocr_')) continue;
-                    if (task.status !== 'running') continue;
                     let model = null;
                     for (const m of OCR_MODELS_LOCAL) {
                         if (tid.startsWith('ocr_' + m + '_')) { model = m; break; }
                     }
                     if (!model) continue;
+                    if (task.status === 'pending') continue;
                     pollOcrModel(model, tid, null);
-                    console.log('[restore]', model, tid, task.message);
                 }
             }).catch(() => {});
         }, 1000);
@@ -471,6 +478,10 @@
                 this.className = 'panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50';
                 document.querySelectorAll('.panel-content').forEach(p => p.classList.add('hidden'));
                 document.getElementById('panel-' + this.dataset.panel).classList.remove('hidden');
+                // 切换到 OCR Tab 时刷新批次列表
+                if (this.dataset.panel === 'ocr') {
+                    updateOcrBatchSelect();
+                }
             });
         });
 
@@ -729,6 +740,8 @@
                     renderBucketResults(data);
                     document.getElementById('btn-run-layout').classList.remove('hidden');
                     updateOcrBatchSelect();
+                    // 清除该批次的旧 OCR 进度显示
+                    clearOldOcrTasks(sourceId, batchId);
                 })
                 .catch(err => alert('抽样失败: ' + err.message))
                 .finally(() => { btn.disabled = false; btn.textContent = '重新抽样'; });
@@ -996,6 +1009,21 @@
         const OCR_MODELS = ['paddleocr', 'glm_ocr', 'self_ocr'];
         const ocrIntervals = {};
 
+        // 清除旧的 OCR 进度显示
+        function clearOldOcrTasks(sourceId, batchId) {
+            for (const model of OCR_MODELS) {
+                const tasksDiv = document.getElementById(`${model}-tasks`);
+                if (tasksDiv) tasksDiv.innerHTML = '';
+                // 清除所有相关 interval
+                for (const [tid, interval] of Object.entries(ocrIntervals)) {
+                    if (tid.includes(sourceId) || tid.includes(batchId)) {
+                        clearInterval(interval);
+                        delete ocrIntervals[tid];
+                    }
+                }
+            }
+        }
+
         function updateOcrBatchSelect() {
             const container = document.getElementById('ocr-batch-select');
             const sourceId = selSource.value;
@@ -1052,9 +1080,9 @@
 
                 this.disabled = true;
                 this.textContent = '启动中...';
-                const batchLabel = selectedBatches.length === 1 ? selectedBatches[0].batch_id : `${selectedBatches.length} 个批次`;
 
                 // 为每个批次启动独立的 OCR 任务
+                let started = 0;
                 selectedBatches.forEach(b => {
                     fetch(`/api/ocr/${b.source_id}?model=${model}&batch_id=${b.batch_id}&resume=true`, {
                         method: 'POST',
@@ -1062,13 +1090,22 @@
                     })
                     .then(r => r.json())
                     .then(data => {
+                        started++;
                         if (data.task_id) pollOcrModel(model, data.task_id, btn);
+                        if (started >= selectedBatches.length) {
+                            btn.disabled = false;
+                            btn.textContent = '运行';
+                        }
                     })
                     .catch(err => {
+                        started++;
                         console.error('[OCR] 启动失败:', err);
+                        if (started >= selectedBatches.length) {
+                            btn.disabled = false;
+                            btn.textContent = '运行';
+                        }
                     });
                 });
-                btn.disabled = false; btn.textContent = '运行';
             });
         });
 
@@ -1086,40 +1123,67 @@
             const tasksDiv = document.getElementById(`${model}-tasks`);
             if (ocrIntervals[taskId]) clearInterval(ocrIntervals[taskId]);
 
-            ocrIntervals[taskId] = setInterval(() => {
-                fetch('/api/progress').then(r => r.json()).then(data => {
-                    const task = (data.tasks || {})[taskId];
-                    if (!task) return;
-                    const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
-                    const barColor = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500';
+            const barColor = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500';
 
-                    // 更新或创建该任务的进度条
-                    let taskEl = document.getElementById(`task-${taskId}`);
-                    if (!taskEl) {
-                        taskEl = document.createElement('div');
-                        taskEl.id = `task-${taskId}`;
-                        taskEl.className = 'text-xs';
-                        tasksDiv.appendChild(taskEl);
-                    }
+            // 先立即渲染一次当前状态
+            fetch('/api/progress').then(r => r.json()).then(data => {
+                const task = (data.tasks || {})[taskId];
+                if (!task) return;
+                renderTaskBar(model, taskId, task, barColor);
 
-                    const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
-                    taskEl.innerHTML = `<div class="flex justify-between mb-0.5">
-                        <span class="text-gray-600">${taskId.split('_').slice(2).join('_')}</span>
-                        <span>${statusIcon} ${task.message || ''}</span>
-                    </div>
-                    <div class="w-full bg-gray-200 rounded-full h-1.5">
-                        <div class="${barColor} h-1.5 rounded-full transition-all" style="width:${pct}%"></div>
-                    </div>`;
+                // 如果已结束，不启动轮询
+                if (task.status === 'completed' || task.status === 'failed' || task.status === 'stopped') {
+                    return;
+                }
 
-                    if (task.status === 'completed') {
-                        clearInterval(ocrIntervals[taskId]);
-                        loadOcrResults();
-                        checkAllOcrDone();
-                    } else if (task.status === 'failed' || task.status === 'stopped') {
-                        clearInterval(ocrIntervals[taskId]);
-                    }
-                }).catch(() => {});
-            }, 1000);
+                // running 状态，启动轮询
+                ocrIntervals[taskId] = setInterval(() => {
+                    fetch('/api/progress').then(r => r.json()).then(data => {
+                        const task = (data.tasks || {})[taskId];
+                        if (!task) return;
+                        renderTaskBar(model, taskId, task, barColor);
+
+                        if (task.status === 'completed') {
+                            clearInterval(ocrIntervals[taskId]);
+                            loadOcrResults();
+                            checkAllOcrDone();
+                        } else if (task.status === 'failed' || task.status === 'stopped') {
+                            clearInterval(ocrIntervals[taskId]);
+                        }
+                    }).catch(() => {});
+                }, 1000);
+            }).catch(() => {});
+        }
+
+        function renderTaskBar(model, taskId, task, barColor) {
+            const tasksDiv = document.getElementById(`${model}-tasks`);
+            let taskEl = document.getElementById(`task-${taskId}`);
+            if (!taskEl) {
+                taskEl = document.createElement('div');
+                taskEl.id = `task-${taskId}`;
+                taskEl.className = 'text-xs';
+                tasksDiv.appendChild(taskEl);
+            }
+            const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+            const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
+            const batchLabel = taskId.split('_').slice(2).join('_');
+            taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5">
+                <span>${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
+                <span class="text-gray-400">${task.current}/${task.total}</span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-1.5">
+                <div class="${barColor} h-1.5 rounded-full transition-all" style="width:${pct}%"></div>
+            </div>`;
+
+            // 显示/隐藏停止按钮
+            const stopBtn = document.querySelector(`.btn-ocr-stop[data-model="${model}"]`);
+            if (stopBtn) {
+                if (task.status === 'running') {
+                    stopBtn.classList.remove('hidden');
+                } else {
+                    stopBtn.classList.add('hidden');
+                }
+            }
         }
 
         function checkAllOcrDone() {

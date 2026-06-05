@@ -73,5 +73,3 @@ ocr:
     text_threshold: null
     table_threshold: null
     formula_threshold: null
-
-  save_interval: 100
