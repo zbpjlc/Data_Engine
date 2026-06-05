@@ -457,6 +457,7 @@
                     if (task.status === 'pending') continue;
                     pollOcrModel(model, tid, null);
                 }
+                checkAllOcrDone();
             }).catch(() => {});
         }, 1000);
 
@@ -1144,7 +1145,18 @@
                         if (task.status === 'completed') {
                             clearInterval(ocrIntervals[taskId]);
                             loadOcrResults();
-                            checkAllOcrDone();
+                checkAllOcrDone();
+                // 加载已有的 CMCV 结果
+                for (const [tid, task] of Object.entries(tasks)) {
+                    if (tid.startsWith('cmcv_') && task.status === 'completed') {
+                        const parts = tid.split('_');
+                        // cmcv_{source_id}_{batch_id}
+                        const src = parts.slice(1, -1).join('_');
+                        const bid = parts[parts.length - 1];
+                        loadOcrResults(src, bid);
+                        break;
+                    }
+                }
                         } else if (task.status === 'failed' || task.status === 'stopped') {
                             clearInterval(ocrIntervals[taskId]);
                         }
@@ -1199,10 +1211,13 @@
             }).catch(() => {});
         }
 
-        function loadOcrResults() {
-            const sourceId = getSourceId();
-            const batchId = getBatchId();
-            if (!sourceId) return;
+        function loadOcrResults(sourceId, batchId) {
+            if (!sourceId || !batchId) {
+                const batches = getSelectedOcrBatches();
+                if (batches.length === 0) return;
+                sourceId = batches[0].source_id;
+                batchId = batches[0].batch_id;
+            }
             fetch(`/api/cmcv/${sourceId}/${batchId}/results`)
                 .then(r => r.json())
                 .then(data => {
@@ -1250,16 +1265,49 @@
 
         // CMCV
         document.getElementById('btn-run-cmcv').addEventListener('click', function() {
-            const sourceId = getSourceId();
-            const batchId = getBatchId();
-            if (!sourceId) return;
+            const batches = getSelectedOcrBatches();
+            if (batches.length === 0) { alert('请勾选已 OCR 的批次'); return; }
             const btn = this;
             btn.disabled = true;
             btn.textContent = '一致性比较中...';
-            fetch('/api/cmcv/' + sourceId + '?batch_id=' + batchId, { method: 'POST' })
-                .then(r => r.json())
-                .then(() => { btn.textContent = 'CMCV 完成'; loadOcrResults(); })
-                .catch(err => { alert('CMCV 失败: ' + err.message); btn.disabled = false; btn.textContent = '运行 CMCV 一致性比较'; });
+
+            // 在 paddleocr-tasks 区域显示 CMCV 进度
+            const tasksDiv = document.getElementById('paddleocr-tasks');
+
+            let done = 0;
+            batches.forEach(b => {
+                fetch('/api/cmcv/' + b.source_id + '?batch_id=' + b.batch_id, { method: 'POST' })
+                    .then(r => r.json())
+                    .then(data => {
+                        done++;
+                        const taskId = data.task_id || `cmcv_${b.source_id}_${b.batch_id}`;
+                        // 启动进度轮询
+                        const interval = setInterval(() => {
+                            fetch('/api/progress').then(r => r.json()).then(pd => {
+                                const task = (pd.tasks || {})[taskId];
+                                if (!task) return;
+                                const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                                btn.textContent = `CMCV ${task.message || pct + '%'}`;
+
+                                if (task.status === 'completed') {
+                                    clearInterval(interval);
+                                    btn.textContent = 'CMCV 完成';
+                                    btn.disabled = false;
+                                    loadOcrResults();
+                                } else if (task.status === 'failed' || task.status === 'stopped') {
+                                    clearInterval(interval);
+                                    btn.textContent = 'CMCV 失败';
+                                    btn.disabled = false;
+                                }
+                            }).catch(() => {});
+                        }, 1000);
+                    })
+                    .catch(err => {
+                        done++;
+                        console.error('[CMCV] failed:', err);
+                        if (done >= batches.length) { btn.disabled = false; btn.textContent = '运行 CMCV'; }
+                    });
+            });
         });
 
         // ── 筛选 / 导出 ──────────────────────────────────────────────────────
