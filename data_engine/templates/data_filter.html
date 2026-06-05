@@ -1078,7 +1078,7 @@
                 const selectedBatches = getSelectedOcrBatches();
                 if (selectedBatches.length === 0) { alert('请勾选已抽样的批次'); return; }
 
-                this.disabled = true;
+                // 立即显示启动状态，不等 fetch
                 this.textContent = '启动中...';
 
                 // 为每个批次启动独立的 OCR 任务
@@ -1091,9 +1091,8 @@
                     .then(r => r.json())
                     .then(data => {
                         started++;
-                        if (data.task_id) pollOcrModel(model, data.task_id, btn);
+                        if (data.task_id) pollOcrModel(model, data.task_id, null);
                         if (started >= selectedBatches.length) {
-                            btn.disabled = false;
                             btn.textContent = '运行';
                         }
                     })
@@ -1101,7 +1100,6 @@
                         started++;
                         console.error('[OCR] 启动失败:', err);
                         if (started >= selectedBatches.length) {
-                            btn.disabled = false;
                             btn.textContent = '运行';
                         }
                     });

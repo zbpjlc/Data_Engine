@@ -43,6 +43,7 @@ from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest, manifest_count,
     _lance_write_lock,
     read_element_manifest, write_element_manifest, merge_insert_element,
+    append_element_manifest,
 )
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
@@ -1367,6 +1368,46 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
 
                 all_rows: list[dict] = []
                 fail_count = 0
+                save_interval = int(get_config("ocr", "save_interval", default=10))
+
+                def flush_rows(rows_to_save: list[dict]) -> None:
+                    """加锁：读已有 → 合并 → 写入"""
+                    if not rows_to_save:
+                        return
+                    with _lance_write_lock:
+                        if element_path.exists():
+                            try:
+                                ds_el = lance.dataset(str(element_path))
+                                existing_cols = [c for c in [
+                                    "sample_id", "block_idx",
+                                    "paddle_text", "glm_text", "self_text",
+                                    "paddle_confidence", "glm_confidence", "self_confidence",
+                                    "paddle_table_json", "glm_table_json", "self_table_json",
+                                    "paddle_formula", "glm_formula", "self_formula",
+                                    "paddle_raw_json", "glm_raw_json", "self_raw_json",
+                                    "consistency_pattern", "block_diff_json",
+                                ] if c in ds_el.schema.names]
+                                existing_rows = ds_el.to_table(columns=existing_cols).to_pylist()
+                                existing_map = {(r["sample_id"], r["block_idx"]): r for r in existing_rows}
+                                for row in rows_to_save:
+                                    key = (row["sample_id"], row["block_idx"])
+                                    if key in existing_map:
+                                        old = existing_map[key]
+                                        for col in old:
+                                            if col not in ("sample_id", "block_idx") and old.get(col) is not None and row.get(col) is None:
+                                                row[col] = old[col]
+                            except Exception:
+                                pass
+
+                        if element_path.exists():
+                            from data_engine.ocr import ELEMENT_SCHEMA
+                            arrow_rows = [__import__('data_engine.manifests', fromlist=['_element_record_to_arrow'])._element_record_to_arrow(r) for r in rows_to_save]
+                            import pyarrow as pa
+                            table = pa.Table.from_pylist(arrow_rows, schema=ELEMENT_SCHEMA)
+                            ds_el = lance.dataset(str(element_path))
+                            ds_el.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(table)
+                        else:
+                            write_element_manifest(element_path, rows_to_save)
 
                 for idx, sid in enumerate(pending):
                     if progress_tracker.is_stopped(task_id):
@@ -1406,30 +1447,15 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                         message=f"{model}: {skipped + idx + 1}/{total}",
                     )
 
-                    # 每个 sample 处理完就保存
-                    if all_rows:
-                        if element_path.exists():
-                            merge_insert_element(element_path, all_rows)
-                        else:
-                            write_element_manifest(element_path, all_rows)
+                    if len(all_rows) >= save_interval:
+                        flush_rows(all_rows)
                         all_rows = []
 
                 # 保存剩余
-                if all_rows:
-                    if element_path.exists():
-                        merge_insert_element(element_path, all_rows)
-                    else:
-                        write_element_manifest(element_path, all_rows)
-                        all_rows = []
+                flush_rows(all_rows)
+                all_rows = []
 
-                # 保存剩余
-                if all_rows:
-                    if element_path.exists():
-                        merge_insert_element(element_path, all_rows)
-                    else:
-                        write_element_manifest(element_path, all_rows)
-
-                print(f"[{model}] 完成: pending={len(pending)} rows saved skipped={skipped} failed={fail_count}", file=sys.stderr)
+                print(f"[{model}] 完成: pending={len(pending)} skipped={skipped} failed={fail_count}", file=sys.stderr)
                 progress_tracker.complete_task(task_id=task_id, message=f"{model} 完成: skip={skipped} fail={fail_count}")
                 invalidate_status_cache()
             except Exception as e:

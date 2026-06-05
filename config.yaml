@@ -73,3 +73,5 @@ ocr:
     text_threshold: null
     table_threshold: null
     formula_threshold: null
+
+  save_interval: 50 # 每处理 50 个 sample 保存一次 element.lance

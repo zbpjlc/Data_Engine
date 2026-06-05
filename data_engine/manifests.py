@@ -16,7 +16,7 @@ from enum import Enum
 from pydantic import BaseModel
 from data_engine.config import get_config
 
-_lance_write_lock = threading.Lock()
+_lance_write_lock = threading.RLock()
 
 # ─── Lance schema for ingest manifest ──────────────────────────────────────────
 
