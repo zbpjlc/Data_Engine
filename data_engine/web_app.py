@@ -1283,10 +1283,13 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                     return
 
                 cached = json.loads(sample_cache.read_text(encoding="utf-8"))
-                sample_map: dict[str, dict] = {}
+                sample_ids: set[str] = set()
                 for samples in cached.get("buckets", {}).values():
                     for s in samples:
-                        sample_map[s["sample_id"]] = s
+                        # 兼容两种格式：字符串(sample_id) 或 对象
+                        sid = s if isinstance(s, str) else s.get("sample_id", "")
+                        if sid:
+                            sample_ids.add(sid)
 
                 # 2. 读 layout 结果
                 layout_cache = artifacts_dir / "layout_results.json"
@@ -1329,7 +1332,7 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                     print(f"[{model}] resume={resume} element.exists={element_path.exists()}", file=sys.stderr)
 
                 # 5. 读图片数据
-                ids_to_load = [sid for sid in layout_map if sid in sample_map]
+                ids_to_load = [sid for sid in layout_map if sid in sample_ids]
                 image_map: dict[str, bytes] = {}
                 try:
                     ipath = find_stage_manifest(batch_dir / "manifests", "ingest")
@@ -1612,11 +1615,68 @@ async def get_sample_compare(source_id: str, batch_id: str, sample_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _merge_all_bucket_samples(registry, count: int, force: bool) -> dict:
+    """合并所有源所有批次的缓存（只返回汇总统计，不返回具体样本）"""
+    merged_sizes = {}
+    merged_total = 0
+    batch_info = []
+
+    for src_info in registry.scan():
+        try:
+            root = Path(src_info.root_path)
+            batch_dirs = []
+            if (root / "manifests").exists():
+                batch_dirs.append(("", root))
+            for d in sorted(root.iterdir()):
+                if d.is_dir() and (d / "manifests").exists():
+                    batch_dirs.append((d.name, d))
+
+            for bid, bdir in batch_dirs:
+                for cpath in [bdir / "artifacts" / "bucket_samples_diff.json", bdir / "artifacts" / "bucket_samples.json"]:
+                    if cpath.exists():
+                        try:
+                            cached = json.loads(cpath.read_text(encoding="utf-8"))
+                            total = cached.get("total_sampled", 0)
+                            if total > 0:
+                                merged_total += total
+                                batch_info.append({
+                                    "source_id": src_info.source_id,
+                                    "batch_id": bid,
+                                    "total_sampled": total,
+                                    "count_per_bucket": cached.get("count_per_bucket", 0),
+                                    "bucket_count": cached.get("bucket_count", 0),
+                                    "partition_tiers": cached.get("partition_tiers"),
+                                    "strategy": cached.get("strategy"),
+                                })
+                                for k, v in (cached.get("bucket_sizes") or {}).items():
+                                    merged_sizes[f"{src_info.source_id}/{bid}/{k}"] = v
+                            break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    return {
+        "source_id": "all", "batch_id": "",
+        "count_per_bucket": count,
+        "bucket_count": len(merged_sizes),
+        "bucket_sizes": merged_sizes,
+        "total_sampled": merged_total,
+        "batch_info": batch_info,
+        "buckets": {},
+    }
+
+
+@app.get("/api/bucket-samples")
 @app.get("/api/bucket-samples/{source_id}")
 @app.get("/api/bucket-samples/{source_id}/{batch_id}")
-async def get_bucket_samples(source_id: str, batch_id: str = "", count: int = 10, force: bool = False):
+async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int = 10, force: bool = False):
     """从向量索引的每个分区中随机抽取 N 个样本。结果缓存到 artifacts/bucket_samples.json。"""
     try:
+        # 空 sourceId 时直接走合并逻辑
+        if not source_id:
+            return _merge_all_bucket_samples(registry, count, force)
+
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
@@ -1625,12 +1685,65 @@ async def get_bucket_samples(source_id: str, batch_id: str = "", count: int = 10
             raise HTTPException(status_code=404, detail="ingest manifest 不存在")
 
         cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+        diff_cache_path = batch_dir / "artifacts" / "bucket_samples_diff.json"
 
-        if not force and cache_path.exists():
-            try:
-                return json.loads(cache_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+        if not force:
+            # 优先读难度抽样缓存
+            if diff_cache_path.exists():
+                try:
+                    return json.loads(diff_cache_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            if cache_path.exists():
+                try:
+                    return json.loads(cache_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            # 空 batchId 时：合并该源所有批次的缓存
+            if not batch_id:
+                merged_buckets = {}
+                merged_sizes = {}
+                merged_total = 0
+                merged_count = 0
+                has_any = False
+
+                # 确定要遍历的源
+                if source_id:
+                    all_sources = [source]
+                else:
+                    all_sources = [registry.get(s.source_id) for s in registry.scan()]
+
+                for src in all_sources:
+                    src_status = registry.scan()
+                    src_batches = [b for b in src_status if b.source_id == src.source_id]
+                    for b in src_batches:
+                        bdir = src.resolve_batch_dir(b.batch_id)
+                        for cpath in [bdir / "artifacts" / "bucket_samples_diff.json", bdir / "artifacts" / "bucket_samples.json"]:
+                            if cpath.exists():
+                                try:
+                                    cached = json.loads(cpath.read_text(encoding="utf-8"))
+                                    for k, v in (cached.get("buckets") or {}).items():
+                                        merged_buckets[f"{b.source_id}/{b.batch_id}/{k}"] = v
+                                    for k, v in (cached.get("bucket_sizes") or {}).items():
+                                        merged_sizes[f"{b.source_id}/{b.batch_id}/{k}"] = v
+                                    merged_total += cached.get("total_sampled", 0)
+                                    merged_count = cached.get("count_per_bucket", count)
+                                    has_any = True
+                                    break
+                                except Exception:
+                                    pass
+
+                if has_any:
+                    return {
+                        "source_id": source_id or "all",
+                        "batch_id": "",
+                        "count_per_bucket": merged_count,
+                        "bucket_count": len(merged_sizes),
+                        "bucket_sizes": merged_sizes,
+                        "total_sampled": merged_total,
+                        "buckets": merged_buckets,
+                    }
 
         if not force:
             return {
@@ -1678,7 +1791,6 @@ async def get_bucket_samples(source_id: str, batch_id: str = "", count: int = 10
                         nearest={"column": "embedding", "q": query_vec, "k": k},
                     )
                     tbl = scanner.to_table()
-                    # 只取需要的列（nearest 查询会带 _distance 和 embedding）
                     cols = [c for c in ["sample_id", "difficulty", "page_image", "input_type"] if c in tbl.column_names]
                     rows = tbl.select(cols).to_pylist()
                     buckets[f"P{i}"] = rows
@@ -1703,6 +1815,206 @@ async def get_bucket_samples(source_id: str, batch_id: str = "", count: int = 10
         layout_cache = batch_dir / "artifacts" / "layout_results.json"
         if layout_cache.exists():
             layout_cache.unlink()
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/bucket-samples-difficulty/{source_id}/{batch_id}")
+async def get_difficulty_aware_samples(
+    source_id: str,
+    batch_id: str,
+    base_count: int | None = None,
+    easy_ratio: float | None = None,
+    medium_ratio: float | None = None,
+    hard_ratio: float | None = None,
+    force: bool = False,
+):
+    """难度感知抽样。比例是占分区向量数的百分比，如 0.5 = 0.5%。"""
+    if base_count is None:
+        base_count = int(get_config("ocr", "sampling", "base_count", default=10))
+    if easy_ratio is None:
+        easy_ratio = float(get_config("ocr", "sampling", "easy_ratio", default=0.5))
+    if medium_ratio is None:
+        medium_ratio = float(get_config("ocr", "sampling", "medium_ratio", default=1.0))
+    if hard_ratio is None:
+        hard_ratio = float(get_config("ocr", "sampling", "hard_ratio", default=2.0))
+    """难度感知抽样：先按分区抽样判难度，再按难度比例从分区中抽样。
+
+    ratio 含义：占该分区向量数的千分比（‰）。
+    例：easy_ratio=0.3 → 从 easy 分区抽 0.3% 的向量
+        medium_ratio=1.0 → 从 medium 分区抽 1.0%
+        hard_ratio=2.0 → 从 hard 分区抽 2.0%
+    """
+    import random
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+        if not manifest_path:
+            raise HTTPException(status_code=404, detail="ingest manifest 不存在")
+
+        cache_path = batch_dir / "artifacts" / "bucket_samples_diff.json"
+
+        if not force and cache_path.exists():
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                if cached.get("base_count") == base_count:
+                    return cached
+            except Exception:
+                pass
+
+        with _lance_write_lock:
+            ds = lance.dataset(str(manifest_path))
+
+            indices = ds.list_indices()
+            index_name = None
+            for idx in indices:
+                name = idx.get("name", "") if isinstance(idx, dict) else getattr(idx, "name", "")
+                if name:
+                    index_name = name
+                    break
+
+            if not index_name:
+                return {
+                    "source_id": source_id, "batch_id": batch_id,
+                    "error": "未找到向量索引，请先构建索引",
+                    "bucket_count": 0, "total_sampled": 0, "buckets": {},
+                }
+
+            stats = ds.index_statistics(index_name)
+            indices_data = stats.get("indices", [{}])
+            partitions = indices_data[0].get("partitions", []) if indices_data else []
+            centroids = indices_data[0].get("centroids", []) if indices_data else []
+
+            # ── 第一步：从每个分区抽 base_count 个，判定分区难度 ──────────────
+            ratio_map = {"easy": easy_ratio, "medium": medium_ratio, "hard": hard_ratio}
+            bucket_sizes = {}
+            partition_tiers = {}  # P{i} -> easy/medium/hard
+            all_probe_ids = []
+
+            for i, part_info in enumerate(partitions):
+                part_size = part_info.get("size", 0)
+                bucket_sizes[f"P{i}"] = part_size
+                if part_size == 0 or not centroids:
+                    partition_tiers[f"P{i}"] = "medium"
+                    continue
+
+                k = min(base_count, part_size)
+                try:
+                    centroid = centroids[i]
+                    query_vec = pa.array(centroid, type=pa.float32())
+                    with _lance_write_lock:
+                        scanner = ds.scanner(
+                            columns=["sample_id"],
+                            nearest={"column": "embedding", "q": query_vec, "k": k},
+                        )
+                        probe_rows = scanner.to_table().to_pylist()
+                    for r in probe_rows:
+                        all_probe_ids.append(r["sample_id"])
+                except Exception:
+                    partition_tiers[f"P{i}"] = "medium"
+
+            # 只读 probe 样本的 difficulty（而不是全量 2.5M）
+            diff_map = {}
+            if all_probe_ids:
+                try:
+                    ids_str = ",".join(repr(s) for s in set(all_probe_ids))
+                    with _lance_write_lock:
+                        diff_tbl = ds.to_table(
+                            columns=["sample_id", "difficulty"],
+                            filter=f"sample_id IN ({ids_str})",
+                        )
+                        for r in diff_tbl.to_pylist():
+                            diff_map[r["sample_id"]] = r.get("difficulty") or "unlabeled"
+                except Exception:
+                    pass
+
+            # 判定每个分区的难度
+            probe_idx = 0
+            for i, part_info in enumerate(partitions):
+                part_key = f"P{i}"
+                if part_key in partition_tiers:
+                    continue
+                k = min(base_count, part_info.get("size", 0))
+                probe_ids = all_probe_ids[probe_idx:probe_idx + k]
+                probe_idx += k
+
+                diff_counts = {"easy": 0, "medium": 0, "hard": 0, "unlabeled": 0}
+                for sid in probe_ids:
+                    d = diff_map.get(sid, "unlabeled")
+                    diff_counts[d] = diff_counts.get(d, 0) + 1
+
+                if diff_counts["hard"] > diff_counts["easy"] and diff_counts["hard"] > diff_counts.get("medium", 0):
+                    partition_tiers[part_key] = "hard"
+                elif diff_counts["easy"] > diff_counts["hard"] and diff_counts["easy"] > diff_counts.get("medium", 0):
+                    partition_tiers[part_key] = "easy"
+                else:
+                    partition_tiers[part_key] = "medium"
+
+        # ── 第二步：按分区难度重新抽样（ratio 是占分区大小的百分比）──────────
+        buckets = {}
+        bucket_diff_stats = {}
+
+        for i, part_info in enumerate(partitions):
+            part_size = part_info.get("size", 0)
+            part_key = f"P{i}"
+            if part_size == 0 or not centroids:
+                continue
+
+            tier = partition_tiers.get(part_key, "medium")
+            ratio = ratio_map.get(tier, 1.0)
+            # ratio 是百分比：0.3 表示 0.3%，1.0 表示 1%
+            k = max(1, int(part_size * ratio / 100))
+            k = min(k, part_size)
+
+            try:
+                centroid = centroids[i]
+                query_vec = pa.array(centroid, type=pa.float32())
+                with _lance_write_lock:
+                    scanner = ds.scanner(
+                        columns=["sample_id"],
+                        nearest={"column": "embedding", "q": query_vec, "k": k},
+                    )
+                    rows = scanner.to_table().to_pylist()
+                # 只存 sample_id，减小缓存体积
+                buckets[part_key] = [r["sample_id"] for r in rows]
+                bucket_diff_stats[part_key] = {
+                    "tier": tier,
+                    "ratio": ratio,
+                    "sampled": len(rows),
+                    "probe_dist": diff_counts if "diff_counts" in dir() else {},
+                }
+            except Exception as e:
+                print(f"[difficulty-samples] P{i} error: {e}", file=sys.stderr)
+
+        total_sampled = sum(len(v) for v in buckets.values())
+
+        # 统计分区难度分布
+        tier_counts = {"easy": 0, "medium": 0, "hard": 0}
+        for t in partition_tiers.values():
+            tier_counts[t] = tier_counts.get(t, 0) + 1
+
+        result = {
+            "source_id": source_id,
+            "batch_id": batch_id,
+            "strategy": "difficulty_aware",
+            "base_count": base_count,
+            "ratios": {"easy": easy_ratio, "medium": medium_ratio, "hard": hard_ratio},
+            "partition_tiers": tier_counts,
+            "bucket_count": len(partitions),
+            "bucket_sizes": bucket_sizes,
+            "bucket_diff_stats": bucket_diff_stats,
+            "total_sampled": total_sampled,
+            "buckets": buckets,
+        }
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
         return result
     except HTTPException:

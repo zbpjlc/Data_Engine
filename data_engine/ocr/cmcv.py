@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-import math
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -10,81 +10,256 @@ from data_engine.config import get_config
 
 logger = logging.getLogger(__name__)
 
-_TEXT_SIM_THRESHOLD = 0.9
-_TABLE_SIM_THRESHOLD = 0.85
-_FORMULA_SIM_THRESHOLD = 0.85
+
+# ─── Levenshtein（优先用 OmniDocBench 的 C 实现） ────────────────────────────
+
+try:
+    import Levenshtein as _Lev
+
+    def text_similarity(a: str, b: str) -> float:
+        if not a and not b:
+            return 1.0
+        if not a or not b:
+            return 0.0
+        max_len = max(len(a), len(b))
+        if max_len == 0:
+            return 1.0
+        return 1.0 - _Lev.distance(a, b) / max_len
+except ImportError:
+    def text_similarity(a: str, b: str) -> float:
+        if not a and not b:
+            return 1.0
+        if not a or not b:
+            return 0.0
+        max_len = max(len(a), len(b))
+        if max_len == 0:
+            return 1.0
+        # Python fallback
+        if len(a) < len(b):
+            a, b = b, a
+        prev = list(range(len(b) + 1))
+        for i, c1 in enumerate(a):
+            curr = [i + 1]
+            for j, c2 in enumerate(b):
+                curr.append(min(prev[j+1]+1, curr[j]+1, prev[j]+(c1 != c2)))
+            prev = curr
+        return 1.0 - prev[-1] / max_len
 
 
-def _levenshtein_distance(s1: str, s2: str) -> int:
-    if len(s1) < len(s2):
-        return _levenshtein_distance(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    prev_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        curr_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = prev_row[j + 1] + 1
-            deletions = curr_row[j] + 1
-            substitutions = prev_row[j] + (c1 != c2)
-            curr_row.append(min(insertions, deletions, substitutions))
-        prev_row = curr_row
-    return prev_row[-1]
+# ─── TEDS（OmniDocBench 实现） ──────────────────────────────────────────────
 
+try:
+    from src.metrics.table_metric import TEDS as _OmniTEDS
+    _teds_engine = _OmniTEDS()
 
-def text_similarity(a: str, b: str) -> float:
-    if not a and not b:
-        return 1.0
-    if not a or not b:
-        return 0.0
-    max_len = max(len(a), len(b))
-    if max_len == 0:
-        return 1.0
-    dist = _levenshtein_distance(a, b)
-    return 1.0 - dist / max_len
+    def _table_to_full_html(table: dict | str | None) -> str:
+        if not table:
+            return ""
+        if isinstance(table, str):
+            if "<table" in table.lower():
+                if "<html" not in table.lower():
+                    return f"<html><body>{table}</body></html>"
+                return table
+            try:
+                table = json.loads(table)
+            except (json.JSONDecodeError, TypeError):
+                return f"<html><body><table><tr><td>{table}</td></tr></table></body></html>"
+        rows = table.get("rows", table.get("data", []))
+        if not rows:
+            return ""
+        parts = []
+        for row in rows:
+            if isinstance(row, list):
+                cells = "".join(f"<td>{c}</td>" for c in row)
+            elif isinstance(row, dict):
+                cells = "".join(f"<td>{v}</td>" for v in row.values())
+            else:
+                cells = f"<td>{row}</td>"
+            parts.append(f"<tr>{cells}</tr>")
+        return "<html><body><table>" + "".join(parts) + "</table></body></html>"
 
+    def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> float:
+        html_a = _table_to_full_html(table_a)
+        html_b = _table_to_full_html(table_b)
+        if not html_a and not html_b:
+            return 1.0
+        if not html_a or not html_b:
+            return 0.0
+        return _teds_engine.evaluate(html_a, html_b)
 
-def _flatten_table_to_html(table: dict | None) -> str:
-    if not table:
-        return ""
-    if isinstance(table, str):
-        return table
-    rows = table.get("rows", table.get("data", []))
-    if not rows:
-        return str(table)
-    parts: list[str] = []
-    for row in rows:
-        if isinstance(row, list):
-            cells = "".join(f"<td>{c}</td>" for c in row)
-        elif isinstance(row, dict):
-            cells = "".join(f"<td>{v}</td>" for v in row.values())
+except ImportError:
+    logger.warning("OmniDocBench TEDS not available, using fallback table comparison")
+
+    def _table_to_cells(table: dict | str | None) -> list[list[str]]:
+        if not table:
+            return []
+        if isinstance(table, str):
+            try:
+                table = json.loads(table)
+            except (json.JSONDecodeError, TypeError):
+                return [[table]]
+        if isinstance(table, dict):
+            rows = table.get("rows", table.get("data", table.get("cells", [])))
+        elif isinstance(table, list):
+            rows = table
         else:
-            cells = f"<td>{row}</td>"
-        parts.append(f"<tr>{cells}</tr>")
-    return "<table>" + "".join(parts) + "</table>"
+            return [[str(table)]]
+        result = []
+        for row in rows:
+            if isinstance(row, list):
+                result.append([str(c).strip() for c in row])
+            elif isinstance(row, dict):
+                result.append([str(v).strip() for v in row.values()])
+            else:
+                result.append([str(row).strip()])
+        return result
+
+    def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> float:
+        cells_a = _table_to_cells(table_a)
+        cells_b = _table_to_cells(table_b)
+        if not cells_a and not cells_b:
+            return 1.0
+        if not cells_a or not cells_b:
+            return 0.0
+        max_rows = max(len(cells_a), len(cells_b))
+        if max_rows == 0:
+            return 1.0
+        total_cells = 0
+        match_cells = 0.0
+        for i in range(max_rows):
+            row_a = cells_a[i] if i < len(cells_a) else []
+            row_b = cells_b[i] if i < len(cells_b) else []
+            max_cols = max(len(row_a), len(row_b))
+            for j in range(max_cols):
+                total_cells += 1
+                val_a = row_a[j] if j < len(row_a) else ""
+                val_b = row_b[j] if j < len(row_b) else ""
+                if val_a == val_b:
+                    match_cells += 1.0
+                else:
+                    match_cells += text_similarity(val_a, val_b)
+        return match_cells / total_cells if total_cells > 0 else 0.0
 
 
-def _tree_edit_distance(html_a: str, html_b: str) -> int:
-    return _levenshtein_distance(html_a, html_b)
+# ─── CDM（Character Detection Matching） ─────────────────────────────────────
+
+# 尝试加载 OmniDocBench CDM（需要 TeX Live + ImageMagick）
+_CDM_ENGINE = None
+try:
+    from src.metrics.cdm_metric import CDM as _OmniCDM
+    # 测试 pdflatex 是否可用
+    import subprocess as _sp
+    _test = _sp.run(["pdflatex", "--version"], capture_output=True, timeout=5)
+    if _test.returncode == 0:
+        _CDM_ENGINE = _OmniCDM
+        logger.info("CDM: using OmniDocBench (pdflatex available)")
+    else:
+        logger.warning("CDM: pdflatex not working, using token fallback")
+except Exception:
+    logger.warning("CDM: OmniDocBench not available, using token fallback")
+
+_LATEX_CMD_NORMALIZE = [
+    (r"\\left\s*\(", "("),
+    (r"\\right\s*\)", ")"),
+    (r"\\left\s*\[", "["),
+    (r"\\right\s*\]", "]"),
+    (r"\\left\s*\\{", "{"),
+    (r"\\right\s*\\}", "}"),
+    (r"\\,", " "),
+    (r"\\;", " "),
+    (r"\\!", ""),
+    (r"\\quad", " "),
+    (r"\\qquad", " "),
+    (r"\\text\s*\{([^}]*)\}", r"\1"),
+    (r"\\mathrm\s*\{([^}]*)\}", r"\1"),
+    (r"\\operatorname\s*\{([^}]*)\}", r"\1"),
+]
+
+_LATEX_SPACES = re.compile(r"\s+")
 
 
-def table_similarity(table_a: dict | None, table_b: dict | None) -> float:
-    html_a = _flatten_table_to_html(table_a)
-    html_b = _flatten_table_to_html(table_b)
-    if not html_a and not html_b:
+def _normalize_latex(s: str) -> str:
+    if not s:
+        return ""
+    s = s.strip()
+    for pattern, repl in _LATEX_CMD_NORMALIZE:
+        s = re.sub(pattern, repl, s)
+    s = _LATEX_SPACES.sub(" ", s).strip()
+    return s
+
+
+def _tokenize_latex(s: str) -> list[str]:
+    return re.findall(r"\\[a-zA-Z]+|[0-9]+\.?[0-9]*|[a-zA-Z]|[^\s]", s)
+
+
+def cdm_similarity(formula_a: str, formula_b: str) -> float:
+    """CDM: 优先用 OmniDocBench 渲染比较，不可用时用 token 匹配"""
+    if _CDM_ENGINE is not None:
+        try:
+            cdm = _CDM_ENGINE(output_root="/tmp/cdm_eval")
+            result = cdm.evaluate(formula_a or "", formula_b or "", "inline")
+            return float(result.get("F1_score", 0.0))
+        except Exception as exc:
+            logger.debug("CDM OmniDocBench failed, fallback: %s", exc)
+
+    # Token 匹配 fallback
+    na = _normalize_latex(formula_a)
+    nb = _normalize_latex(formula_b)
+    if not na and not nb:
         return 1.0
-    if not html_a or not html_b:
+    if not na or not nb:
         return 0.0
-    max_len = max(len(html_a), len(html_b))
-    if max_len == 0:
+
+    tokens_a = _tokenize_latex(na)
+    tokens_b = _tokenize_latex(nb)
+    if not tokens_a and not tokens_b:
         return 1.0
-    dist = _tree_edit_distance(html_a, html_b)
-    return max(0.0, 1.0 - dist / max_len)
+    if not tokens_a or not tokens_b:
+        return 0.0
+
+    set_a = set(tokens_a)
+    set_b = set(tokens_b)
+    intersection = set_a & set_b
+    if not intersection:
+        return 0.0
+    precision = len(intersection) / len(set_b)
+    recall = len(intersection) / len(set_a)
+    if precision + recall == 0:
+        return 0.0
+    f1 = 2 * precision * recall / (precision + recall)
+
+    pos_match = 0
+    idx_b = 0
+    for tok in tokens_a:
+        for j in range(idx_b, len(tokens_b)):
+            if tokens_b[j] == tok:
+                pos_match += 1
+                idx_b = j + 1
+                break
+    pos_ratio = pos_match / max(len(tokens_a), len(tokens_b))
+
+    return 0.5 * f1 + 0.5 * pos_ratio
 
 
-def formula_similarity(a: str, b: str) -> float:
-    return text_similarity(a, b)
+# ─── 标准化层 ────────────────────────────────────────────────────────────────
 
+def normalize_text(text: str | None) -> str:
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_table(table: dict | None) -> dict | None:
+    if not table:
+        return None
+    return table
+
+
+def normalize_formula(formula: str | None) -> str:
+    return _normalize_latex(formula or "")
+
+
+# ─── Block 级比较 ────────────────────────────────────────────────────────────
 
 def compare_block(
     paddle_text: str | None,
@@ -104,42 +279,58 @@ def compare_block(
     )
 
     if block_type == "table":
-        sim_fn = table_similarity
-        a_val, b_val, c_val = paddle_table, glm_table, self_table
+        sim_fn = teds_similarity
+        a_val = normalize_table(paddle_table)
+        b_val = normalize_table(glm_table)
+        c_val = normalize_table(self_table)
         thr = get_config("ocr", "cmcv", "table_threshold", default=None) or threshold
+        method = "teds"
     elif block_type == "formula":
-        sim_fn = formula_similarity
-        a_val = paddle_formula or ""
-        b_val = glm_formula or ""
-        c_val = self_formula or ""
+        sim_fn = cdm_similarity
+        a_val = normalize_formula(paddle_formula)
+        b_val = normalize_formula(glm_formula)
+        c_val = normalize_formula(self_formula)
         thr = get_config("ocr", "cmcv", "formula_threshold", default=None) or threshold
+        method = "cdm"
     else:
         sim_fn = text_similarity
-        a_val = paddle_text or ""
-        b_val = glm_text or ""
-        c_val = self_text or ""
+        a_val = normalize_text(paddle_text)
+        b_val = normalize_text(glm_text)
+        c_val = normalize_text(self_text)
         thr = get_config("ocr", "cmcv", "text_threshold", default=None) or threshold
+        method = "levenshtein"
 
-    sim_pg = sim_fn(a_val, b_val)  # type: ignore[arg-type]
-    sim_ps = sim_fn(a_val, c_val)  # type: ignore[arg-type]
-    sim_gs = sim_fn(b_val, c_val)  # type: ignore[arg-type]
+    sim_pg = sim_fn(a_val, b_val)
+    sim_ps = sim_fn(a_val, c_val)
+    sim_gs = sim_fn(b_val, c_val)
 
     diff_detail = {
+        "method": method,
         "sim_paddle_glm": round(sim_pg, 4),
         "sim_paddle_self": round(sim_ps, 4),
         "sim_glm_self": round(sim_gs, 4),
         "threshold": thr,
     }
 
-    if sim_pg >= thr and sim_ps >= thr and sim_gs >= thr:
+    # Plan §6.6:
+    # easy   — 三模型两两都一致
+    # medium — 两个第三方模型一致，但我们的模型与它们都不一致
+    # hard   — 其他情况（第三方模型也不一致，或部分一致）
+    all_agree = sim_pg >= thr and sim_ps >= thr and sim_gs >= thr
+    external_agree = sim_pg >= thr  # paddle 与 glm 一致
+    self_disagree = sim_ps < thr and sim_gs < thr  # self 与两者都不一致
+
+    if all_agree:
         pattern = "all_agree"
-    elif sim_pg >= thr and (sim_ps < thr or sim_gs < thr):
+    elif external_agree and self_disagree:
         pattern = "partial_agree"
     else:
         pattern = "all_disagree"
 
     return pattern, diff_detail
 
+
+# ─── CMCV 引擎 ──────────────────────────────────────────────────────────────
 
 class CMCVEngine:
 
@@ -175,15 +366,12 @@ class CMCVEngine:
             patterns.append(pattern)
 
         tier = self._assign_tier(patterns)
-        all_agree_count = patterns.count("all_agree")
-        partial_agree_count = patterns.count("partial_agree")
-        all_disagree_count = patterns.count("all_disagree")
 
         return {
             "block_count": len(blocks),
-            "all_agree_count": all_agree_count,
-            "partial_agree_count": partial_agree_count,
-            "all_disagree_count": all_disagree_count,
+            "all_agree_count": patterns.count("all_agree"),
+            "partial_agree_count": patterns.count("partial_agree"),
+            "all_disagree_count": patterns.count("all_disagree"),
             "tier": tier,
             "details": details,
         }

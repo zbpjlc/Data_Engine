@@ -29,7 +29,7 @@ embedding:
   gc_interval: 1000              # 每N条记录做一次 gc.collect()
 
 index:
-  num_partitions: 256            # IVF_PQ 聚类分区数
+  num_partitions: 64            # IVF_PQ 聚类分区数
   num_sub_vectors: 16            # PQ 子向量数（768维推荐 16 或 32）
 
 clustering:
@@ -58,7 +58,6 @@ ocr:
       api_key: ""
       timeout: 60
       max_retries: 3
-      model: null
 
     self_ocr:
       api_url: "http://10.112.64.56:8801"
@@ -70,8 +69,14 @@ ocr:
 
   cmcv:
     agreement_threshold: 0.9
-    text_threshold: null
+    text_threshold: null   # 1-编辑距离
     table_threshold: null
     formula_threshold: null
+
+  sampling:
+    base_count: 10         # 每分区探针抽样数（用于判定分区难度）
+    easy_ratio: 50        # easy 分区抽 50%
+    medium_ratio: 35      # medium 分区抽 35%
+    hard_ratio: 15        # hard 分区抽 15%
 
   save_interval: 50 # 每处理 50 个 sample 保存一次 element.lance
