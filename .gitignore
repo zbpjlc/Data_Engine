@@ -9,4 +9,6 @@ progress_state.json
 .claude/
 .codex/
 .kilo/
+!.kilo/
+!.kilo/plans/
 data_engine/__pycache__/
