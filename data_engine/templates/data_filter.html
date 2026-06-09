@@ -54,9 +54,9 @@
                 <!-- Tab 按钮 -->
                 <div class="flex space-x-1 mb-6">
                     <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" data-panel="index">向量索引</button>
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="bucket">抽样 & Layout</button>
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="ocr">三模型 OCR</button>
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="diffsample">难度感知抽样</button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="bucket">Page-Level Clusters</button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="ocr">Page_OCR</button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="diffsample">Page_CMCV</button>
                 </div>
 
                 <!-- ====== Panel: 向量索引 ====== -->
@@ -148,12 +148,7 @@
                                 对抽样结果运行 pp-layout
                             </button>
                             <div id="layout-progress" class="hidden">
-                                <div class="flex items-center justify-between text-sm mb-1">
-                                    <span id="layout-progress-msg" class="text-gray-600">准备中...</span>
-                                </div>
-                                <div class="w-full bg-gray-200 rounded-full h-2">
-                                    <div id="layout-progress-bar" class="bg-orange-500 h-2 rounded-full transition-all" style="width:0%"></div>
-                                </div>
+                                <div id="layout-task-list" class="space-y-2"></div>
                             </div>
                         </div>
                         <!-- 右侧：桶统计 -->
@@ -163,13 +158,14 @@
                             </div>
                             <div id="bucket-summary" class="hidden">
                                 <div id="bucket-stats" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4"></div>
+                                <div id="bucket-cache-time" class="text-xs text-gray-400 mt-1"></div>
                             </div>
                         </div>
                     </div>
                     <!-- 抽样结果按桶分组展示 -->
                     <div id="bucket-results" class="hidden mt-6 border-t pt-6">
                         <div id="bucket-tab-content"></div>
-                        <div id="bucket-pagination" class="flex items-center justify-center gap-4 mt-4 pt-4 border-t">
+                        <div id="bucket-pagination" class="hidden">
                             <button id="bucket-prev" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" disabled>&lt; 上一分区</button>
                             <span id="bucket-page-info" class="text-sm text-gray-600 font-medium">P0 / 64</span>
                             <button id="bucket-next" class="px-4 py-1.5 text-sm bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50">下一分区 &gt;</button>
@@ -219,6 +215,10 @@
                                 <span class="font-medium text-purple-700">自研 OCR</span>
                             </div>
                             <div id="self_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <label class="flex items-center gap-1 text-xs text-gray-500 flex-shrink-0">
+                                <input type="checkbox" id="self-ocr-test-mode" checked class="rounded">
+                                测试模式
+                            </label>
                             <div class="flex gap-1 flex-shrink-0">
                                 <button class="btn-ocr-run px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700" data-model="self_ocr">运行</button>
                                 <button class="btn-ocr-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="self_ocr">停止</button>
@@ -259,6 +259,7 @@
                             <div id="diff-empty" class="flex items-center justify-center h-full text-gray-400 text-sm">配置比例后点击「按难度抽样」</div>
                             <div id="diff-summary" class="hidden">
                                 <div id="diff-stats" class="grid grid-cols-3 gap-3 mb-4"></div>
+                                <div id="diff-cache-time" class="text-xs text-gray-400 mt-1 mb-2"></div>
                                 <div id="diff-detail" class="text-sm text-gray-600"></div>
                             </div>
                         </div>
@@ -431,12 +432,81 @@
             document.getElementById('diff-empty').classList.remove('hidden');
             updateOcrBatchSelect();
 
-            // 加载缓存数据
-            if (sourceId && filtered.length > 0) {
-                loadCachedBucketSamples(sourceId, filtered[0].batch_id);
-            } else {
-                loadCachedBucketSamples('', '');
-            }
+            // 加载缓存数据（逐批加载后合并）
+            loadAllCachedBuckets(sourceId, filtered);
+        }
+
+        function loadAllCachedBuckets(sourceId, batchList) {
+            if (!batchList || batchList.length === 0) return;
+
+            const promises = batchList.map(b => {
+                let url = `/api/bucket-samples/${b.source_id}/${b.batch_id}`;
+                return fetch(url)
+                    .then(r => r.ok ? r.json() : null)
+                    .then(data => data && data.total_sampled > 0 ? data : null)
+                    .catch(() => null);
+            });
+
+            Promise.all(promises).then(results => {
+                const valid = results.filter(d => d);
+                if (valid.length === 0) {
+                    document.getElementById('bucket-empty').textContent = '点击「重新抽样」开始抽样';
+                    document.getElementById('bucket-empty').classList.remove('hidden');
+                    return;
+                }
+
+                // 合并所有批次数据
+                const merged = {
+                    source_id: sourceId || 'all',
+                    batch_id: '',
+                    count_per_bucket: valid[0].count_per_bucket || 10,
+                    bucket_count: 0,
+                    bucket_sizes: {},
+                    total_sampled: 0,
+                    buckets: {},
+                    batch_info: [],
+                    strategy: null,
+                    partition_tiers: null,
+                    ratios: null,
+                };
+
+                valid.forEach(d => {
+                    // 合并 buckets
+                    for (const [k, v] of Object.entries(d.buckets || {})) {
+                        const key = d.source_id && d.batch_id ? `${d.source_id}/${d.batch_id}/${k}` : k;
+                        merged.buckets[key] = v;
+                    }
+                    // 合并 bucket_sizes
+                    for (const [k, v] of Object.entries(d.bucket_sizes || {})) {
+                        const key = d.source_id && d.batch_id ? `${d.source_id}/${d.batch_id}/${k}` : k;
+                        merged.bucket_sizes[key] = v;
+                    }
+                    merged.total_sampled += d.total_sampled || 0;
+                    merged.batch_info.push({
+                        source_id: d.source_id,
+                        batch_id: d.batch_id,
+                        total_sampled: d.total_sampled || 0,
+                        partition_tiers: d.partition_tiers,
+                        strategy: d.strategy,
+                    });
+                    if (d.strategy === 'difficulty_aware') {
+                        merged.strategy = 'difficulty_aware';
+                        merged.ratios = d.ratios;
+                        if (!merged.partition_tiers) merged.partition_tiers = {easy:0, medium:0, hard:0};
+                        for (const [t, n] of Object.entries(d.partition_tiers || {})) {
+                            merged.partition_tiers[t] = (merged.partition_tiers[t] || 0) + n;
+                        }
+                    }
+                });
+                merged.bucket_count = Object.keys(merged.bucket_sizes).length;
+
+                bucketSampleData = merged;
+                document.getElementById('bucket-count').value = merged.count_per_bucket;
+                renderBucketSummary(merged);
+                renderBucketResults(merged);
+                document.getElementById('btn-run-layout').classList.remove('hidden');
+                updateOcrBatchSelect();
+            });
         }
 
         selBatch.addEventListener('change', function() {
@@ -727,10 +797,8 @@
 
         // ── 难度桶抽样 ──────────────────────────────────────────────────────
         function loadCachedBucketSamples(sourceId, batchId) {
-            const count = parseInt(document.getElementById('bucket-count').value) || 10;
             let url = `/api/bucket-samples/${sourceId}`;
             if (batchId) url += `/${batchId}`;
-            url += `?count=${count}`;
             console.log('[loadCachedBucketSamples]', url);
             fetch(url)
                 .then(r => { if (!r.ok) { console.warn('[loadCachedBucketSamples] HTTP', r.status); return null; } return r.json(); })
@@ -832,14 +900,26 @@
                     totalSampled += data.total_sampled || 0;
                     totalCount = data.count_per_bucket || count;
                 });
+                // 构建 batch_info（每个批次的 source_id + batch_id，供 layout 按钮使用）
+                const batchInfo = [];
+                results.forEach((data, i) => {
+                    if (data && data.total_sampled > 0) {
+                        batchInfo.push({
+                            source_id: targets[i].source_id,
+                            batch_id: targets[i].batch_id,
+                            total_sampled: data.total_sampled || 0,
+                        });
+                    }
+                });
                 bucketSampleData = {
-                    source_id: sourceId || targets.map(t=>t.source_id).join(','),
+                    source_id: sourceId || 'all',
                     batch_id: batchId || '',
                     count_per_bucket: totalCount,
                     bucket_count: Object.keys(allBucketSizes).length,
                     bucket_sizes: allBucketSizes,
                     total_sampled: totalSampled,
                     buckets: allBuckets,
+                    batch_info: batchInfo,
                 };
                 renderBucketSummary(bucketSampleData);
                 renderBucketResults(bucketSampleData);
@@ -887,6 +967,7 @@
             let allTierCounts = {easy: 0, medium: 0, hard: 0};
             let totalSampled = 0;
             let done = 0;
+            const diffBatchInfo = [];  // 记录成功的批次信息
 
             const promises = targets.map(b => {
                 let url = `/api/bucket-samples-difficulty/${b.source_id}/${b.batch_id}`;
@@ -909,6 +990,12 @@
                             allTierCounts[t] = (allTierCounts[t] || 0) + n;
                         }
                         totalSampled += data.total_sampled || 0;
+                        diffBatchInfo.push({
+                            source_id: b.source_id,
+                            batch_id: b.batch_id,
+                            total_sampled: data.total_sampled || 0,
+                            partition_tiers: data.partition_tiers,
+                        });
                         done++;
                         btn.textContent = `抽样中 (${done}/${targets.length})...`;
                     })
@@ -921,6 +1008,8 @@
             Promise.all(promises).then(() => {
                 bucketSampleData = {
                     strategy: 'difficulty_aware',
+                    source_id: sourceId || 'all',
+                    batch_id: batchId || '',
                     base_count: baseCount,
                     ratios: {easy: easyRatio, medium: mediumRatio, hard: hardRatio},
                     partition_tiers: allTierCounts,
@@ -929,9 +1018,11 @@
                     bucket_diff_stats: allDiffStats,
                     total_sampled: totalSampled,
                     buckets: allBuckets,
+                    batch_info: diffBatchInfo,
                 };
                 renderDiffSummary(bucketSampleData);
                 renderBucketResults(bucketSampleData);
+                document.getElementById('btn-run-layout').classList.remove('hidden');
                 updateOcrBatchSelect();
             }).finally(() => {
                 btn.disabled = false;
@@ -961,7 +1052,7 @@
                     }
                 }
             });
-            const totalPartitions = (pt.easy||0) + (pt.medium||0) + (pt.hard||0);
+            const totalPartitions = (pt.easy||0) + (pt.medium||0) + (pt.hard||0) || data.bucket_count || 0;
 
             let html = '';
             html += `<div class="col-span-3 text-sm text-gray-600 mb-2">
@@ -984,6 +1075,12 @@
             </div>`;
             statsDiv.innerHTML = html;
 
+            // 显示缓存时间戳
+            if (data.cached_at) {
+                const tsEl = document.getElementById('diff-cache-time');
+                if (tsEl) tsEl.textContent = `缓存时间: ${data.cached_at}`;
+            }
+
             // 批次明细
             if (batchInfo.length > 0) {
                 let detail = '';
@@ -1000,18 +1097,27 @@
             }
         }
 
-        // 页面加载后读取抽样配置默认值
-        fetch('/api/bucket-samples-difficulty/data_disk/金融数据')
-            .then(r => r.ok ? r.json() : null)
-            .then(data => {
-                if (data && data.ratios) {
-                    document.getElementById('ratio-easy').value = data.ratios.easy || 0.5;
-                    document.getElementById('ratio-medium').value = data.ratios.medium || 1.0;
-                    document.getElementById('ratio-hard').value = data.ratios.hard || 2.0;
-                    document.getElementById('bucket-count').value = data.base_count || 10;
-                }
-            })
-            .catch(() => {});
+        // 页面加载后读取抽样配置默认值（从统一缓存读取，不触发重新抽样）
+        (function() {
+            const sid = selSource.value || (batchData.length > 0 ? batchData[0].source_id : '');
+            const bid = selBatch.value || (batchData.length > 0 ? batchData[0].batch_id : '');
+            if (!sid || !bid) return;
+            fetch(`/api/bucket-samples/${sid}/${bid}`)
+                .then(r => r.ok ? r.json() : null)
+                .then(data => {
+                    if (data && data.ratios) {
+                        document.getElementById('ratio-easy').value = data.ratios.easy || 0.5;
+                        document.getElementById('ratio-medium').value = data.ratios.medium || 1.0;
+                        document.getElementById('ratio-hard').value = data.ratios.hard || 2.0;
+                    }
+                    if (data && data.base_count) {
+                        document.getElementById('bucket-count').value = data.base_count;
+                    } else if (data && data.count_per_bucket) {
+                        document.getElementById('bucket-count').value = data.count_per_bucket;
+                    }
+                })
+                .catch(() => {});
+        })();
 
         const TIER_COLORS = {
             easy: {bg:'bg-green-50', border:'border-green-200', text:'text-green-700', badge:'bg-green-100 text-green-800'},
@@ -1027,15 +1133,8 @@
             document.getElementById('bucket-summary').classList.remove('hidden');
             document.getElementById('bucket-results').classList.remove('hidden');
 
-            // 根据数据类型切到对应 Tab
+            // 不自动切换 Tab，只在当前 Tab 内渲染
             const isDiff = data.strategy === 'difficulty_aware' || data.partition_tiers || (data.batch_info && data.batch_info.some(b => b.partition_tiers));
-            const targetPanel = isDiff ? 'diffsample' : 'bucket';
-            document.querySelectorAll('.panel-content').forEach(p => p.classList.add('hidden'));
-            document.getElementById('panel-' + targetPanel).classList.remove('hidden');
-            document.querySelectorAll('.panel-tab').forEach(t => {
-                t.className = 'panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700';
-            });
-            document.querySelector('[data-panel="' + targetPanel + '"]').className = 'panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50';
 
             // 难度感知数据渲染到 diff-summary 区域
             if (isDiff) {
@@ -1067,7 +1166,7 @@
                 }
             }
 
-            const totalPartitions = mergedTiers.easy + mergedTiers.medium + mergedTiers.hard;
+            const totalPartitions = mergedTiers.easy + mergedTiers.medium + mergedTiers.hard || data.bucket_count || 0;
             const ratios = data.ratios || {easy: 0.5, medium: 1.0, hard: 2.0};
 
             let html = '';
@@ -1075,7 +1174,7 @@
                 共 <strong>${totalSampled.toLocaleString()}</strong> 个样本 (<strong>${totalPartitions}</strong> 分区)
             </div>`;
 
-            if (totalPartitions > 0) {
+            if (totalPartitions > 0 && (mergedTiers.easy || mergedTiers.medium || mergedTiers.hard)) {
                 html += `<div class="col-span-2 md:col-span-4 grid grid-cols-3 gap-2 mb-2">`;
                 html += `<div class="bg-green-50 border border-green-200 rounded p-2 text-center">
                     <div class="text-xs text-green-600">Easy 分区</div>
@@ -1109,14 +1208,19 @@
             }
 
             statsDiv.innerHTML = html;
+
+            // 显示缓存时间戳
+            if (data.cached_at) {
+                const tsDiv = document.getElementById('bucket-cache-time');
+                if (tsDiv) tsDiv.textContent = `缓存时间: ${data.cached_at}`;
+            }
         }
 
         function renderBucketResults(data) {
             const container = document.getElementById('bucket-results');
             const tiers = Object.keys(data.buckets || {});
-            console.log('[renderBucketResults] tiers:', tiers.length, 'buckets keys:', Object.keys(data.buckets||{}).length);
+            container.classList.remove('hidden');
             if (tiers.length === 0) {
-                container.classList.remove('hidden');
                 document.getElementById('bucket-tab-content').innerHTML = '<div class="text-gray-400 text-sm">点击「重新抽样」获取样本数据</div>';
                 return;
             }
@@ -1125,15 +1229,65 @@
 
             function showPartition() {
                 const tier = tiers[currentIdx];
-                renderBucketTabContent(data, tier);
-                document.getElementById('bucket-page-info').textContent = `${tier} (${currentIdx + 1} / ${tiers.length})`;
-                document.getElementById('bucket-prev').disabled = currentIdx <= 0;
-                document.getElementById('bucket-next').disabled = currentIdx >= tiers.length - 1;
+                const size = (data.bucket_sizes || {})[tier] || 0;
+                const sampled = (data.buckets[tier] || []).length;
+
+                let html = `<div class="flex items-center justify-between mb-3">
+                    <div class="text-sm text-gray-600"><strong>${tier}</strong> — ${size.toLocaleString()} 向量，抽样 ${sampled} 个</div>
+                    <div class="flex items-center gap-2">
+                        <button id="part-prev" class="px-3 py-1 text-xs bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" ${currentIdx<=0?'disabled':''}>&lt; 上一分区</button>
+                        <span class="text-xs text-gray-500">${currentIdx+1} / ${tiers.length}</span>
+                        <button id="part-next" class="px-3 py-1 text-xs bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50" ${currentIdx>=tiers.length-1?'disabled':''}>下一分区 &gt;</button>
+                    </div>
+                </div>`;
+
+                // 样本列表（分页）
+                const PER_PAGE = 12;
+                let page = 0;
+                const samples = data.buckets[tier] || [];
+                const totalPages = Math.ceil(samples.length / PER_PAGE);
+
+                function renderSamples() {
+                    const start = page * PER_PAGE;
+                    const end = Math.min(start + PER_PAGE, samples.length);
+                    let shtml = '<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">';
+                    for (let i = start; i < end; i++) {
+                        const s = samples[i];
+                        const sid = typeof s === 'string' ? s : s.sample_id;
+                        const hasLayout = typeof s === 'object' && s._layout_blocks && s._layout_blocks.length > 0;
+                        const blockInfo = hasLayout ? `<div class="text-xs text-green-700 mb-1">${s._layout_blocks.length} blocks</div>` : '';
+                        shtml += `<div class="border rounded-lg p-3 bg-white">
+                            <div class="text-xs font-mono text-gray-600 truncate mb-1" title="${sid}">${sid}</div>
+                            ${blockInfo}
+                            <button onclick="viewLayoutSingle('${data.source_id}','${data.batch_id}','${sid}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${hasLayout ? '查看' : 'Layout'}</button>
+                        </div>`;
+                    }
+                    shtml += '</div>';
+                    if (totalPages > 1) {
+                        shtml += `<div class="flex items-center justify-center gap-2 mt-3">
+                            <button class="smprev px-2 py-1 text-xs bg-gray-100 rounded disabled:opacity-50" ${page<=0?'disabled':''}>&lt;</button>
+                            <span class="text-xs text-gray-500">${page+1} / ${totalPages}</span>
+                            <button class="smnext px-2 py-1 text-xs bg-gray-100 rounded disabled:opacity-50" ${page>=totalPages-1?'disabled':''}>&gt;</button>
+                        </div>`;
+                    }
+                    document.getElementById('bucket-detail').innerHTML = shtml;
+                    const prevBtn = document.querySelector('.smprev');
+                    const nextBtn = document.querySelector('.smnext');
+                    if (prevBtn) prevBtn.onclick = () => { if (page > 0) { page--; renderSamples(); } };
+                    if (nextBtn) nextBtn.onclick = () => { if (page < totalPages - 1) { page++; renderSamples(); } };
+                }
+
+                document.getElementById('bucket-tab-content').innerHTML = html;
+                document.getElementById('bucket-detail') || document.getElementById('bucket-tab-content').insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>');
+                document.getElementById('part-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showPartition(); } };
+                document.getElementById('part-next').onclick = () => { if (currentIdx < tiers.length - 1) { currentIdx++; showPartition(); } };
+                renderSamples();
             }
 
-            document.getElementById('bucket-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showPartition(); } };
-            document.getElementById('bucket-next').onclick = () => { if (currentIdx < tiers.length - 1) { currentIdx++; showPartition(); } };
-
+            // 需要 detail 容器
+            if (!document.getElementById('bucket-detail')) {
+                document.getElementById('bucket-tab-content').innerHTML = '<div id="bucket-detail"></div>';
+            }
             showPartition();
         }
 
@@ -1188,58 +1342,89 @@
 
         // ── 运行 pp-layout ──────────────────────────────────────────────────
         document.getElementById('btn-run-layout').addEventListener('click', function() {
+            console.log('[layout] btn clicked, bucketSampleData:', bucketSampleData ? `total=${bucketSampleData.total_sampled}, batch_info=${bucketSampleData.batch_info?.length}` : 'null');
             if (!bucketSampleData) { alert('请先抽样'); return; }
-            const allIds = [];
-            for (const samples of Object.values(bucketSampleData.buckets)) samples.forEach(s => allIds.push(s.sample_id));
-            if (allIds.length === 0) { alert('无抽样样本'); return; }
+
+            // 确定要处理的批次
+            const batchInfo = bucketSampleData.batch_info || [];
+            let targets = [];
+            if (batchInfo.length > 0) {
+                targets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            } else if (bucketSampleData.source_id && bucketSampleData.source_id !== 'all') {
+                targets = [{source_id: bucketSampleData.source_id, batch_id: bucketSampleData.batch_id}];
+            } else {
+                // 全部批次：发单个请求，服务端遍历
+                targets = [{source_id: 'all', batch_id: ''}];
+            }
+            console.log('[layout] targets:', JSON.stringify(targets));
 
             const btn = this;
             btn.disabled = true;
-            btn.textContent = '启动中...';
+            btn.textContent = `启动中 (0/${targets.length})...`;
             const progressDiv = document.getElementById('layout-progress');
             progressDiv.classList.remove('hidden');
-            document.getElementById('layout-progress-bar').style.width = '0%';
-            document.getElementById('layout-progress-msg').textContent = `正在启动 layout 检测...`;
+            document.getElementById('layout-task-list').innerHTML = '';
 
-            fetch('/api/layout-batch', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ source_id: bucketSampleData.source_id, batch_id: bucketSampleData.batch_id, sample_ids: allIds }),
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.status === 'already_running') {
-                    document.getElementById('layout-progress-msg').textContent = '任务已在运行中';
-                }
-                pollLayoutBatch(data.task_id, allIds.length, btn);
-            })
-            .catch(err => {
-                document.getElementById('layout-progress-msg').textContent = '启动失败: ' + err.message;
-                btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout';
+            let done = 0;
+            targets.forEach(t => {
+                const url = '/api/layout-batch';
+                const body = JSON.stringify({ source_id: t.source_id, batch_id: t.batch_id });
+                console.log('[layout] POST', url, body);
+                fetch(url, {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ source_id: t.source_id, batch_id: t.batch_id }),
+                })
+                .then(r => r.json())
+                .then(data => {
+                    done++;
+                    btn.textContent = `启动中 (${done}/${targets.length})...`;
+                    // 单个任务返回 task_id，全部批次返回 task_ids
+                    if (data.task_id) pollLayoutBatch(data.task_id, 0, btn);
+                    if (data.task_ids) data.task_ids.forEach(tid => pollLayoutBatch(tid, 0, btn));
+                    if (done >= targets.length) { btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout'; }
+                })
+                .catch(err => {
+                    done++;
+                    console.error('[layout] failed:', err);
+                    if (done >= targets.length) { btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout'; }
+                });
             });
         });
 
         function pollLayoutBatch(taskId, total, btn) {
+            const listDiv = document.getElementById('layout-task-list');
+            document.getElementById('layout-progress').classList.remove('hidden');
+
+            // 创建该任务的独立进度条
+            let taskEl = document.getElementById('layout-' + taskId);
+            if (!taskEl) {
+                taskEl = document.createElement('div');
+                taskEl.id = 'layout-' + taskId;
+                taskEl.className = 'text-xs';
+                listDiv.appendChild(taskEl);
+            }
+
             const interval = setInterval(() => {
                 fetch('/api/progress').then(r => r.json()).then(data => {
                     const task = (data.tasks || {})[taskId];
                     if (!task) return;
                     const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
-                    document.getElementById('layout-progress-bar').style.width = pct + '%';
-                    document.getElementById('layout-progress-msg').textContent = task.message || '检测中...';
+                    const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
+                    const batchLabel = taskId.replace('layout_batch_', '');
+                    const barColor = task.status === 'completed' ? 'bg-green-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-orange-500';
+
+                    taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5">
+                        <span>${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
+                        <span class="text-gray-400">${task.current}/${task.total}</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-1.5">
+                        <div class="${barColor} h-1.5 rounded-full transition-all" style="width:${pct}%"></div>
+                    </div>`;
 
                     if (task.status === 'completed') {
                         clearInterval(interval);
-                        document.getElementById('layout-progress-bar').classList.add('bg-green-500');
-                        document.getElementById('layout-progress-bar').classList.remove('bg-orange-500');
-                        btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout';
-                        // 重新加载结果
-                        loadLayoutResults(bucketSampleData.source_id, bucketSampleData.batch_id);
                     } else if (task.status === 'failed' || task.status === 'stopped') {
                         clearInterval(interval);
-                        document.getElementById('layout-progress-bar').classList.add('bg-red-500');
-                        document.getElementById('layout-progress-bar').classList.remove('bg-orange-500');
-                        document.getElementById('layout-progress-msg').textContent = '失败: ' + (task.error_message || task.message);
-                        btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout';
                     }
                 }).catch(() => {});
             }, 1000);
@@ -1429,8 +1614,9 @@
 
                 // 为每个批次启动独立的 OCR 任务
                 let started = 0;
+                const testMode = (model === 'self_ocr' && document.getElementById('self-ocr-test-mode')?.checked) ? '&test_mode=true' : '';
                 selectedBatches.forEach(b => {
-                    fetch(`/api/ocr/${b.source_id}?model=${model}&batch_id=${b.batch_id}&resume=true`, {
+                    fetch(`/api/ocr/${b.source_id}?model=${model}&batch_id=${b.batch_id}&resume=true${testMode}`, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                     })

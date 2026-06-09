@@ -12,6 +12,7 @@ os.environ["TORCH_NUM_THREADS"] = "1"
 import sys
 import json
 import gc
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 import shutil
@@ -59,6 +60,34 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 # Global registry
 registry = SourceRegistry(Path("sources.yaml"))
+
+
+def _migrate_sampling_caches() -> None:
+    """One-time: merge dual cache files into single bucket_samples.json."""
+    import sys as _sys
+    for src_info in registry.scan():
+        try:
+            root = Path(src_info.root_path)
+            batch_dirs = []
+            if (root / "manifests").exists():
+                batch_dirs.append(("", root))
+            for d in sorted(root.iterdir()):
+                if d.is_dir() and (d / "manifests").exists():
+                    batch_dirs.append((d.name, d))
+            for _bid, bdir in batch_dirs:
+                regular = bdir / "artifacts" / "bucket_samples.json"
+                diff = bdir / "artifacts" / "bucket_samples_diff.json"
+                if diff.exists() and not regular.exists():
+                    diff.rename(regular)
+                    print(f"[migrate] renamed {diff} -> {regular}", file=_sys.stderr)
+                elif diff.exists() and regular.exists():
+                    diff.unlink()
+                    print(f"[migrate] deleted stale {diff}", file=_sys.stderr)
+        except Exception as e:
+            print(f"[migrate] skip {src_info.source_id}: {e}", file=_sys.stderr)
+
+
+_migrate_sampling_caches()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1252,7 +1281,7 @@ async def get_batch_progress(source_id: str, batch_id: str):
 
 
 @app.post("/api/ocr/{source_id}")
-async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", batch_id: str = "", resume: bool = True):
+async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", batch_id: str = "", resume: bool = True, test_mode: bool = False):
     """对指定批次的抽样样本运行 OCR，使用已有 layout 结果，支持断点续跑"""
     try:
         prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
@@ -1277,12 +1306,12 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                 element_path = batch_dir / "manifests" / "element.lance"
 
                 # 1. 读该批次的抽样结果
-                sample_cache = artifacts_dir / "bucket_samples.json"
-                if not sample_cache.exists():
+                cache_file = artifacts_dir / "bucket_samples.json"
+                if not cache_file.exists():
                     progress_tracker.fail_task(task_id, "无抽样数据，请先抽样")
                     return
 
-                cached = json.loads(sample_cache.read_text(encoding="utf-8"))
+                cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 sample_ids: set[str] = set()
                 for samples in cached.get("buckets", {}).values():
                     for s in samples:
@@ -1307,6 +1336,7 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                     return
 
                 # 3. 初始化 OCR 引擎
+                use_test_mode = test_mode and model == "self_ocr"
                 if model == "paddleocr":
                     from data_engine.ocr.paddle_ocr import PaddleOCREngine
                     engine = PaddleOCREngine()
@@ -1315,17 +1345,28 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                     engine = GLMOCREngine()
                 else:
                     from data_engine.ocr.self_ocr import SelfOCREngine
-                    engine = SelfOCREngine()
+                    engine = SelfOCREngine(test_mode=use_test_mode)
 
-                # 4. 断点续跑：跳过 element.lance 中已有的 sample
+                # 4. 断点续跑：跳过 element.lance 中当前模型已完成的 sample
                 done_ids: set[str] = set()
+                model_text_col = f"{prefix}_text"  # e.g. paddle_text, glm_text, self_text
                 if resume and element_path.exists():
                     try:
                         with _lance_write_lock:
                             ds = lance.dataset(str(element_path))
-                            existing_rows = ds.to_table(columns=["sample_id"]).to_pylist()
-                            done_ids = {r["sample_id"] for r in existing_rows}
-                        print(f"[{model}] resume: element.lance 有 {len(done_ids)} 个唯一 sample_id", file=sys.stderr)
+                            cols_to_read = ["sample_id", "block_idx"]
+                            if model_text_col in ds.schema.names:
+                                cols_to_read.append(model_text_col)
+                                existing_rows = ds.to_table(columns=cols_to_read).to_pylist()
+                                # 只跳过当前模型已有数据的 sample（其他模型不影响）
+                                done_ids = {
+                                    r["sample_id"] for r in existing_rows
+                                    if r.get(model_text_col) is not None and r.get(model_text_col) != ""
+                                }
+                            else:
+                                existing_rows = ds.to_table(columns=cols_to_read).to_pylist()
+                                # 列不存在 = 当前模型没跑过，done_ids 保持空
+                        print(f"[{model}] resume: col={model_text_col} done_ids={len(done_ids)}", file=sys.stderr)
                     except Exception as e:
                         print(f"[{model}] resume 读取 element.lance 失败: {e}", file=sys.stderr)
                 else:
@@ -1356,6 +1397,23 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                 total = len(layout_map)
                 skipped = total - len(pending)
                 print(f"[{model}] layout_map={len(layout_map)} image_map={len(image_map)} done_ids={len(done_ids)} pending={len(pending)} skipped={skipped}", file=sys.stderr)
+
+                # Test mode: 加载 element.lance 中已有的 Paddle/GLM 结果作为参考
+                test_ref_map: dict[tuple[str, int], dict] = {}
+                if use_test_mode and element_path.exists():
+                    try:
+                        with _lance_write_lock:
+                            ds_el = lance.dataset(str(element_path))
+                            ref_cols = ["sample_id", "block_idx", "paddle_text", "glm_text",
+                                        "paddle_table_json", "glm_table_json",
+                                        "paddle_formula", "glm_formula"]
+                            ref_cols = [c for c in ref_cols if c in ds_el.schema.names]
+                            ref_rows = ds_el.to_table(columns=ref_cols).to_pylist()
+                            for r in ref_rows:
+                                test_ref_map[(r["sample_id"], r["block_idx"])] = r
+                        print(f"[self_ocr] test_mode: loaded {len(test_ref_map)} ref rows from element.lance", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[self_ocr] test_mode: failed to load ref data: {e}", file=sys.stderr)
 
                 progress_tracker.start_task(
                     task_id=task_id, task_type="element_sample",
@@ -1427,12 +1485,17 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                     image_bytes = image_map[sid]
 
                     try:
-                        import tempfile, os
-                        fd, tmp = tempfile.mkstemp(suffix=".png")
-                        os.write(fd, image_bytes)
-                        os.close(fd)
-                        results = engine.recognize_regions(Path(tmp), blocks)
-                        os.unlink(tmp)
+                        if use_test_mode:
+                            # Test mode: 不需要图片，直接用 Paddle/GLM 参考数据生成模拟结果
+                            engine.set_test_context(sid, test_ref_map)
+                            results = engine.recognize_regions(Path("/dev/null"), blocks)
+                        else:
+                            import tempfile, os
+                            fd, tmp = tempfile.mkstemp(suffix=".png")
+                            os.write(fd, image_bytes)
+                            os.close(fd)
+                            results = engine.recognize_regions(Path(tmp), blocks)
+                            os.unlink(tmp)
                     except Exception as exc:
                         fail_count += 1
                         if fail_count <= 3:
@@ -1632,27 +1695,28 @@ def _merge_all_bucket_samples(registry, count: int, force: bool) -> dict:
                     batch_dirs.append((d.name, d))
 
             for bid, bdir in batch_dirs:
-                for cpath in [bdir / "artifacts" / "bucket_samples_diff.json", bdir / "artifacts" / "bucket_samples.json"]:
-                    if cpath.exists():
-                        try:
-                            cached = json.loads(cpath.read_text(encoding="utf-8"))
-                            total = cached.get("total_sampled", 0)
-                            if total > 0:
-                                merged_total += total
-                                batch_info.append({
-                                    "source_id": src_info.source_id,
-                                    "batch_id": bid,
-                                    "total_sampled": total,
-                                    "count_per_bucket": cached.get("count_per_bucket", 0),
-                                    "bucket_count": cached.get("bucket_count", 0),
-                                    "partition_tiers": cached.get("partition_tiers"),
-                                    "strategy": cached.get("strategy"),
-                                })
-                                for k, v in (cached.get("bucket_sizes") or {}).items():
-                                    merged_sizes[f"{src_info.source_id}/{bid}/{k}"] = v
-                            break
-                        except Exception:
-                            pass
+                # 确定 batch_id：用目录名或 resolve_batch_dir 的结果
+                actual_bid = bid if bid else bdir.name
+                cpath = bdir / "artifacts" / "bucket_samples.json"
+                if cpath.exists():
+                    try:
+                        cached = json.loads(cpath.read_text(encoding="utf-8"))
+                        total = cached.get("total_sampled", 0)
+                        if total > 0:
+                            merged_total += total
+                            batch_info.append({
+                                "source_id": src_info.source_id,
+                                "batch_id": actual_bid,
+                                "total_sampled": total,
+                                "count_per_bucket": cached.get("count_per_bucket", 0),
+                                "bucket_count": cached.get("bucket_count", 0),
+                                "partition_tiers": cached.get("partition_tiers"),
+                                "strategy": cached.get("strategy"),
+                            })
+                            for k, v in (cached.get("bucket_sizes") or {}).items():
+                                merged_sizes[f"{src_info.source_id}/{actual_bid}/{k}"] = v
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -1685,15 +1749,8 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
             raise HTTPException(status_code=404, detail="ingest manifest 不存在")
 
         cache_path = batch_dir / "artifacts" / "bucket_samples.json"
-        diff_cache_path = batch_dir / "artifacts" / "bucket_samples_diff.json"
 
         if not force:
-            # 优先读难度抽样缓存
-            if diff_cache_path.exists():
-                try:
-                    return json.loads(diff_cache_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
             if cache_path.exists():
                 try:
                     return json.loads(cache_path.read_text(encoding="utf-8"))
@@ -1719,20 +1776,19 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
                     src_batches = [b for b in src_status if b.source_id == src.source_id]
                     for b in src_batches:
                         bdir = src.resolve_batch_dir(b.batch_id)
-                        for cpath in [bdir / "artifacts" / "bucket_samples_diff.json", bdir / "artifacts" / "bucket_samples.json"]:
-                            if cpath.exists():
-                                try:
-                                    cached = json.loads(cpath.read_text(encoding="utf-8"))
-                                    for k, v in (cached.get("buckets") or {}).items():
-                                        merged_buckets[f"{b.source_id}/{b.batch_id}/{k}"] = v
-                                    for k, v in (cached.get("bucket_sizes") or {}).items():
-                                        merged_sizes[f"{b.source_id}/{b.batch_id}/{k}"] = v
-                                    merged_total += cached.get("total_sampled", 0)
-                                    merged_count = cached.get("count_per_bucket", count)
-                                    has_any = True
-                                    break
-                                except Exception:
-                                    pass
+                        cpath = bdir / "artifacts" / "bucket_samples.json"
+                        if cpath.exists():
+                            try:
+                                cached = json.loads(cpath.read_text(encoding="utf-8"))
+                                for k, v in (cached.get("buckets") or {}).items():
+                                    merged_buckets[f"{b.source_id}/{b.batch_id}/{k}"] = v
+                                for k, v in (cached.get("bucket_sizes") or {}).items():
+                                    merged_sizes[f"{b.source_id}/{b.batch_id}/{k}"] = v
+                                merged_total += cached.get("total_sampled", 0)
+                                merged_count = cached.get("count_per_bucket", count)
+                                has_any = True
+                            except Exception:
+                                pass
 
                 if has_any:
                     return {
@@ -1806,12 +1862,14 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
             "bucket_sizes": bucket_sizes,
             "total_sampled": total_sampled,
             "buckets": buckets,
+            "strategy": "regular",
+            "cached_at": datetime.now().isoformat(timespec='seconds'),
         }
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # 重新抽样时清除旧 layout 结果
+        # 重新抽样时清除 layout 结果缓存
         layout_cache = batch_dir / "artifacts" / "layout_results.json"
         if layout_cache.exists():
             layout_cache.unlink()
@@ -1858,13 +1916,17 @@ async def get_difficulty_aware_samples(
         if not manifest_path:
             raise HTTPException(status_code=404, detail="ingest manifest 不存在")
 
-        cache_path = batch_dir / "artifacts" / "bucket_samples_diff.json"
+        cache_path = batch_dir / "artifacts" / "bucket_samples.json"
 
         if not force and cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
                 if cached.get("base_count") == base_count:
-                    return cached
+                    cached_ratios = cached.get("ratios", {})
+                    if (float(cached_ratios.get("easy", 0)) == easy_ratio and
+                        float(cached_ratios.get("medium", 0)) == medium_ratio and
+                        float(cached_ratios.get("hard", 0)) == hard_ratio):
+                        return cached
             except Exception:
                 pass
 
@@ -2011,10 +2073,16 @@ async def get_difficulty_aware_samples(
             "bucket_diff_stats": bucket_diff_stats,
             "total_sampled": total_sampled,
             "buckets": buckets,
+            "cached_at": datetime.now().isoformat(timespec='seconds'),
         }
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 难度抽样后清除 layout 结果缓存
+        layout_cache = batch_dir / "artifacts" / "layout_results.json"
+        if layout_cache.exists():
+            layout_cache.unlink()
 
         return result
     except HTTPException:
@@ -2089,87 +2157,220 @@ async def run_layout_preview(request: Request):
 
 @app.post("/api/layout-batch")
 async def start_layout_batch(request: Request):
-    """批量运行 pp-layout（后台任务，有进度）"""
+    """批量运行 pp-layout（后台任务，有进度）。支持全部批次。"""
     try:
-        body = await request.json()
-        source_id: str = body["source_id"]
-        batch_id: str = body["batch_id"]
-        sample_ids: list[str] = body["sample_ids"]
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        source_id: str = body.get("source_id", "")
+        batch_id: str = body.get("batch_id", "")
+        sample_ids: list[str] = body.get("sample_ids", [])
 
-        task_id = f"layout_batch_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
+        # 全部批次：遍历所有源的所有批次，逐个启动 layout
+        if source_id == "all" or (not source_id and not batch_id):
+            started = []
+            for src_info in registry.scan():
+                try:
+                    src = registry.get(src_info.source_id)
+                    root = Path(src_info.root_path)
+                    batch_dirs = []
+                    if (root / "manifests").exists():
+                        batch_dirs.append(("", root))
+                    for d in sorted(root.iterdir()):
+                        if d.is_dir() and (d / "manifests").exists():
+                            batch_dirs.append((d.name, d))
+                    for bid, bdir in batch_dirs:
+                        actual_bid = bid if bid else bdir.name
+                        # 检查是否有抽样缓存
+                        has_cache = (bdir / "artifacts" / "bucket_samples.json").exists()
+                        if has_cache:
+                            t_id = f"layout_batch_{src_info.source_id}_{actual_bid}"
+                            if _start_single_layout(t_id, src_info.source_id, actual_bid):
+                                started.append(t_id)
+                except Exception:
+                    pass
+            return {"message": f"已启动 {len(started)} 个 layout 任务", "task_ids": started, "status": "started"}
 
-        def execute():
+        # 处理逗号分隔的多个 source_id（前端可能拼接多个源）
+        if "," in source_id:
+            started = []
+            for sid in [s.strip() for s in source_id.split(",") if s.strip()]:
+                try:
+                    src = registry.get(sid)
+                    root = Path(src.root_path)
+                    batch_dirs = []
+                    if (root / "manifests").exists():
+                        batch_dirs.append(("", root))
+                    for d in sorted(root.iterdir()):
+                        if d.is_dir() and (d / "manifests").exists():
+                            batch_dirs.append((d.name, d))
+                    for bid, bdir in batch_dirs:
+                        actual_bid = bid if bid else bdir.name
+                        has_cache = (bdir / "artifacts" / "bucket_samples.json").exists()
+                        if has_cache:
+                            t_id = f"layout_batch_{sid}_{actual_bid}"
+                            if _start_single_layout(t_id, sid, actual_bid):
+                                started.append(t_id)
+                except Exception as e:
+                    print(f"[layout-batch] skip source {sid}: {e}", file=sys.stderr)
+            return {"message": f"已启动 {len(started)} 个 layout 任务", "task_ids": started, "status": "started"}
+
+        # 单批次（或单源全部批次）
+        if not batch_id:
+            # 单源全部批次：查找该源下所有有缓存的批次
+            started = []
             try:
-                source = registry.get(source_id)
-                batch_dir = source.resolve_batch_dir(batch_id)
-                manifests_dir = batch_dir / "manifests"
-                manifest_path = find_stage_manifest(manifests_dir, "ingest")
-
-                with _lance_write_lock:
-                    ds = lance.dataset(str(manifest_path))
-                    recs = ds.to_table(
-                        columns=["sample_id", "image_data", "difficulty"],
-                        filter=f"sample_id IN ({','.join(repr(s) for s in sample_ids)})",
-                    ).to_pylist()
-                record_map = {r["sample_id"]: r for r in recs}
-
-                from data_engine.ocr.layout_provider import PPLayoutProvider
-                layout = PPLayoutProvider()
-
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="layout_batch",
-                    source_id=source_id, batch_id=batch_id,
-                    total=len(sample_ids), message="开始 layout 检测",
-                )
-
-                all_results = []
-                for i, sid in enumerate(sample_ids):
-                    if progress_tracker.is_stopped(task_id):
-                        progress_tracker.stop_task(task_id, f"用户停止 {i}/{len(sample_ids)}")
-                        break
-
-                    rec = record_map.get(sid)
-                    if not rec or not rec.get("image_data"):
-                        all_results.append({"sample_id": sid, "error": "no image"})
-                        progress_tracker.update_progress(task_id, current=i + 1)
-                        continue
-                    try:
-                        blocks = layout.detect_layout_from_bytes(rec["image_data"])
-                        all_results.append({
-                            "sample_id": sid,
-                            "difficulty": rec.get("difficulty") or "unlabeled",
-                            "blocks": [
-                                {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
-                                for b in blocks
-                            ],
-                            "block_count": len(blocks),
-                        })
-                    except Exception as exc:
-                        all_results.append({"sample_id": sid, "error": str(exc)})
-
-                    progress_tracker.update_progress(task_id, current=i + 1, message=f"layout {i+1}/{len(sample_ids)}")
-
-                # 保存结果到缓存
-                result_path = batch_dir / "artifacts" / "layout_results.json"
-                result_path.parent.mkdir(parents=True, exist_ok=True)
-                result_path.write_text(json.dumps(all_results, ensure_ascii=False), encoding="utf-8")
-
-                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(all_results)} 个样本")
+                src = registry.get(source_id)
+                root = Path(src.root_path)
+                batch_dirs = []
+                if (root / "manifests").exists():
+                    batch_dirs.append(("", root))
+                for d in sorted(root.iterdir()):
+                    if d.is_dir() and (d / "manifests").exists():
+                        batch_dirs.append((d.name, d))
+                for bid, bdir in batch_dirs:
+                    actual_bid = bid if bid else bdir.name
+                    has_cache = (bdir / "artifacts" / "bucket_samples.json").exists()
+                    if has_cache:
+                        t_id = f"layout_batch_{source_id}_{actual_bid}"
+                        if _start_single_layout(t_id, source_id, actual_bid):
+                            started.append(t_id)
             except Exception as e:
-                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
+                raise HTTPException(status_code=400, detail=f"数据源 '{source_id}' 不存在: {e}")
+            return {"message": f"已启动 {len(started)} 个 layout 任务", "task_ids": started, "status": "started"}
 
-        thread = threading.Thread(target=execute, name=task_id)
-        thread.daemon = True
-        thread.start()
+        # 单批次
+        task_id = f"layout_batch_{source_id}_{batch_id}"
+        if _start_single_layout(task_id, source_id, batch_id, sample_ids):
+            return {"message": "已启动 layout 批量检测", "task_id": task_id, "total": len(sample_ids) if sample_ids else 0}
+        return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
 
-        return {"message": f"已启动 layout 批量检测", "task_id": task_id, "total": len(sample_ids)}
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print(f"[layout-batch] ERROR: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids: list[str] | None = None) -> bool:
+    """启动单个 layout 批量任务。返回 True 表示已启动，False 表示已在运行。"""
+    existing = progress_tracker.get_task(task_id)
+    if existing and existing.status.value in ["running", "pending"]:
+        return False
+
+    def execute():
+        try:
+            source = registry.get(source_id)
+            batch_dir = source.resolve_batch_dir(batch_id)
+            manifests_dir = batch_dir / "manifests"
+            manifest_path = find_stage_manifest(manifests_dir, "ingest")
+            if not manifest_path:
+                progress_tracker.fail_task(task_id, "ingest manifest 不存在")
+                return
+
+            # 从缓存读取 sample_ids
+            ids = list(sample_ids) if sample_ids else []
+            if not ids:
+                cpath = batch_dir / "artifacts" / "bucket_samples.json"
+                if cpath.exists():
+                    try:
+                        cached = json.loads(cpath.read_text(encoding="utf-8"))
+                        for samples in cached.get("buckets", {}).values():
+                            for s in samples:
+                                sid = s if isinstance(s, str) else s.get("sample_id", "")
+                                if sid:
+                                    ids.append(sid)
+                    except Exception:
+                        pass
+
+            if not ids:
+                progress_tracker.fail_task(task_id, "无抽样样本")
+                return
+
+            progress_tracker.start_task(
+                task_id=task_id, task_type="layout_batch",
+                source_id=source_id, batch_id=batch_id,
+                total=len(ids), message=f"layout {len(ids)} 样本",
+            )
+
+            from data_engine.ocr.layout_provider import PPLayoutProvider
+            layout = PPLayoutProvider()
+            done = 0
+            errors: list[dict] = []
+
+            # 先触发模型加载，更新进度显示"加载模型中..."
+            progress_tracker.update_progress(task_id, current=0, message="加载模型中...")
+            try:
+                _ = layout._ensure_model()
+                progress_tracker.update_progress(task_id, current=0, message=f"模型就绪，开始处理 0/{len(ids)}")
+            except Exception as e:
+                progress_tracker.fail_task(task_id, f"模型加载失败: {e}")
+                return
+
+            # 只读需要的 sample_ids（分批查询避免 filter 太长）
+            ids_set = set(ids)
+            record_map: dict[str, bytes] = {}
+            batch_size = 100
+            id_list = list(ids_set)
+            with _lance_write_lock:
+                ds = lance.dataset(str(manifest_path))
+                for i in range(0, len(id_list), batch_size):
+                    chunk = id_list[i:i + batch_size]
+                    ids_str = ",".join(repr(s) for s in chunk)
+                    try:
+                        recs = ds.to_table(
+                            columns=["sample_id", "image_data"],
+                            filter=f"sample_id IN ({ids_str})",
+                        ).to_pylist()
+                        for r in recs:
+                            if r.get("image_data"):
+                                record_map[r["sample_id"]] = r["image_data"]
+                    except Exception:
+                        pass
+
+            results = []
+            for sid in ids:
+                if progress_tracker.is_stopped(task_id):
+                    progress_tracker.stop_task(task_id, f"停止 {done}/{len(ids)}")
+                    break
+
+                rec = record_map.get(sid)
+                if not rec:
+                    done += 1
+                    continue
+
+                try:
+                    blocks = layout.detect_layout_from_bytes(rec)
+                    results.append({
+                        "sample_id": sid,
+                        "blocks": [
+                            {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                            for b in blocks
+                        ],
+                        "block_count": len(blocks),
+                    })
+                except Exception as e:
+                    errors.append({"sample_id": sid, "error": str(e)})
+                    print(f"[layout] failed {sid}: {e}", file=sys.stderr)
+
+                done += 1
+                if done % 5 == 0 or done == len(ids):
+                    error_summary = f"（{len(errors)} 错误）" if errors else ""
+                    progress_tracker.update_progress(task_id, current=done, message=f"layout {done}/{len(ids)}{error_summary}")
+
+            result_path = batch_dir / "artifacts" / "layout_results.json"
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
+
+            progress_tracker.complete_task(task_id, message=f"完成 {len(results)} 样本")
+            invalidate_status_cache()
+        except Exception as e:
+            progress_tracker.fail_task(task_id, str(e))
+
+    thread = threading.Thread(target=execute, name=task_id)
+    thread.daemon = True
+    thread.start()
+    return True
 
 
 @app.get("/api/layout-batch/{source_id}/{batch_id}/results")
