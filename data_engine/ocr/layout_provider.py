@@ -10,6 +10,17 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL_NAME = "PicoDet-L_layout_17cls"
 
+# 单例实例，避免重复加载模型
+_layout_provider_instance: PPLayoutProvider | None = None
+
+
+def get_layout_provider() -> PPLayoutProvider:
+    """获取 PPLayoutProvider 单例（模型只加载一次）"""
+    global _layout_provider_instance
+    if _layout_provider_instance is None:
+        _layout_provider_instance = PPLayoutProvider()
+    return _layout_provider_instance
+
 
 class PPLayoutProvider:
 
@@ -69,3 +80,33 @@ class PPLayoutProvider:
             return self.detect_layout(Path(tmp_path))
         finally:
             os.unlink(tmp_path)
+
+    def detect_layout_batch(self, image_paths: list[Path]) -> list[list[LayoutBlock]]:
+        """批量 layout 检测（比逐张快 10-16 倍）。
+
+        Args:
+            image_paths: 图片路径列表
+
+        Returns:
+            与 image_paths 顺序对应的 LayoutBlock 列表
+        """
+        self._ensure_model()
+        str_paths = [str(p) for p in image_paths]
+        all_blocks: list[list[LayoutBlock]] = [[] for _ in str_paths]
+
+        for idx, result in enumerate(self._model.predict(str_paths)):
+            blocks: list[LayoutBlock] = []
+            for det in result.get("boxes", []):
+                score = float(det.get("score", 0))
+                if score < self._score_threshold:
+                    continue
+                coord = det.get("coordinate", [0, 0, 0, 0])
+                blocks.append(LayoutBlock(
+                    block_type=str(det.get("label", "text")),
+                    bbox=[float(c) for c in coord],
+                    confidence=score,
+                ))
+            if idx < len(all_blocks):
+                all_blocks[idx] = blocks
+
+        return all_blocks
