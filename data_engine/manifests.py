@@ -324,6 +324,14 @@ def find_stage_manifest(manifests_dir: Path, stage: str) -> Path | None:
     return None
 
 
+def find_category_manifest(manifests_dir: Path, category: str) -> Path | None:
+    """查找分类 Lance（text/formula/table）"""
+    path = manifests_dir / f"{category}.lance"
+    if path.exists():
+        return path
+    return None
+
+
 def iso_now() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 

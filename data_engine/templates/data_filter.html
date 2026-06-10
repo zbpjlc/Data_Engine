@@ -264,6 +264,36 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- 运行 Layout 版面检测 -->
+                    <div class="mt-6 pt-6 border-t">
+                        <div class="flex items-center gap-4 mb-3">
+                            <button id="btn-split-categories" class="px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 font-medium text-sm">
+                                运行 Layout 版面检测
+                            </button>
+                            <span class="text-xs text-gray-500">从 bucket_samples.json 抽样 → ingest.lance 抽取图片 → 跑 pp-layout</span>
+                        </div>
+                        <div id="split-status" class="text-sm text-gray-500 mt-2"></div>
+                        <div id="split-results" class="hidden mt-3">
+                            <div class="bg-green-50 border border-green-200 rounded-lg p-3 mb-3">
+                                <span id="split-result-msg" class="text-sm text-green-800"></span>
+                            </div>
+                            <div class="grid grid-cols-3 gap-3">
+                                <div class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-center">
+                                    <div class="text-xs text-blue-600">Text</div>
+                                    <div id="split-text-count" class="text-xl font-bold text-blue-800">-</div>
+                                </div>
+                                <div class="bg-purple-50 border border-purple-200 rounded-lg p-3 text-center">
+                                    <div class="text-xs text-purple-600">Formula</div>
+                                    <div id="split-formula-count" class="text-xl font-bold text-purple-800">-</div>
+                                </div>
+                                <div class="bg-orange-50 border border-orange-200 rounded-lg p-3 text-center">
+                                    <div class="text-xs text-orange-600">Table</div>
+                                    <div id="split-table-count" class="text-xl font-bold text-orange-800">-</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -594,6 +624,10 @@
                 // 切换到 OCR Tab 时刷新批次列表
                 if (this.dataset.panel === 'ocr') {
                     updateOcrBatchSelect();
+                }
+                // 切换到 Page_CMCV Tab 时加载已有 Layout 统计
+                if (this.dataset.panel === 'diffsample') {
+                    loadExistingCategoryStats();
                 }
             });
         });
@@ -1838,6 +1872,238 @@
                         console.error('[CMCV] failed:', err);
                         if (done >= batches.length) { btn.disabled = false; btn.textContent = '运行 CMCV'; }
                     });
+            });
+        });
+
+        // ── Layout 版面检测（从拆分按钮改造）───────────────────────────────
+        // 停止 layout 任务
+        function stopSplitTask(sourceId, batchId, btnEl) {
+            if (!confirm(`确定停止 ${sourceId}/${batchId} 的 layout 任务？`)) return;
+            btnEl.disabled = true;
+            btnEl.textContent = '停止中...';
+            fetch(`/api/stop/${sourceId}?batch_id=${encodeURIComponent(batchId)}`, {method: 'POST'})
+                .then(r => r.json())
+                .then(d => {
+                    btnEl.textContent = '已停止';
+                    btnEl.classList.add('opacity-50');
+                })
+                .catch(e => {
+                    alert('停止失败: ' + e.message);
+                    btnEl.disabled = false;
+                    btnEl.textContent = '停止';
+                });
+        }
+
+        // ── 加载已有 Layout 统计卡片 ──────────────────────────────────────
+        function loadExistingCategoryStats() {
+            const sourceId = selSource.value;
+            const batchId = selBatch.value;
+            if (!sourceId) return;
+
+            // 确定要查询的批次
+            let queryTargets = [];
+            if (batchId) {
+                const b = batchData.find(b => b.batch_id === batchId);
+                if (b) queryTargets.push(b);
+            } else if (sourceId) {
+                queryTargets = batchData.filter(b => b.source_id === sourceId);
+            } else {
+                queryTargets = [...batchData];
+            }
+            if (!queryTargets.length) return;
+
+            const statsPromises = queryTargets.map(t =>
+                fetch(`/api/category-stats/${t.source_id}/${t.batch_id}`)
+                    .then(r => r.json())
+                    .catch(() => null)
+            );
+            Promise.all(statsPromises).then(statsResults => {
+                const aggStats = {text: 0, formula: 0, table: 0};
+                statsResults.forEach(sr => {
+                    if (sr && sr.categories) {
+                        aggStats.text += sr.categories.text?.count || 0;
+                        aggStats.formula += sr.categories.formula?.count || 0;
+                        aggStats.table += sr.categories.table?.count || 0;
+                    }
+                });
+                // 只有存在数据时才显示卡片
+                if (aggStats.text || aggStats.formula || aggStats.table) {
+                    document.getElementById('split-results').classList.remove('hidden');
+                    document.getElementById('split-result-msg').textContent =
+                        `已有 Layout 结果：${(aggStats.text + aggStats.formula + aggStats.table).toLocaleString()} 个 blocks`;
+                    document.getElementById('split-text-count').textContent = aggStats.text.toLocaleString();
+                    document.getElementById('split-formula-count').textContent = aggStats.formula.toLocaleString();
+                    document.getElementById('split-table-count').textContent = aggStats.table.toLocaleString();
+                }
+            });
+        }
+
+        document.getElementById('btn-split-categories').addEventListener('click', function() {
+            if (!bucketSampleData) { alert('请先抽样'); return; }
+            const btn = this;
+            const status = document.getElementById('split-status');
+
+            // 确定要处理的批次
+            const batchInfo = bucketSampleData.batch_info || [];
+            let targets = [];
+            if (batchInfo.length > 0) {
+                targets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            } else if (bucketSampleData.source_id && bucketSampleData.source_id !== 'all') {
+                targets = [{source_id: bucketSampleData.source_id, batch_id: bucketSampleData.batch_id}];
+            } else {
+                targets = [{source_id: 'all', batch_id: ''}];
+            }
+
+            btn.disabled = true;
+            btn.textContent = '启动中...';
+            status.innerHTML = '<div class="text-sm text-gray-500">启动 layout 任务中...</div>';
+
+            const taskIds = [];
+            const launchPromises = targets.map(t => {
+                return fetch('/api/layout-batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({source_id: t.source_id, batch_id: t.batch_id}),
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.task_id) taskIds.push(data.task_id);
+                    else if (data.task_ids) taskIds.push(...data.task_ids);
+                    else if (data.status === 'already_running' && data.task_id) taskIds.push(data.task_id);
+                })
+                .catch(err => {
+                    console.error('[layout] launch failed', t, err);
+                });
+            });
+
+            Promise.all(launchPromises).then(() => {
+                if (!taskIds.length) {
+                    status.innerHTML = '<div class="text-xs text-red-600">未启动任何任务，请检查是否已有 layout 缓存</div>';
+                    btn.disabled = false;
+                    btn.textContent = '运行 Layout 版面检测';
+                    return;
+                }
+
+                // 开始轮询进度
+                const splitPollTimer = setInterval(() => {
+                    fetch('/api/progress').then(r => r.json()).then(data => {
+                        const tasks = Object.values(data.tasks || {});
+                        const splitTasks = tasks.filter(t => taskIds.includes(t.task_id));
+                        if (!splitTasks.length) return;
+
+                        let allDone = true;
+                        let totalCurrent = 0, totalTotal = 0;
+
+                        splitTasks.forEach(t => {
+                            totalCurrent += (t.current || 0);
+                            totalTotal += (t.total || 0);
+                            if (t.status === 'running' || t.status === 'pending') allDone = false;
+                        });
+
+                        const aggPct = totalTotal > 0 ? (totalCurrent / totalTotal * 100).toFixed(1) : 0;
+                        const runningCount = splitTasks.filter(t => t.status === 'running' || t.status === 'pending').length;
+                        const doneCount = splitTasks.filter(t => t.status === 'completed').length;
+                        const headerLabel = allDone ? 'Layout 完成' : `Layout 处理中 ${aggPct}%`;
+
+                        // 汇总进度条
+                        let html = `<div class="flex items-center gap-3 mb-3">
+                            <div class="flex-1 bg-gray-200 rounded-full h-2.5"><div class="bg-orange-600 h-2.5 rounded-full transition-all" style="width:${aggPct}%"></div></div>
+                            <span class="text-orange-700 font-semibold text-sm whitespace-nowrap">${headerLabel}</span>
+                            <span class="text-gray-600 text-sm font-medium whitespace-nowrap">${totalCurrent.toLocaleString()}/${totalTotal.toLocaleString()}</span>
+                            ${targets.length > 1 ? `<span class="text-xs text-gray-400 whitespace-nowrap">${doneCount}/${targets.length} 完成${runningCount > 0 ? ` · ${runningCount} 并行` : ''}</span>` : ''}
+                        </div>`;
+
+                        // 各批次独立卡片
+                        if (splitTasks.length > 0) {
+                            const gridClass = splitTasks.length > 1 ? 'grid grid-cols-2 gap-3' : '';
+                            html += `<div class="${gridClass}">`;
+                            splitTasks.forEach(t => {
+                                const pct = t.total > 0 ? (t.current / t.total * 100).toFixed(1) : 0;
+                                const statusColors = { completed: 'green', failed: 'red', running: 'orange', pending: 'yellow', stopped: 'orange' };
+                                const c = statusColors[t.status] || 'gray';
+                                const labels = { completed: '完成', failed: '失败', running: '进行中', pending: '等待中', stopped: '已停止' };
+                                const label = (t.batch_id || t.source_id || '').replace('layout_batch_', '');
+                                const msg = t.error_message ? `失败: ${t.error_message}` : (t.message || '处理中');
+                                const isRunning = t.status === 'running' || t.status === 'pending';
+                                const elapsed = t.elapsed_time ? Math.round(t.elapsed_time) : 0;
+                                // 计算倒计时（剩余时间）
+                                let timeStr;
+                                if (isRunning && t.current > 0 && t.total > t.current) {
+                                    const remaining = Math.round((elapsed / t.current) * (t.total - t.current));
+                                    if (remaining > 3600) timeStr = `剩余 ${Math.floor(remaining/3600)}时${Math.floor((remaining%3600)/60)}分`;
+                                    else if (remaining > 60) timeStr = `剩余 ${Math.floor(remaining/60)}分${remaining%60}秒`;
+                                    else timeStr = `剩余 ${remaining}秒`;
+                                } else if (t.status === 'completed') {
+                                    const t2 = elapsed > 3600 ? `${Math.floor(elapsed/3600)}时${Math.floor((elapsed%3600)/60)}分` : elapsed > 60 ? `${Math.floor(elapsed/60)}分${elapsed%60}秒` : `${elapsed}秒`;
+                                    timeStr = `耗时 ${t2}`;
+                                } else {
+                                    timeStr = '';
+                                }
+
+                                html += `<div class="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                                    <div class="flex items-center justify-between mb-2">
+                                        <span class="text-sm font-semibold text-gray-800 truncate" title="${label}">${label}</span>
+                                        <div class="flex items-center gap-1">
+                                            <span class="px-2 py-0.5 rounded text-xs font-medium bg-${c}-100 text-${c}-800">${labels[t.status] || t.status}</span>
+                                            ${isRunning ? `<button onclick="stopSplitTask('${t.source_id}','${t.batch_id}',this)" class="px-2 py-0.5 text-xs rounded bg-red-100 text-red-700 hover:bg-red-200 font-medium">停止</button>` : ''}
+                                        </div>
+                                    </div>
+                                    <div class="bg-gray-200 rounded-full h-2 mb-2"><div class="bg-${c}-600 h-2 rounded-full transition-all" style="width:${pct}%"></div></div>
+                                    <div class="flex items-center justify-between text-xs text-gray-500">
+                                        <span class="font-medium">${(t.current || 0).toLocaleString()} / ${(t.total || 0).toLocaleString()}</span>
+                                        <span class="truncate ml-2 max-w-[180px]" title="${msg}">${msg}</span>
+                                        <span class="text-gray-400 ml-1 whitespace-nowrap">${timeStr}</span>
+                                    </div>
+                                </div>`;
+                            });
+                            html += '</div>';
+                        }
+
+                        status.innerHTML = html;
+
+                        if (allDone) {
+                            clearInterval(splitPollTimer);
+                            btn.disabled = false;
+                            btn.textContent = '运行 Layout 版面检测';
+
+                            const hasFail = splitTasks.some(t => t.status === 'failed');
+                            const hasStopped = splitTasks.some(t => t.status === 'stopped');
+                            // 汇总各任务的完成消息（包括 completed 和 stopped）
+                            const messages = splitTasks
+                                .filter(t => t.status === 'completed' || t.status === 'stopped')
+                                .map(t => t.message || '')
+                                .filter(m => m);
+                            let resultMsg = messages.length > 0
+                                ? messages.join('；')
+                                : `Layout 完成，共处理 ${splitTasks.reduce((s, t) => s + (t.total || 0), 0).toLocaleString()} 个样本`;
+                            if (hasFail) resultMsg += '（部分任务失败，请查看日志）';
+                            if (hasStopped) resultMsg += '（可再次点击继续处理）';
+
+                            document.getElementById('split-results').classList.remove('hidden');
+                            document.getElementById('split-result-msg').textContent = resultMsg;
+
+                            // 获取分类统计并填充卡片
+                            const statsPromises = targets.map(t =>
+                                fetch(`/api/category-stats/${t.source_id}/${t.batch_id}`)
+                                    .then(r => r.json())
+                                    .catch(() => null)
+                            );
+                            Promise.all(statsPromises).then(statsResults => {
+                                const aggStats = {text: 0, formula: 0, table: 0};
+                                statsResults.forEach(sr => {
+                                    if (sr && sr.categories) {
+                                        aggStats.text += sr.categories.text?.count || 0;
+                                        aggStats.formula += sr.categories.formula?.count || 0;
+                                        aggStats.table += sr.categories.table?.count || 0;
+                                    }
+                                });
+                                document.getElementById('split-text-count').textContent = aggStats.text.toLocaleString();
+                                document.getElementById('split-formula-count').textContent = aggStats.formula.toLocaleString();
+                                document.getElementById('split-table-count').textContent = aggStats.table.toLocaleString();
+                            });
+                        }
+                    }).catch(() => {});
+                }, 1500);
             });
         });
 

@@ -42,7 +42,7 @@ from starlette.requests import Request
 from fastapi.responses import Response
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest, manifest_count,
-    _lance_write_lock,
+    _lance_write_lock, _safe_write_lance,
     read_element_manifest, write_element_manifest, merge_insert_element,
     append_element_manifest,
 )
@@ -51,6 +51,12 @@ from data_engine.status import collect_global_status, format_status_report, inva
 from data_engine.progress_tracker import progress_tracker
 
 app = FastAPI(title="Data Engine Web Console", version="1.0.0")
+
+# 启动时清理 stale 任务（重启后线程已不存在）
+for _tid, _task in progress_tracker.get_all_tasks().items():
+    if _task.status.value in ("running", "pending"):
+        progress_tracker.stop_task(_tid, "服务重启，任务已中断")
+        print(f"[startup] marked stale task {_tid} as stopped", file=__import__('sys').stderr)
 
 # Static files and templates
 static_dir = Path(__file__).parent / "static"
@@ -691,11 +697,15 @@ async def stop_task(source_id: str, batch_id: str = None):
         raise HTTPException(status_code=400, detail="batch_id is required")
     
     stopped = []
-    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv"]:
+    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "split", "layout_batch"]:
         task_id = f"{task_type}_{source_id}_{batch_id}"
         task = progress_tracker.get_task(task_id)
         if task and task.status.value in ["running", "pending"]:
             progress_tracker.request_stop(task_id)
+            # 检测死线程：如果线程已不存在，直接标记为 stopped
+            alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
+            if task_id not in alive_threads:
+                progress_tracker.stop_task(task_id, "线程已终止，任务异常停止")
             stopped.append(task_id)
     
     if stopped:
@@ -1026,7 +1036,7 @@ async def lancedb_list_sources():
             batch_dir = source_config.resolve_batch_dir(batch.batch_id)
             manifests_dir = batch_dir / "manifests"
 
-            for dataset_name in ["ingest", "element"]:
+            for dataset_name in ["ingest", "element", "text", "formula", "table"]:
                 manifest_path = find_stage_manifest(manifests_dir, dataset_name)
                 if not manifest_path or manifest_path.suffix != ".lance" or not manifest_path.exists():
                     continue
@@ -1201,8 +1211,14 @@ async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, versi
 
 @app.get("/api/progress")
 async def get_progress():
-    """获取所有任务进度"""
+    """获取所有任务进度（自动检测死线程）"""
     try:
+        # 自动检测死线程：如果任务状态为 running/pending 但线程已死，标记为 stopped
+        alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
+        for task_id, task in progress_tracker.get_all_tasks().items():
+            if task.status.value in ("running", "pending") and task_id not in alive_threads:
+                progress_tracker.stop_task(task_id, "线程已终止，任务异常停止")
+
         tasks = progress_tracker.get_all_tasks()
         return {
             "tasks": {
@@ -1320,16 +1336,38 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                         if sid:
                             sample_ids.add(sid)
 
-                # 2. 读 layout 结果
-                layout_cache = artifacts_dir / "layout_results.json"
+                # 2. 读 layout 结果（从 Lance 文件重建 block 信息）
+                manifests_dir = batch_dir / "manifests"
                 layout_map: dict[str, list[dict]] = {}
                 _SKIP_BLOCK_TYPES = {"figure"}
-                if layout_cache.exists():
-                    for r in json.loads(layout_cache.read_text(encoding="utf-8")):
-                        if r.get("blocks"):
-                            filtered_blocks = [b for b in r["blocks"] if b.get("block_type") not in _SKIP_BLOCK_TYPES]
-                            if filtered_blocks:
-                                layout_map[r["sample_id"]] = filtered_blocks
+                for cat in ("text", "formula", "table"):
+                    lp = manifests_dir / f"{cat}.lance"
+                    if lp.exists():
+                        try:
+                            with _lance_write_lock:
+                                ds = lance.dataset(str(lp))
+                                rows = ds.to_table(
+                                    columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                                ).to_pylist()
+                            for row in rows:
+                                sid = row["sample_id"]
+                                bt = row["block_type"]
+                                if bt in _SKIP_BLOCK_TYPES:
+                                    continue
+                                block = {
+                                    "block_type": bt,
+                                    "bbox": json.loads(row["bbox_json"]) if row.get("bbox_json") else [],
+                                    "confidence": row.get("layout_confidence", 0),
+                                    "block_idx": row["block_idx"],
+                                }
+                                if sid not in layout_map:
+                                    layout_map[sid] = []
+                                layout_map[sid].append(block)
+                        except Exception as e:
+                            print(f"[OCR] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+                # 按 block_idx 排序每个 sample 的 blocks
+                for sid in layout_map:
+                    layout_map[sid].sort(key=lambda b: b["block_idx"])
 
                 if not layout_map:
                     progress_tracker.fail_task(task_id, "无 layout 结果，请先运行 pp-layout")
@@ -1674,6 +1712,145 @@ async def get_sample_compare(source_id: str, batch_id: str, sample_id: str):
         }
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/split-categories/{source_id}/{batch_id}")
+async def split_categories(source_id: str, batch_id: str, with_images: bool = False):
+    """将 element.lance 中的 block 按类型分拆到 text/formula/table Lance（后台线程+进度跟踪）"""
+    try:
+        task_id = f"split_{source_id}_{batch_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+            if task_id not in alive_threads:
+                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+            else:
+                return {"message": f"拆分任务 {task_id} 已在运行中", "status": "already_running"}
+
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+        element_path = manifests_dir / "element.lance"
+
+        if not element_path.exists():
+            raise HTTPException(status_code=404, detail="element.lance 不存在，请先运行 OCR")
+
+        def execute_split_task():
+            try:
+                from data_engine.ocr.split import split_element_to_category_lances
+
+                progress_tracker.start_task(
+                    task_id=task_id, task_type="split",
+                    source_id=source_id, batch_id=batch_id,
+                    total=0, message="正在读取 element.lance...",
+                )
+
+                # 构建懒加载图片加载器，避免一次性加载所有图片到内存
+                image_loader = None
+                if with_images:
+                    ingest_path = find_stage_manifest(manifests_dir, "ingest")
+                    if ingest_path and ingest_path.exists():
+                        progress_tracker.update_progress(task_id, 0, "初始化图片懒加载器...")
+                        try:
+                            with _lance_write_lock:
+                                _ingest_ds = lance.dataset(str(ingest_path))
+                                _image_ids = set(
+                                    _ingest_ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
+                                )
+
+                            def _load_image_for_sample(sample_id: str, bbox_json) -> bytes | None:
+                                """懒加载: 按需读取单张图片并裁剪"""
+                                if sample_id not in _image_ids:
+                                    return None
+                                try:
+                                    with _lance_write_lock:
+                                        ds = lance.dataset(str(ingest_path))
+                                        tbl = ds.to_table(
+                                            columns=["image_data"],
+                                            filter=f"sample_id = '{sample_id}'"
+                                        )
+                                    if tbl.num_rows == 0:
+                                        return None
+                                    img_bytes = tbl.column("image_data")[0].as_py()
+                                    if not img_bytes:
+                                        return None
+
+                                    if bbox_json:
+                                        from PIL import Image
+                                        import io
+                                        img = Image.open(io.BytesIO(img_bytes))
+                                        if isinstance(bbox_json, str):
+                                            bbox_json = json.loads(bbox_json)
+                                        if isinstance(bbox_json, list) and len(bbox_json) >= 4:
+                                            x1, y1, x2, y2 = [int(c) for c in bbox_json]
+                                            cropped = img.crop((x1, y1, x2, y2))
+                                            buf = io.BytesIO()
+                                            cropped.save(buf, format="JPEG", quality=90)
+                                            return buf.getvalue()
+                                    return img_bytes
+                                except Exception:
+                                    return None
+
+                            image_loader = _load_image_for_sample
+                        except Exception as e:
+                            print(f"[Split] 图片加载器初始化失败: {e}", file=sys.stderr)
+                            image_loader = None
+
+                def _split_progress_cb(current: int, total: int, msg: str) -> None:
+                    progress_tracker.update_progress(
+                        task_id, current, msg,
+                        total=total if total > 0 else None,
+                    )
+
+                result = split_element_to_category_lances(
+                    manifests_dir,
+                    image_loader=image_loader,
+                    progress_callback=_split_progress_cb,
+                )
+                invalidate_status_cache()
+
+                msg_parts = [f"{k}: {v}" for k, v in result.items() if v]
+                progress_tracker.complete_task(task_id=task_id, message=f"拆分完成 ({', '.join(msg_parts)})")
+
+            except Exception as e:
+                print(f"[Split] 任务失败: {e}", file=sys.stderr)
+                traceback.print_exc()
+                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
+
+        thread = threading.Thread(target=execute_split_task, name=task_id)
+        thread.daemon = True
+        thread.start()
+
+        return {"message": f"已启动 {source_id} 的拆分任务", "status": "started", "task_id": task_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/category-stats/{source_id}/{batch_id}")
+async def get_category_stats(source_id: str, batch_id: str):
+    """获取 text/formula/table 三个 Lance 的统计"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        stats = {}
+        for cat in ("text", "formula", "table"):
+            lance_path = manifests_dir / f"{cat}.lance"
+            if lance_path.exists():
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lance_path))
+                    n = ds.count_rows()
+                    cols = ds.schema.names
+                stats[cat] = {"count": n, "columns": cols}
+            else:
+                stats[cat] = {"count": 0, "columns": []}
+
+        return {"source_id": source_id, "batch_id": batch_id, "categories": stats}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2252,6 +2429,104 @@ async def start_layout_batch(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _write_layout_to_category_lances(
+    results: list[dict],
+    manifests_dir: Path,
+    flush_size: int = 10_000,
+    progress_callback=None,
+    write_mode: str = "overwrite",
+) -> dict[str, int]:
+    """将 layout 结果按 block_type 分块写入 text.lance / formula.lance / table.lance
+
+    Args:
+        results: layout 检测结果列表
+        manifests_dir: manifests 目录
+        flush_size: 每处理多少个样本 flush 一次（默认 10000）
+        progress_callback: 可选回调 callback(current, total, message)
+        write_mode: 初始写入模式 ("overwrite" 或 "append")
+    """
+    import pyarrow as pa
+    from datetime import datetime, timezone
+    from data_engine.ocr import (
+        FORMULA_BLOCK_TYPES, TABLE_BLOCK_TYPES, SKIP_BLOCK_TYPES,
+        TEXT_LANCE_SCHEMA, FORMULA_LANCE_SCHEMA, TABLE_LANCE_SCHEMA,
+    )
+
+    schema_map = {"text": TEXT_LANCE_SCHEMA, "formula": FORMULA_LANCE_SCHEMA, "table": TABLE_LANCE_SCHEMA}
+    stats: dict[str, int] = {"text": 0, "formula": 0, "table": 0}
+    written_once: dict[str, bool] = {"text": False, "formula": False, "table": False}
+    now = datetime.now(timezone.utc).isoformat()
+    total = len(results)
+
+    def _classify_block(sid: str, idx: int, b: dict) -> tuple[str, dict] | None:
+        bt = b.get("block_type", "text")
+        if bt in SKIP_BLOCK_TYPES:
+            return None
+        row = {
+            "sample_id": sid,
+            "block_idx": idx,
+            "block_type": bt,
+            "bbox_json": json.dumps(b.get("bbox", [])),
+            "layout_confidence": float(b.get("confidence", 0)),
+            "schema_version": "v1",
+            "created_at": now,
+        }
+        if bt in FORMULA_BLOCK_TYPES:
+            row.update({"image_data": None, "formula_latex": None,
+                        "formula_confidence": None, "source_model": None,
+                        "consistency_pattern": None})
+            return "formula", row
+        elif bt in TABLE_BLOCK_TYPES:
+            row.update({"image_data": None, "table_html": None, "table_json": None,
+                        "table_confidence": None, "source_model": None,
+                        "consistency_pattern": None})
+            return "table", row
+        else:
+            row.update({"image_data": None, "text_content": None,
+                        "text_confidence": None, "source_model": None,
+                        "consistency_pattern": None})
+            return "text", row
+
+    def _flush_chunk(buffers: dict[str, list[dict]], mode_map: dict[str, str]):
+        for cat, rows in buffers.items():
+            if not rows:
+                continue
+            lance_path = manifests_dir / f"{cat}.lance"
+            tbl = pa.Table.from_pylist(rows, schema=schema_map[cat])
+            _safe_write_lance(tbl, lance_path, mode=mode_map[cat])
+            stats[cat] += len(rows)
+            written_once[cat] = True
+            mode_map[cat] = "append"  # 后续都改为 append
+            print(f"[layout-split] flushed {len(rows)} rows to {cat}.lance (total: {stats[cat]})", file=sys.stderr)
+
+    # 分块处理
+    buffers: dict[str, list[dict]] = {"text": [], "formula": [], "table": []}
+    mode_map = {"text": write_mode, "formula": write_mode, "table": write_mode}
+    processed = 0
+
+    for r in results:
+        sid = r.get("sample_id", "")
+        for idx, b in enumerate(r.get("blocks", [])):
+            result = _classify_block(sid, idx, b)
+            if result:
+                cat, row = result
+                buffers[cat].append(row)
+
+        processed += 1
+        if processed % flush_size == 0:
+            _flush_chunk(buffers, mode_map)
+            buffers = {"text": [], "formula": [], "table": []}
+            if progress_callback:
+                progress_callback(processed, total, f"拆分写入 {processed}/{total}")
+
+    # 写入剩余数据
+    _flush_chunk(buffers, mode_map)
+    if progress_callback:
+        progress_callback(total, total, f"拆分完成 {total}/{total}")
+
+    return stats
+
+
 def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids: list[str] | None = None) -> bool:
     """启动单个 layout 批量任务。返回 True 表示已启动，False 表示已在运行。"""
     existing = progress_tracker.get_task(task_id)
@@ -2295,74 +2570,153 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
 
             from data_engine.ocr.layout_provider import PPLayoutProvider
             layout = PPLayoutProvider()
-            done = 0
             errors: list[dict] = []
 
-            # 先触发模型加载，更新进度显示"加载模型中..."
-            progress_tracker.update_progress(task_id, current=0, message="加载模型中...")
-            try:
-                _ = layout._ensure_model()
-                progress_tracker.update_progress(task_id, current=0, message=f"模型就绪，开始处理 0/{len(ids)}")
-            except Exception as e:
-                progress_tracker.fail_task(task_id, f"模型加载失败: {e}")
-                return
-
-            # 只读需要的 sample_ids（分批查询避免 filter 太长）
-            ids_set = set(ids)
-            record_map: dict[str, bytes] = {}
-            batch_size = 100
-            id_list = list(ids_set)
-            with _lance_write_lock:
-                ds = lance.dataset(str(manifest_path))
-                for i in range(0, len(id_list), batch_size):
-                    chunk = id_list[i:i + batch_size]
-                    ids_str = ",".join(repr(s) for s in chunk)
+            # 断点续跑：从 Lance 文件读取已处理的 sample_id
+            manifests_dir = batch_dir / "manifests"
+            done_ids: set[str] = set()
+            lance_write_mode = "overwrite"  # 第一次写 Lance 用 overwrite，后续 append
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if lp.exists():
                     try:
-                        recs = ds.to_table(
-                            columns=["sample_id", "image_data"],
-                            filter=f"sample_id IN ({ids_str})",
-                        ).to_pylist()
-                        for r in recs:
-                            if r.get("image_data"):
-                                record_map[r["sample_id"]] = r["image_data"]
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(lp))
+                            ids_col = ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
+                            done_ids.update(ids_col)
+                    except Exception as e:
+                        print(f"[layout] resume: failed to read {cat}.lance: {e}", file=sys.stderr)
+            if done_ids:
+                lance_write_mode = "append"  # 已有 Lance 数据，后续 append
+                print(f"[layout] resume: {len(done_ids)} done sample_ids from Lance", file=sys.stderr)
+
+            # 过滤掉已处理的
+            pending_ids = [sid for sid in ids if sid not in done_ids]
+            done = len(done_ids)
+            print(f"[layout] total={len(ids)} done={done} pending={len(pending_ids)}", file=sys.stderr)
+
+            if not pending_ids:
+                # 全部已完成，直接走拆分流程
+                progress_tracker.update_progress(task_id, current=done, message=f"全部 {done} 样本已完成，跳过 layout")
+            else:
+                # 先触发模型加载
+                progress_tracker.update_progress(task_id, current=done, message="加载模型中...")
+                try:
+                    _ = layout._ensure_model()
+                    progress_tracker.update_progress(task_id, current=done, message=f"模型就绪，开始处理 {done}/{len(ids)}")
+                except Exception as e:
+                    progress_tracker.fail_task(task_id, f"模型加载失败: {e}")
+                    return
+
+                # 流式处理：分批加载图片 + 跑 layout + 报进度
+                process_batch_size = 500  # 每批处理 500 个样本
+
+                for batch_start in range(0, len(pending_ids), process_batch_size):
+                    if progress_tracker.is_stopped(task_id):
+                        break
+
+                    batch_ids = pending_ids[batch_start:batch_start + process_batch_size]
+
+                    # 加载本批图片
+                    progress_tracker.update_progress(
+                        task_id, current=done,
+                        message=f"加载图片 {done+1}-{done+len(batch_ids)}/{len(ids)}..."
+                    )
+                    image_map: dict[str, bytes] = {}
+                    try:
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(manifest_path))
+                            query_batch = 200
+                            for qi in range(0, len(batch_ids), query_batch):
+                                chunk = batch_ids[qi:qi + query_batch]
+                                ids_str = ",".join(repr(s) for s in chunk)
+                                try:
+                                    recs = ds.to_table(
+                                        columns=["sample_id", "image_data"],
+                                        filter=f"sample_id IN ({ids_str})",
+                                    ).to_pylist()
+                                    for r in recs:
+                                        if r.get("image_data"):
+                                            image_map[r["sample_id"]] = r["image_data"]
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print(f"[layout] 加载图片失败 batch {batch_start}: {e}", file=sys.stderr)
+
+                    # 跑 layout
+                    batch_results: list[dict] = []
+                    for sid in batch_ids:
+                        if progress_tracker.is_stopped(task_id):
+                            break
+
+                        rec = image_map.get(sid)
+                        if not rec:
+                            done += 1
+                            continue
+
+                        try:
+                            blocks = layout.detect_layout_from_bytes(rec)
+                            batch_results.append({
+                                "sample_id": sid,
+                                "blocks": [
+                                    {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                                    for b in blocks
+                                ],
+                                "block_count": len(blocks),
+                            })
+                        except Exception as e:
+                            errors.append({"sample_id": sid, "error": str(e)})
+                            print(f"[layout] failed {sid}: {e}", file=sys.stderr)
+
+                        done += 1
+
+                    # 每批结束：更新进度 + 增量写 Lance
+                    error_summary = f"（{len(errors)} 错误）" if errors else ""
+                    progress_tracker.update_progress(
+                        task_id, current=done,
+                        message=f"layout {done}/{len(ids)}{error_summary}"
+                    )
+                    # 增量写 Lance（只写本批新增 blocks）
+                    if batch_results:
+                        try:
+                            _write_layout_to_category_lances(
+                                batch_results, manifests_dir,
+                                flush_size=10_000,
+                                write_mode=lance_write_mode,
+                            )
+                            lance_write_mode = "append"  # 第一次 overwrite 后，后续 append
+                        except Exception as e:
+                            print(f"[layout] incremental lance write failed: {e}", file=sys.stderr)
+
+            # 无论完成还是停止
+            stopped = progress_tracker.is_stopped(task_id)
+
+            # 汇总 Lance 拆分统计
+            split_msg = ""
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if lp.exists():
+                    try:
+                        with _lance_write_lock:
+                            n = lance.dataset(str(lp)).count_rows()
+                        if n:
+                            split_msg += f"{cat}: {n}, "
                     except Exception:
                         pass
+            split_msg = split_msg.rstrip(", ") if split_msg else "无结果"
 
-            results = []
-            for sid in ids:
-                if progress_tracker.is_stopped(task_id):
-                    progress_tracker.stop_task(task_id, f"停止 {done}/{len(ids)}")
-                    break
-
-                rec = record_map.get(sid)
-                if not rec:
-                    done += 1
-                    continue
-
-                try:
-                    blocks = layout.detect_layout_from_bytes(rec)
-                    results.append({
-                        "sample_id": sid,
-                        "blocks": [
-                            {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
-                            for b in blocks
-                        ],
-                        "block_count": len(blocks),
-                    })
-                except Exception as e:
-                    errors.append({"sample_id": sid, "error": str(e)})
-                    print(f"[layout] failed {sid}: {e}", file=sys.stderr)
-
-                done += 1
-                if done % 5 == 0 or done == len(ids):
-                    error_summary = f"（{len(errors)} 错误）" if errors else ""
-                    progress_tracker.update_progress(task_id, current=done, message=f"layout {done}/{len(ids)}{error_summary}")
-
-            result_path = batch_dir / "artifacts" / "layout_results.json"
-            result_path.parent.mkdir(parents=True, exist_ok=True)
-            result_path.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
-
-            progress_tracker.complete_task(task_id, message=f"完成 {len(results)} 样本")
+            # 根据是否停止选择不同的完成方式
+            if stopped:
+                final_msg = f"已停止（已处理 {done}/{len(ids)}"
+                if split_msg:
+                    final_msg += f"，拆分 {split_msg}"
+                final_msg += "）"
+                progress_tracker.stop_task(task_id, final_msg)
+            else:
+                final_msg = f"完成 {done} 样本"
+                if split_msg:
+                    final_msg += f"，拆分 {split_msg}"
+                progress_tracker.complete_task(task_id, message=final_msg)
             invalidate_status_cache()
         except Exception as e:
             progress_tracker.fail_task(task_id, str(e))
@@ -2375,14 +2729,34 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
 
 @app.get("/api/layout-batch/{source_id}/{batch_id}/results")
 async def get_layout_batch_results(source_id: str, batch_id: str):
-    """获取 layout 批量检测结果"""
+    """从 Lance 文件获取 layout 结果（按 sample_id 分组）"""
     try:
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
-        result_path = batch_dir / "artifacts" / "layout_results.json"
-        if not result_path.exists():
-            return {"results": [], "total": 0}
-        results = json.loads(result_path.read_text(encoding="utf-8"))
+        manifests_dir = batch_dir / "manifests"
+        results_map: dict[str, dict] = {}
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if lp.exists():
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    rows = ds.to_table(
+                        columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                    ).to_pylist()
+                for row in rows:
+                    sid = row["sample_id"]
+                    if sid not in results_map:
+                        results_map[sid] = {"sample_id": sid, "blocks": [], "block_count": 0}
+                    results_map[sid]["blocks"].append({
+                        "block_type": row["block_type"],
+                        "bbox": json.loads(row["bbox_json"]) if row.get("bbox_json") else [],
+                        "confidence": row.get("layout_confidence", 0),
+                        "block_idx": row["block_idx"],
+                    })
+        for sid in results_map:
+            results_map[sid]["blocks"].sort(key=lambda b: b["block_idx"])
+            results_map[sid]["block_count"] = len(results_map[sid]["blocks"])
+        results = list(results_map.values())
         return {"results": results, "total": len(results)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
