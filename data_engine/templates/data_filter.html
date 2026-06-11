@@ -277,7 +277,7 @@
                         <!-- 进度区域（全宽） -->
                         <div id="split-status" class="text-sm text-gray-500 mb-3"></div>
                         <div id="split-results" class="hidden">
-                            <div class="grid grid-cols-4 gap-3">
+                            <div class="grid grid-cols-3 gap-3">
                                 <div class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-center">
                                     <div class="text-xs text-blue-600">Text</div>
                                     <div id="split-text-count" class="text-xl font-bold text-blue-800">-</div>
@@ -290,10 +290,6 @@
                                     <div class="text-xs text-orange-600">Table</div>
                                     <div id="split-table-count" class="text-xl font-bold text-orange-800">-</div>
                                 </div>
-                                <div class="bg-gray-50 border border-gray-200 rounded-lg p-3 text-center">
-                                    <div class="text-xs text-gray-600">Skipped</div>
-                                    <div id="split-skipped-count" class="text-xl font-bold text-gray-600">-</div>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -304,7 +300,8 @@
             <div class="bg-white rounded-lg shadow p-6 mb-8">
                 <h2 class="text-lg font-semibold text-gray-800 mb-4">Element-Level</h2>
                 <div class="text-sm text-gray-500 mb-4 pb-4 border-b">
-                    输入来源：Page_CMCV 抽样后的数据。请在上方选择数据源并完成抽样。
+                    数据源：<b>text.lance / formula.lance / table.lance</b>（由上方「pp-layout + 拆分到 Lance」生成）。
+                    先聚类，再按每桶抽样。
                     <span id="el-source-info" class="ml-2 text-gray-400"></span>
                 </div>
 
@@ -365,6 +362,48 @@
                     <!-- 空状态 -->
                     <div id="ec-empty" class="flex items-center justify-center h-48 text-gray-400 text-sm">
                         选择数据源和批次后点击"运行 Element-Type 聚类"
+                    </div>
+                </div>
+
+                <!-- Section: 每桶抽样（Per-Cluster Sampling） -->
+                <div class="border rounded-lg p-4 mb-6">
+                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">每桶抽样 (Per-Cluster Sampling)</h3>
+                    <div class="text-xs text-gray-500 mb-4">基于 Element-Type 聚类结果，从每个 cluster 中抽取指定数量的样本。</div>
+                    <div class="flex flex-wrap items-center gap-4 mb-4">
+                        <div class="flex items-center gap-2">
+                            <label class="text-xs text-gray-500">每桶抽样数</label>
+                            <input id="ecs-per-cluster" type="number" value="5" min="1" max="100" class="w-16 px-2 py-1 border border-gray-300 rounded text-sm">
+                        </div>
+                        <button id="btn-run-ecs" class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium text-sm hidden">运行每桶抽样</button>
+                    </div>
+                    <!-- 进度 -->
+                    <div id="ecs-progress" class="hidden mb-4">
+                        <div class="flex items-center gap-3">
+                            <div class="animate-spin h-5 w-5 border-2 border-indigo-600 border-t-transparent rounded-full"></div>
+                            <span id="ecs-progress-msg" class="text-sm text-gray-600">...</span>
+                        </div>
+                    </div>
+                    <!-- 结果 -->
+                    <div id="ecs-results" class="hidden">
+                        <div class="grid grid-cols-3 gap-3 mb-4">
+                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-center">
+                                <div class="text-xs text-blue-600">Text 采样</div>
+                                <div id="ecs-text-count" class="text-xl font-bold text-blue-800">-</div>
+                            </div>
+                            <div class="bg-purple-50 border border-purple-200 rounded-lg p-3 text-center">
+                                <div class="text-xs text-purple-600">Formula 采样</div>
+                                <div id="ecs-formula-count" class="text-xl font-bold text-purple-800">-</div>
+                            </div>
+                            <div class="bg-orange-50 border border-orange-200 rounded-lg p-3 text-center">
+                                <div class="text-xs text-orange-600">Table 采样</div>
+                                <div id="ecs-table-count" class="text-xl font-bold text-orange-800">-</div>
+                            </div>
+                        </div>
+                        <div id="ecs-detail" class="text-xs text-gray-500"></div>
+                    </div>
+                    <!-- 空状态 -->
+                    <div id="ecs-empty" class="flex items-center justify-center h-24 text-gray-400 text-sm">
+                        请先完成 Element-Type 聚类
                     </div>
                 </div>
             </div>
@@ -609,6 +648,9 @@
                 renderBucketResults(merged);
                 document.getElementById('btn-run-layout').classList.remove('hidden');
                 updateOcrBatchSelect();
+
+                // 恢复 pp-layout + 拆分的 category-stats 卡片
+                restoreSplitStats(merged.batch_info || []);
             });
         }
 
@@ -2009,6 +2051,34 @@
             return fmtTime(remaining / speed);
         }
 
+        // 页面加载时恢复 pp-layout + 拆分的 category-stats 卡片
+        function restoreSplitStats(batchInfo) {
+            if (!batchInfo.length) return;
+            const statsPromises = batchInfo.map(b =>
+                fetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
+                    .then(r => r.json())
+                    .catch(() => null)
+            );
+            Promise.all(statsPromises).then(results => {
+                let totalText = 0, totalFormula = 0, totalTable = 0;
+                results.forEach(sr => {
+                    if (sr && sr.categories) {
+                        totalText += sr.categories.text?.count || 0;
+                        totalFormula += sr.categories.formula?.count || 0;
+                        totalTable += sr.categories.table?.count || 0;
+                    }
+                });
+                if (totalText + totalFormula + totalTable > 0) {
+                    document.getElementById('split-results').classList.remove('hidden');
+                    document.getElementById('split-text-count').textContent = totalText.toLocaleString();
+                    document.getElementById('split-formula-count').textContent = totalFormula.toLocaleString();
+                    document.getElementById('split-table-count').textContent = totalTable.toLocaleString();
+                    document.getElementById('split-status').innerHTML =
+                        `<span class="text-green-600 font-medium">上次拆分结果已恢复</span>`;
+                }
+            });
+        }
+
         document.getElementById('btn-split-categories').addEventListener('click', function() {
             if (!bucketSampleData) { alert('请先完成抽样（常规抽样或按难度抽样）'); return; }
             const btn = this;
@@ -2132,23 +2202,25 @@
                             const msg = t.error_message ? `失败: ${t.error_message}` : (t.message || '处理中');
                             const isRunning = t.status === 'running' || t.status === 'pending';
                             const taskElapsed = t.elapsed_seconds ? fmtTime(t.elapsed_seconds) : '';
-                            // 单任务 ETA
                             let taskEta = '';
                             if (isRunning && t.current > 0 && t.total > 0 && t.elapsed_seconds > 2) {
                                 const tRemain = t.elapsed_seconds * (t.total - t.current) / t.current;
                                 taskEta = fmtTime(tRemain);
                             }
                             const timeStr = t.status === 'completed' ? `耗时 ${taskElapsed}` : (isRunning && taskElapsed ? `已运行 ${taskElapsed}${taskEta ? ' · 剩余 ' + taskEta : ''}` : '');
-                            html += `<div class="flex items-center gap-3 text-sm py-1.5">
-                                <span class="px-2 py-0.5 rounded bg-${c}-100 text-${c}-800 font-medium text-xs">${t.status}</span>
-                                <span class="text-gray-800 font-medium min-w-[120px]">${label}</span>
-                                <div class="flex-1 bg-gray-200 rounded-full h-3 relative overflow-hidden">
+                            const stopBtn = isRunning
+                                ? `<button onclick="stopLayoutTask('${t.source_id}','${t.batch_id}')" class="px-2 py-0.5 text-xs rounded bg-red-100 text-red-700 hover:bg-red-200 font-medium whitespace-nowrap">⏸ 停止</button>`
+                                : `<span class="w-[60px] inline-block"></span>`;
+                            html += `<div class="grid items-center gap-3 text-sm py-1.5" style="grid-template-columns: 70px minmax(120px,auto) 1fr minmax(0,250px) 130px auto;">
+                                <span class="px-2 py-0.5 rounded bg-${c}-100 text-${c}-800 font-medium text-xs text-center">${t.status}</span>
+                                <span class="text-gray-800 font-medium truncate">${label}</span>
+                                <div class="bg-gray-200 rounded-full h-3 relative overflow-hidden">
                                     <div class="bg-${c}-500 h-3 rounded-full" style="width:${pct}%"></div>
                                     <span class="absolute inset-0 flex items-center justify-center text-[10px] font-bold ${pct > 50 ? 'text-white' : 'text-gray-600'}">${pct}%</span>
                                 </div>
-                                <span class="text-gray-600 truncate max-w-[300px]">${msg}</span>
-                                <span class="text-gray-400 text-xs whitespace-nowrap min-w-[120px]">${timeStr}</span>
-                                ${isRunning ? `<button onclick="stopLayoutTask('${t.source_id}','${t.batch_id}')" class="px-2 py-0.5 text-xs rounded bg-red-100 text-red-700 hover:bg-red-200 font-medium">⏸ 停止</button>` : ''}
+                                <span class="text-gray-600 truncate">${msg}</span>
+                                <span class="text-gray-400 text-xs whitespace-nowrap">${timeStr}</span>
+                                ${stopBtn}
                             </div>`;
                         });
                         status.innerHTML = html;
@@ -2160,7 +2232,7 @@
                                 .catch(() => null)
                         );
                         Promise.all(statsPromises).then(statsResults => {
-                            const aggStats = {text: 0, formula: 0, table: 0, skipped: 0};
+                            const aggStats = {text: 0, formula: 0, table: 0};
                             statsResults.forEach(sr => {
                                 if (sr && sr.categories) {
                                     aggStats.text += sr.categories.text?.count || 0;
@@ -2172,7 +2244,6 @@
                             document.getElementById('split-text-count').textContent = aggStats.text.toLocaleString();
                             document.getElementById('split-formula-count').textContent = aggStats.formula.toLocaleString();
                             document.getElementById('split-table-count').textContent = aggStats.table.toLocaleString();
-                            document.getElementById('split-skipped-count').textContent = aggStats.skipped.toLocaleString();
                         });
 
                         if (allDone) {
@@ -2278,11 +2349,34 @@
             const sourceId = selSource.value;
             const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
 
-            // 更新 source info
-            const totalSamples = filtered.reduce((s,b)=>s+b.sample_count, 0);
+            // 更新 source info — 异步获取 lance block 统计
             document.getElementById('el-source-info').textContent = sourceId
-                ? `当前数据源: ${sourceId} — ${filtered.length} 个批次 | 共 ${totalSamples.toLocaleString()} 样本`
-                : `全部 ${filtered.length} 个批次 | 共 ${totalSamples.toLocaleString()} 样本`;
+                ? `当前数据源: ${sourceId} — ${filtered.length} 个批次（加载 block 统计中...）`
+                : `全部 ${filtered.length} 个批次（加载 block 统计中...）`;
+
+            // 获取每个批次的 category-stats 汇总
+            const statsPromises = filtered.map(b =>
+                fetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
+                    .then(r => r.json())
+                    .catch(() => null)
+            );
+            Promise.all(statsPromises).then(results => {
+                let totalText = 0, totalFormula = 0, totalTable = 0;
+                results.forEach(sr => {
+                    if (sr && sr.categories) {
+                        totalText += sr.categories.text?.count || 0;
+                        totalFormula += sr.categories.formula?.count || 0;
+                        totalTable += sr.categories.table?.count || 0;
+                    }
+                });
+                const total = totalText + totalFormula + totalTable;
+                const info = total > 0
+                    ? `${filtered.length} 个批次 | ${total.toLocaleString()} blocks (text:${totalText.toLocaleString()} formula:${totalFormula.toLocaleString()} table:${totalTable.toLocaleString()})`
+                    : `${filtered.length} 个批次 | 尚无 text/formula/table.lance（请先运行 pp-layout + 拆分）`;
+                document.getElementById('el-source-info').textContent = sourceId
+                    ? `当前数据源: ${sourceId} — ${info}`
+                    : info;
+            });
 
             if (filtered.length === 0) {
                 container.innerHTML = '<div class="text-gray-400 text-xs">无可用批次</div>';
@@ -2334,7 +2428,6 @@
             if (ecSelectedBatches.size === 0) { alert('请选择批次'); return; }
             const btn = this;
             const maxK = parseInt(document.getElementById('ec-max-k').value) || 10;
-            // Parse keys: "source_id/batch_id"
             const batches = [...ecSelectedBatches].map(key => {
                 const [src, bid] = key.split('/');
                 return {source_id: src, batch_id: bid};
@@ -2342,42 +2435,67 @@
             
             btn.disabled = true;
             btn.textContent = '运行中...';
-            document.getElementById('ec-progress').classList.remove('hidden');
+            const progressDiv = document.getElementById('ec-progress');
+            const progressMsg = document.getElementById('ec-progress-msg');
+            progressDiv.classList.remove('hidden');
             document.getElementById('ec-empty').classList.add('hidden');
             document.getElementById('ec-results').classList.add('hidden');
 
             const total = batches.length;
+            let _ecErrors = [];
 
             function runBatch(idx) {
                 if (idx >= batches.length) {
                     btn.disabled = false;
                     btn.textContent = '运行 Element-Type 聚类';
-                    document.getElementById('ec-progress').classList.add('hidden');
-                    loadEcResults(batches[0].source_id, batches[0].batch_id);  // 加载第一个批次的结果
+                    progressDiv.classList.add('hidden');
+                    if (_ecErrors.length > 0) {
+                        document.getElementById('ec-empty').classList.remove('hidden');
+                        document.getElementById('ec-empty').innerHTML =
+                            `<span class="text-red-600">${_ecErrors.join('<br>')}</span>`;
+                    }
+                    loadEcResults(batches[0].source_id, batches[0].batch_id);
                     return;
                 }
                 const b = batches[idx];
-                document.getElementById('ec-progress-msg').textContent = `聚类 ${b.batch_id} (${idx+1}/${total})...`;
+                progressMsg.innerHTML = `<b>聚类 ${b.batch_id}</b> (${idx+1}/${total}) — 启动中...`;
                 
                 fetch(`/api/element-clusters/${b.source_id}/${b.batch_id}`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({max_k: maxK})
-                }).then(r => r.json()).then(data => {
-                    pollEcStatus(b.source_id, b.batch_id, () => runBatch(idx + 1));
+                }).then(r => {
+                    if (!r.ok) return r.json().then(d => { throw new Error(d.detail || '启动失败'); });
+                    return r.json();
+                }).then(data => {
+                    pollEcStatus(b.source_id, b.batch_id, idx, total, (err) => {
+                        if (err) _ecErrors.push(`${b.batch_id}: ${err}`);
+                        runBatch(idx + 1);
+                    });
                 }).catch(e => {
                     console.error('Element-Type 聚类失败:', e);
+                    _ecErrors.push(`${b.batch_id}: ${e.message}`);
                     runBatch(idx + 1);
                 });
             }
 
-            function pollEcStatus(src, bid, onDone) {
+            function pollEcStatus(src, bid, batchIdx, batchTotal, onDone) {
                 const check = () => {
                     fetch(`/api/element-clusters/${src}/${bid}`).then(r => r.json()).then(data => {
-                        if (data.status === 'completed' || data.status === 'failed' || data.status === 'not_started') {
-                            onDone();
+                        if (data.status === 'completed') {
+                            progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — <span class="text-green-600">完成</span>`;
+                            onDone(null);
+                        } else if (data.status === 'failed') {
+                            progressMsg.innerHTML = `<b>${bid}</b> — <span class="text-red-600">失败: ${data.message || '未知错误'}</span>`;
+                            onDone(data.message || '聚类失败');
+                        } else if (data.status === 'stopped') {
+                            progressMsg.innerHTML = `<b>${bid}</b> — <span class="text-orange-600">已停止</span>`;
+                            onDone('已停止');
                         } else {
-                            document.getElementById('ec-progress-msg').textContent = data.message || '处理中...';
+                            // running / pending — show detailed progress
+                            const prog = data.progress || {};
+                            const pct = prog.total > 0 ? ((prog.current / prog.total * 100).toFixed(0)) : 0;
+                            progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — ${data.message || '处理中'} <span class="text-gray-400">${pct}%</span>`;
                             setTimeout(check, 2000);
                         }
                     }).catch(() => setTimeout(check, 3000));
@@ -2390,6 +2508,11 @@
 
         function loadEcResults(src, bid) {
             fetch(`/api/element-clusters/${src}/${bid}`).then(r => r.json()).then(data => {
+                if (data.status === 'failed') {
+                    document.getElementById('ec-empty').classList.remove('hidden');
+                    document.getElementById('ec-empty').innerHTML = `<span class="text-red-600">聚类失败: ${data.message || '未知错误'}</span>`;
+                    return;
+                }
                 if (data.status !== 'completed' || !data.result) {
                     document.getElementById('ec-empty').classList.remove('hidden');
                     document.getElementById('ec-empty').textContent = data.status === 'not_started' ? '未运行聚类' : '加载失败';
@@ -2422,8 +2545,75 @@
                         clustersEl.innerHTML = '';
                     }
                 });
+
+                // 聚类完成 → 启用每桶抽样按钮
+                _ecsBatch = {source_id: src, batch_id: bid};
+                document.getElementById('btn-run-ecs').classList.remove('hidden');
+                document.getElementById('ecs-empty').classList.remove('hidden');
+                document.getElementById('ecs-results').classList.add('hidden');
             });
         }
+
+        // ── 每桶抽样 ──────────────────────────────────────────────────────
+        let _ecsBatch = null;  // {source_id, batch_id} 由聚类完成后设置
+
+        document.getElementById('btn-run-ecs').addEventListener('click', function() {
+            if (!_ecsBatch) { alert('请先完成 Element-Type 聚类'); return; }
+            const btn = this;
+            const perCluster = parseInt(document.getElementById('ecs-per-cluster').value) || 5;
+            const progress = document.getElementById('ecs-progress');
+            const progressMsg = document.getElementById('ecs-progress-msg');
+
+            btn.disabled = true;
+            btn.textContent = '抽样中...';
+            progress.classList.remove('hidden');
+            progressMsg.textContent = `每桶抽样 ${perCluster} 条/簇...`;
+            document.getElementById('ecs-results').classList.add('hidden');
+            document.getElementById('ecs-empty').classList.add('hidden');
+
+            fetch(`/api/element-sample/${_ecsBatch.source_id}/${_ecsBatch.batch_id}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({per_cluster: perCluster}),
+            })
+            .then(r => r.json())
+            .then(data => {
+                progress.classList.add('hidden');
+                btn.disabled = false;
+                btn.textContent = '运行每桶抽样';
+
+                if (data.detail) {
+                    document.getElementById('ecs-empty').classList.remove('hidden');
+                    document.getElementById('ecs-empty').textContent = data.detail;
+                    return;
+                }
+
+                document.getElementById('ecs-results').classList.remove('hidden');
+                const s = data.summary || {};
+                document.getElementById('ecs-text-count').textContent = (s.text?.sampled || 0).toLocaleString();
+                document.getElementById('ecs-formula-count').textContent = (s.formula?.sampled || 0).toLocaleString();
+                document.getElementById('ecs-table-count').textContent = (s.table?.sampled || 0).toLocaleString();
+
+                // 详细每桶信息
+                let detailHtml = '';
+                for (const cat of ['text', 'formula', 'table']) {
+                    const details = s[cat]?.details || [];
+                    if (details.length > 0) {
+                        detailHtml += `<div class="mb-2"><b class="text-gray-700">${cat}</b>: `;
+                        detailHtml += details.map(d => `Cluster${d.cluster_id}: ${d.sampled}/${d.total}`).join(', ');
+                        detailHtml += `</div>`;
+                    }
+                }
+                document.getElementById('ecs-detail').innerHTML = detailHtml;
+            })
+            .catch(e => {
+                progress.classList.add('hidden');
+                btn.disabled = false;
+                btn.textContent = '运行每桶抽样';
+                document.getElementById('ecs-empty').classList.remove('hidden');
+                document.getElementById('ecs-empty').textContent = `抽样失败: ${e.message}`;
+            });
+        });
 
         // 初始化
         renderEcBatchSelect();

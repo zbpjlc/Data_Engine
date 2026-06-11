@@ -1,4 +1,4 @@
-"""从 text/formula/table.lance 读取 block 裁剪图，用 SigLIP2(ViT) 提取特征向量，按类型独立做 KMeans 聚类。"""
+"""从 text/formula/table.lance 读取 block 裁剪图，用 ViT 提取特征向量，按类型独立做 MiniBatchKMeans 聚类。"""
 from __future__ import annotations
 
 import json
@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from data_engine.clustering import KMeansClusterer, find_optimal_clusters
+from data_engine.config import get_config
 from data_engine.embedding import CLIPEmbeddingExtractor, _coerce_image_bytes
 
 logger = logging.getLogger(__name__)
@@ -47,17 +48,26 @@ def _bbox_stats(row: dict) -> dict[str, float]:
 
 # ─── Lance 读取 ─────────────────────────────────────────────────────────────
 
-def _read_lance_rows(lance_path: Path) -> list[dict]:
-    """读取 lance 文件全部行。"""
+# 聚类扫描需要的列（含 image_data，裁剪图已随 layout 拆分保存到 text/formula/table.lance）
+_SCAN_COLUMNS = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence", "embedding", "image_data"]
+
+def _read_lance_rows(lance_path: Path, columns: list[str] | None = None) -> list[dict]:
+    """读取 lance 文件行。默认只读取轻量列（不含 image_data）。"""
     import lance
     if not lance_path.exists():
         return []
     try:
         ds = lance.dataset(str(lance_path))
-        return ds.to_table().to_pylist()
+        # 过滤掉 schema 中不存在的列
+        if columns:
+            available = set(ds.schema.names)
+            columns = [c for c in columns if c in available]
+        table = ds.to_table(columns=columns) if columns else ds.to_table()
+        return table.to_pylist()
     except Exception as e:
         logger.warning("[layout_features] 读取 %s 失败: %s", lance_path, e)
         return []
+
 
 
 # ─── 聚类 ─────────────────────────────────────────────────────────────────────
@@ -69,14 +79,16 @@ def cluster_by_type(
     max_k: int = 10,
     progress_callback=None,
 ) -> dict:
-    """读取 {cat}.lance，用 SigLIP2 提取每个 block 的 embedding，KMeans 聚类。
+    """读取 {cat}.lance，用 ViT 提取/复用每个 block 的 embedding，MiniBatchKMeans 聚类。
 
-    Args:
-        manifests_dir: manifests 目录
-        cat: text / formula / table
-        extractor: SigLIP2 embedding 提取器
-        max_k: 最大聚类数
-        progress_callback: (current, total, message) 回调
+    Embedding 缓存策略：
+    - 读取 lance 中已有的 embedding 列
+    - 仅为缺失 embedding 的 block 生成新向量
+    - 生成后写回 lance（原地更新 embedding 列）
+
+    聚类策略（与 Page-Level 一致）：
+    - find_optimal_clusters 自动选最优 K
+    - KMeansClusterer (MiniBatchKMeans) 执行聚类
 
     Returns:
         {
@@ -88,16 +100,18 @@ def cluster_by_type(
         }
     """
     lance_path = manifests_dir / f"{cat}.lance"
-    rows = _read_lance_rows(lance_path)
+    rows = _read_lance_rows(lance_path, columns=_SCAN_COLUMNS)
     if not rows:
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": 0, "clusters": {}, "labels": {}}
 
     total = len(rows)
+    has_embedding_col = "embedding" in (rows[0] if rows else {})
 
-    # 1. 提取 embedding
+    # 1. 读取已有 embedding，仅为缺失的生成新向量
     keys: list[str] = []
     embeddings: list[list[float] | None] = []
     bbox_info: list[dict] = []
+    need_generate: list[int] = []
 
     for idx, row in enumerate(rows):
         sid = row.get("sample_id", "")
@@ -105,47 +119,91 @@ def cluster_by_type(
         keys.append(f"{sid}:{bidx}")
         bbox_info.append(_bbox_stats(row))
 
-        img_data = row.get("image_data")
-        emb = None
-        if img_data:
-            img_bytes = _coerce_image_bytes(img_data)
-            if img_bytes:
-                try:
-                    emb = extractor.extract_embedding_from_bytes(img_bytes)
-                except Exception as e:
-                    logger.warning("[layout_features] %s embedding 失败 %s:%s: %s", cat, sid, bidx, e)
+        existing_emb = row.get("embedding") if has_embedding_col else None
+        if existing_emb and len(existing_emb) > 0:
+            embeddings.append(list(existing_emb))
+        else:
+            embeddings.append(None)
+            need_generate.append(idx)
 
-        embeddings.append(emb)
+        if progress_callback and (idx + 1) % 200 == 0:
+            progress_callback(idx + 1, total, f"{cat} 扫描 {idx + 1}/{total}")
 
-        if progress_callback and (idx + 1) % 50 == 0 or idx == total - 1:
-            progress_callback(idx + 1, total, f"{cat} embedding {idx + 1}/{total}")
+    # 2. 为缺失 embedding 的 block 生成（直接从 block 自身的 image_data 读取裁剪图）
+    generated_count = 0
+    if need_generate:
+        logger.info("[layout_features] %s: %d/%d blocks need embedding generation", cat, len(need_generate), total)
 
-    # 2. 过滤有效 embedding
-    valid_indices = [i for i, emb in enumerate(embeddings) if emb is not None and len(emb) > 0]
-    if len(valid_indices) < 2:
+        # 分批处理，避免一次性加载过多图片
+        chunk_size = 200
+        processed_count = 0  # 已处理数（含跳过无图片的 block）
+        for chunk_start in range(0, len(need_generate), chunk_size):
+            chunk_indices = need_generate[chunk_start:chunk_start + chunk_size]
+
+            # 收集本批有效图片
+            crop_items: list[tuple[int, bytes]] = []  # (row_idx, image_bytes)
+            for row_idx in chunk_indices:
+                row = rows[row_idx]
+                img_data = row.get("image_data")
+                if img_data:
+                    img_bytes = _coerce_image_bytes(img_data)
+                    if img_bytes:
+                        crop_items.append((row_idx, img_bytes))
+
+            # 批量 ViT 推理
+            if crop_items:
+                image_list = [item[1] for item in crop_items]
+                vit_batch = get_config("clustering", "vit_batch_size", default=32)
+                emb_results = extractor.extract_embeddings_from_bytes_batch(image_list, batch_size=vit_batch)
+
+                for (row_idx, _), emb in zip(crop_items, emb_results):
+                    embeddings[row_idx] = emb
+                    generated_count += 1
+
+            processed_count += len(chunk_indices)
+            if progress_callback:
+                skipped = processed_count - generated_count
+                skip_hint = f" (跳过 {skipped} 无图)" if skipped > 0 else ""
+                progress_callback(
+                    processed_count, len(need_generate),
+                    f"{cat} embedding {generated_count}/{len(need_generate)}{skip_hint}"
+                )
+
+        # 3. 写回 lance（更新 embedding 列）
+        if generated_count > 0:
+            _write_embeddings_back(lance_path, rows, keys, embeddings)
+            logger.info("[layout_features] %s: wrote %d embeddings back to lance", cat, generated_count)
+    else:
+        logger.info("[layout_features] %s: all %d embeddings cached, skip generation", cat, total)
+        if progress_callback:
+            progress_callback(total, total, f"{cat} embedding 全部已缓存 ({total})")
+
+    # 4. 过滤有效 embedding
+    valid_embeddings = [emb for emb in embeddings if emb and len(emb) > 0]
+    if len(valid_embeddings) < 2:
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": total, "clusters": {}, "labels": {}}
 
-    X = np.array([embeddings[i] for i in valid_indices])
+    # 5. MiniBatchKMeans 聚类（与 Page-Level 相同：find_optimal_clusters + KMeansClusterer）
+    optimal_k = find_optimal_clusters(valid_embeddings, max_clusters=min(max_k, len(valid_embeddings)))
+    if progress_callback:
+        progress_callback(0, 1, f"{cat} 聚类 K={optimal_k}...")
 
-    # 3. KMeans 聚类
-    optimal_k = find_optimal_clusters(X.tolist(), max_k=min(max_k, len(valid_indices)))
     clusterer = KMeansClusterer(n_clusters=optimal_k)
-    labels_array = clusterer.fit_predict(X.tolist())
+    labels_full = clusterer.fit_predict(embeddings)  # -1 for invalid embeddings
     stats = clusterer.get_cluster_stats()
 
-    # 4. 构建 cluster 统计（bbox 均值）
+    # 6. 构建 cluster 统计（bbox 均值）
     clusters_info: dict[str, dict] = {}
     label_to_idx: dict[int, list[int]] = {}
-    for i, lbl in enumerate(labels_array):
+    for i, lbl in enumerate(labels_full):
         if lbl < 0:
             continue
         label_to_idx.setdefault(lbl, []).append(i)
 
     for lbl, indices in label_to_idx.items():
-        # 聚合 bbox 统计
         bbox_means: dict[str, float] = {}
         for key in _BASE_FEATURE_NAMES:
-            vals = [bbox_info[valid_indices[i]][key] for i in indices if key in bbox_info[valid_indices[i]]]
+            vals = [bbox_info[idx][key] for idx in indices if key in bbox_info[idx]]
             bbox_means[key] = round(sum(vals) / max(len(vals), 1), 2)
 
         clusters_info[str(lbl)] = {
@@ -153,14 +211,13 @@ def cluster_by_type(
             "bbox_mean": bbox_means,
         }
 
-    # 5. 构建 labels 映射
+    # 7. 构建 labels 映射
     labels_map: dict[str, int] = {}
-    for i, lbl in enumerate(labels_array):
+    for i, lbl in enumerate(labels_full):
         if lbl >= 0:
-            labels_map[keys[valid_indices[i]]] = int(lbl)
+            labels_map[keys[i]] = int(lbl)
 
     # 清理显存
-    del X
     import torch
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -174,6 +231,44 @@ def cluster_by_type(
     }
 
 
+def _write_embeddings_back(lance_path: Path, rows: list[dict], keys: list[str], embeddings: list):
+    """将生成的 embedding 写回 lance 文件（更新 embedding 列）。"""
+    import lance
+    import pyarrow as pa
+
+    try:
+        ds = lance.dataset(str(lance_path))
+        # 构建 key -> embedding 映射
+        emb_map: dict[str, list[float]] = {}
+        for key, emb in zip(keys, embeddings):
+            if emb is not None:
+                emb_map[key] = emb
+
+        # 读取全部数据，更新 embedding 列，重写
+        table = ds.to_table()
+        sids = table.column("sample_id").to_pylist()
+        bidxs = table.column("block_idx").to_pylist()
+
+        new_embeddings = []
+        for sid, bidx in zip(sids, bidxs):
+            key = f"{sid}:{bidx}"
+            emb = emb_map.get(key)
+            new_embeddings.append(emb)
+
+        # 用新 embedding 列替换或添加
+        new_col = pa.array(new_embeddings, type=pa.large_list(pa.float32()))
+        try:
+            col_idx = table.schema.get_field_index("embedding")
+            table = table.set_column(col_idx, "embedding", new_col)
+        except (KeyError, ValueError):
+            # embedding 列不存在（旧 lance），添加新列
+            table = table.append_column("embedding", new_col)
+
+        lance.write_dataset(table, str(lance_path), mode="overwrite")
+    except Exception as e:
+        logger.warning("[layout_features] write embeddings back failed: %s", e)
+
+
 # ─── 全类型聚类入口 ──────────────────────────────────────────────────────────
 
 def cluster_all_types(
@@ -181,21 +276,57 @@ def cluster_all_types(
     max_k: int = 10,
     progress_callback=None,
 ) -> dict:
-    """对 text / formula / table 分别做 SigLIP2 embedding + KMeans 聚类。
+    """对 text / formula / table 分别做 ViT embedding + MiniBatchKMeans 聚类。
 
     Returns:
         {"text": {...}, "formula": {...}, "table": {...}}
     """
+    import lance as _lance
+
     extractor = CLIPEmbeddingExtractor()
 
-    result: dict[str, dict] = {}
+    # 预先统计所有类型的总 block 数（用于固定进度 total）
+    cat_totals: dict[str, int] = {}
+    grand_total = 0
     for cat in ("text", "formula", "table"):
+        lp = manifests_dir / f"{cat}.lance"
+        if lp.exists():
+            try:
+                n = _lance.dataset(str(lp)).count_rows()
+                cat_totals[cat] = n
+                grand_total += n
+            except Exception:
+                cat_totals[cat] = 0
+        else:
+            cat_totals[cat] = 0
 
-        def _cb(cur, tot, msg):
+    if grand_total == 0:
+        grand_total = 1  # avoid division by zero
+
+    result: dict[str, dict] = {}
+    completed = 0  # 已完成的 block 数（跨类别累计）
+
+    for cat in ("text", "formula", "table"):
+        cat_total = cat_totals.get(cat, 0)
+
+        def _cb(cur, tot, msg, _completed=completed, _grand=grand_total, _cat_total=cat_total):
+            """进度回调：将每个类别的局部进度映射到全局 [0, grand_total] 区间。
+
+            局部进度范围：
+            - 扫描阶段: cur ∈ [0, total], tot = total
+            - embedding 阶段: cur ∈ [0, need_generate], tot = need_generate
+            统一映射: global_cur = _completed + cur / tot * _cat_total
+            """
             if progress_callback:
-                progress_callback(cur, tot, f"[{cat}] {msg}")
+                if tot > 0:
+                    mapped = int(cur / tot * _cat_total)
+                else:
+                    mapped = 0
+                global_cur = min(_completed + mapped, _grand)
+                progress_callback(global_cur, _grand, f"[{cat}] {msg}")
 
         result[cat] = cluster_by_type(manifests_dir, cat, extractor, max_k=max_k, progress_callback=_cb)
+        completed += cat_total
         logger.info(
             "[layout_features] %s: %d blocks -> %d clusters (silhouette=%.3f)",
             cat, result[cat]["total_blocks"], result[cat]["n_clusters"], result[cat]["silhouette"],

@@ -2516,6 +2516,7 @@ def _write_layout_to_category_lances(
     flush_size: int = 10_000,
     progress_callback=None,
     write_mode: str = "overwrite",
+    image_map: dict[str, bytes] | None = None,
 ) -> dict[str, int]:
     """将 layout 结果按 block_type 分块写入 text.lance / formula.lance / table.lance
 
@@ -2525,6 +2526,7 @@ def _write_layout_to_category_lances(
         flush_size: 每处理多少个样本 flush 一次（默认 10000）
         progress_callback: 可选回调 callback(current, total, message)
         write_mode: 初始写入模式 ("overwrite" 或 "append")
+        image_map: 可选，sample_id -> 原始图片字节；提供时将裁剪每个 block 区域并写入 image_data
     """
     import pyarrow as pa
     from datetime import datetime, timezone
@@ -2539,31 +2541,63 @@ def _write_layout_to_category_lances(
     now = datetime.now(timezone.utc).isoformat()
     total = len(results)
 
+    # 预加载 PIL，仅当需要裁剪图片时
+    _PIL_Image = None
+    if image_map:
+        try:
+            from PIL import Image as _PIL_Image
+            import io as _io_mod
+        except ImportError:
+            _PIL_Image = None
+            image_map = None  # PIL 不可用，退化为不保存图片
+
+    def _crop_block_image(sid: str, bbox: list) -> bytes | None:
+        """从原始图片裁剪 block 区域，返回 JPEG 字节"""
+        if not image_map or _PIL_Image is None:
+            return None
+        raw = image_map.get(sid)
+        if not raw:
+            return None
+        try:
+            img = _PIL_Image.open(_io_mod.BytesIO(raw))
+            if isinstance(bbox, list) and len(bbox) >= 4:
+                x1, y1, x2, y2 = [int(c) for c in bbox]
+                cropped = img.crop((x1, y1, x2, y2))
+                buf = _io_mod.BytesIO()
+                cropped.save(buf, format="JPEG", quality=90)
+                return buf.getvalue()
+            return raw
+        except Exception:
+            return None
+
     def _classify_block(sid: str, idx: int, b: dict) -> tuple[str, dict] | None:
         bt = b.get("block_type", "text")
         if bt in SKIP_BLOCK_TYPES:
             return None
+        # 裁剪 block 图片（如 image_map 可用）
+        cropped_img = _crop_block_image(sid, b.get("bbox", []))
         row = {
             "sample_id": sid,
             "block_idx": idx,
             "block_type": bt,
             "bbox_json": json.dumps(b.get("bbox", [])),
             "layout_confidence": float(b.get("confidence", 0)),
+            "embedding": None,
             "schema_version": "v1",
             "created_at": now,
         }
         if bt in FORMULA_BLOCK_TYPES:
-            row.update({"image_data": None, "formula_latex": None,
+            row.update({"image_data": cropped_img, "formula_latex": None,
                         "formula_confidence": None, "source_model": None,
                         "consistency_pattern": None})
             return "formula", row
         elif bt in TABLE_BLOCK_TYPES:
-            row.update({"image_data": None, "table_html": None, "table_json": None,
+            row.update({"image_data": cropped_img, "table_html": None, "table_json": None,
                         "table_confidence": None, "source_model": None,
                         "consistency_pattern": None})
             return "table", row
         else:
-            row.update({"image_data": None, "text_content": None,
+            row.update({"image_data": cropped_img, "text_content": None,
                         "text_confidence": None, "source_model": None,
                         "consistency_pattern": None})
             return "text", row
@@ -2726,7 +2760,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     try:
                         with _lance_write_lock:
                             ds = lance.dataset(str(manifest_path))
-                            query_batch = 200
+                            query_batch = get_config("layout", "query_batch", default=200)
                             for qi in range(0, len(batch_ids), query_batch):
                                 if progress_tracker.is_stopped(task_id):
                                     break
@@ -2745,7 +2779,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                                 loaded_in_batch += len(chunk)
                                 progress_tracker.update_progress(
                                     task_id, current=done + loaded_in_batch,
-                                    message=f"加载图片 {done+1}-{done+loaded_in_batch}/{len(ids)}..."
+                                    message=f"加载图片 {done+1}-{done+loaded_in_batch}/{len(ids)}"
                                 )
                     except Exception as e:
                         print(f"[layout] 加载图片失败 batch {batch_start}: {e}", file=sys.stderr)
@@ -2774,7 +2808,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                             # 批量推理
                             progress_tracker.update_progress(
                                 task_id, current=done,
-                                message=f"layout 推理 {done+1}-{done+len(valid_sids)}/{len(ids)}..."
+                                message=f"layout 推理 {done+1}-{done+len(valid_sids)}/{len(ids)}"
                             )
                             try:
                                 all_blocks_list = layout.detect_layout_batch(tmp_paths)
@@ -2830,8 +2864,9 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                         try:
                             batch_write_stats = _write_layout_to_category_lances(
                                 batch_results, manifests_dir,
-                                flush_size=10_000,
+                                flush_size=get_config("layout", "flush_size", default=10_000),
                                 write_mode=lance_write_mode,
+                                image_map=image_map,
                             )
                             for k in layout_stats:
                                 layout_stats[k] += batch_write_stats.get(k, 0)
@@ -2849,7 +2884,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     n = layout_stats.get(cat, 0)
                     if n:
                         split_msg += f"{cat}: {n}, "
-                split_msg = split_msg.rstrip(", ") if split_msg else "无结果"
+                split_msg = split_msg.rstrip(", ")
             else:
                 split_msg = f"{len(all_results)} 样本"
 
@@ -2962,10 +2997,26 @@ async def start_element_clusters(source_id: str, batch_id: str, request: Request
             try:
                 from data_engine.ocr.layout_features import cluster_all_types
                 
-                progress_tracker.start_task(task_id, total=1, message="Element-Type 聚类启动...")
+                # 先统计总 block 数作为 total
+                total_blocks = 0
+                for cat in ("text", "formula", "table"):
+                    lp = manifests_dir / f"{cat}.lance"
+                    if lp.exists():
+                        try:
+                            import lance
+                            total_blocks += lance.dataset(str(lp)).count_rows()
+                        except Exception:
+                            pass
+                
+                progress_tracker.start_task(
+                    task_id, task_type="element_clusters",
+                    source_id=source_id, batch_id=batch_id,
+                    total=max(total_blocks, 1),
+                    message=f"Element-Type 聚类 {total_blocks} blocks..."
+                )
                 
                 def cb(cur, tot, msg):
-                    progress_tracker.update_progress(task_id, current=cur, message=msg)
+                    progress_tracker.update_progress(task_id, current=cur, total=tot, message=msg)
                 
                 result = cluster_all_types(manifests_dir, max_k=max_k, progress_callback=cb)
                 
@@ -3017,6 +3068,16 @@ async def get_element_clusters(source_id: str, batch_id: str):
                     "message": task_info.message,
                     "progress": {"current": task_info.current, "total": task_info.total},
                 }
+            if status == "failed":
+                return {
+                    "status": "failed",
+                    "message": task_info.message or task_info.error_message or "聚类失败",
+                }
+            if status == "stopped":
+                return {
+                    "status": "stopped",
+                    "message": task_info.message or "已停止",
+                }
         
         # 读取结果
         out_path = batch_dir / "artifacts" / "element_clusters.json"
@@ -3029,6 +3090,145 @@ async def get_element_clusters(source_id: str, batch_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── 每桶抽样 (Per-Cluster Sampling) ──────────────────────────────────────────
+
+@app.post("/api/element-sample/{source_id}/{batch_id}")
+async def element_sample(source_id: str, batch_id: str, request: Request):
+    """基于聚类结果，从每个 cluster 中随机抽取指定数量的样本。
+
+    读取 element_clusters.json 的 labels，再从 text/formula/table.lance 取对应行。
+    """
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        per_cluster: int = body.get("per_cluster", 5)
+
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        # 检查聚类结果
+        cluster_path = batch_dir / "artifacts" / "element_clusters.json"
+        if not cluster_path.exists():
+            raise HTTPException(status_code=400, detail="未找到聚类结果，请先运行 Element-Type 聚类")
+
+        cluster_data = json.loads(cluster_path.read_text(encoding="utf-8"))
+
+        import lance
+        import random
+
+        summary = {}
+        all_samples = []
+
+        for cat in ("text", "formula", "table"):
+            cat_info = cluster_data.get(cat, {})
+            labels_map = cat_info.get("labels", {})  # {"sample_id:block_idx": cluster_id}
+            if not labels_map:
+                summary[cat] = {"clusters": 0, "sampled": 0}
+                continue
+
+            # 按 cluster 分组
+            cluster_members: dict[int, list[str]] = {}
+            for key, lbl in labels_map.items():
+                cluster_members.setdefault(lbl, []).append(key)
+
+            # 读取 lance 数据
+            lance_path = manifests_dir / f"{cat}.lance"
+            if not lance_path.exists():
+                summary[cat] = {"clusters": len(cluster_members), "sampled": 0}
+                continue
+
+            try:
+                ds = lance.dataset(str(lance_path))
+                all_rows = ds.to_table().to_pylist()
+            except Exception:
+                summary[cat] = {"clusters": len(cluster_members), "sampled": 0}
+                continue
+
+            # 构建 key -> row 映射
+            row_map: dict[str, dict] = {}
+            for row in all_rows:
+                key = f"{row.get('sample_id', '')}:{row.get('block_idx', 0)}"
+                row_map[key] = row
+
+            # 每桶抽样
+            cat_sampled = 0
+            cluster_details = []
+            for cid, members in sorted(cluster_members.items()):
+                available = [m for m in members if m in row_map]
+                n = min(per_cluster, len(available))
+                sampled_keys = random.sample(available, n) if n > 0 else []
+                for k in sampled_keys:
+                    all_samples.append({
+                        "category": cat,
+                        "cluster_id": cid,
+                        **row_map[k],
+                    })
+                cat_sampled += len(sampled_keys)
+                cluster_details.append({"cluster_id": cid, "total": len(available), "sampled": len(sampled_keys)})
+
+            summary[cat] = {
+                "clusters": len(cluster_members),
+                "sampled": cat_sampled,
+                "details": cluster_details,
+            }
+
+        # 保存抽样结果
+        out_path = batch_dir / "artifacts" / "element_samples.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps({
+            "per_cluster": per_cluster,
+            "summary": summary,
+            "samples": all_samples,
+        }, ensure_ascii=False, default=str), encoding="utf-8")
+
+        total_sampled = sum(s.get("sampled", 0) for s in summary.values())
+        return {
+            "message": f"抽样完成: {total_sampled} 条",
+            "per_cluster": per_cluster,
+            "summary": summary,
+            "total_sampled": total_sampled,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import os
+    import signal
+    import uvicorn
+
+    PID_FILE = Path("/tmp/data_engine_web_app.pid")
+
+    def _check_and_kill_old():
+        if not PID_FILE.exists():
+            return
+        try:
+            old_pid = int(PID_FILE.read_text().strip())
+            if old_pid == os.getpid():
+                return
+            os.kill(old_pid, 0)  # 检查进程是否存在
+            print(f"[web_app] 发现旧进程 pid={old_pid}，正在终止...", file=sys.stderr)
+            os.kill(old_pid, signal.SIGTERM)
+            import time
+            time.sleep(1)
+            try:
+                os.kill(old_pid, signal.SIGKILL)
+            except OSError:
+                pass
+        except (OSError, ValueError, ProcessLookupError):
+            pass
+
+    _check_and_kill_old()
+    PID_FILE.write_text(str(os.getpid()))
+
+    import atexit
+    atexit.register(lambda: PID_FILE.unlink(missing_ok=True))
+
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 if __name__ == "__main__":
     import os
     import signal

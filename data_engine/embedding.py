@@ -103,6 +103,56 @@ class CLIPEmbeddingExtractor:
                 print(f"提取embedding失败 {image_path}: {e}", file=sys.stderr)
         return embeddings
 
+    def extract_embeddings_from_bytes_batch(self, image_bytes_list: list[bytes], batch_size: int = 32) -> list[list[float] | None]:
+        """批量从二进制数据提取图像embedding（GPU 并行推理，比单张快 10-30x）
+
+        Args:
+            image_bytes_list: 图片 bytes 列表
+            batch_size: GPU 推理批大小（默认 32）
+
+        Returns:
+            embedding 列表，失败的为 None
+        """
+        if not image_bytes_list:
+            return []
+
+        results: list[list[float] | None] = [None] * len(image_bytes_list)
+
+        for start in range(0, len(image_bytes_list), batch_size):
+            end = min(start + batch_size, len(image_bytes_list))
+            images = []
+            valid_indices = []
+
+            for i in range(start, end):
+                try:
+                    img = Image.open(io.BytesIO(image_bytes_list[i])).convert("RGB")
+                    images.append(img)
+                    valid_indices.append(i)
+                except Exception:
+                    pass
+
+            if not images:
+                continue
+
+            try:
+                inputs = self.processor(images=images, return_tensors="pt").to(self.device)
+                with torch.inference_mode():
+                    outputs = self.model.get_image_features(**inputs)
+                embeddings = outputs.cpu().numpy()
+
+                for j, idx in enumerate(valid_indices):
+                    results[idx] = embeddings[j].flatten().tolist()
+
+                del inputs, outputs, embeddings
+            except Exception as e:
+                print(f"[Embedding] batch inference failed: {e}", file=sys.stderr)
+            finally:
+                for img in images:
+                    img.close()
+
+        gc.collect()
+        return results
+
 
 def _ensure_pure_list(embedding: Any) -> list[float] | None:
     """确保 embedding 是纯 Python list，切断 PyTorch/numpy 底层引用。"""

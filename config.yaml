@@ -36,6 +36,14 @@ clustering:
   default_n_clusters: 5
   random_state: 42
   max_clusters: 10
+  batch_size: 4096               # MiniBatchKMeans 每批大小
+  find_k_sample_limit: 50000     # find_optimal_clusters 采样上限（超过则采样）
+  fit_sample_limit: 50000        # KMeans fit 采样上限（超过则采样fit+全量predict）
+  vit_batch_size: 32             # ViT 批量推理批大小
+
+layout:
+  flush_size: 10000              # 每 N 个 block 写入 text/formula/table.lance
+  query_batch: 200               # 每次从 ingest.lance 加载 N 张图片
 
 ocr:
   layout:
