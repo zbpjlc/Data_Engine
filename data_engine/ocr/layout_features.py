@@ -10,7 +10,7 @@ import numpy as np
 
 from data_engine.clustering import KMeansClusterer, find_optimal_clusters
 from data_engine.config import get_config
-from data_engine.embedding import CLIPEmbeddingExtractor, _coerce_image_bytes
+from data_engine.embedding import CLIPEmbeddingExtractor, _coerce_image_bytes, extract_embeddings_in_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,6 @@ def _read_lance_rows(lance_path: Path, columns: list[str] | None = None) -> list
 def cluster_by_type(
     manifests_dir: Path,
     cat: str,
-    extractor: CLIPEmbeddingExtractor,
     max_k: int = 10,
     progress_callback=None,
 ) -> dict:
@@ -182,12 +181,15 @@ def cluster_by_type(
             except Exception as e:
                 logger.warning("[layout_features] %s: failed to load image_data chunk: %s", cat, e)
 
-            # 批量 ViT 推理
+            # 批量 ViT 推理（在子进程中执行，避免 cuBLAS LT 线程安全问题）
             if chunk_images:
                 image_list = list(chunk_images.values())
                 row_idx_list = list(chunk_images.keys())
-                vit_batch = 1  # 强制 batch=1 避免 cuBLAS LT 在线程中崩溃
-                emb_results = extractor.extract_embeddings_from_bytes_batch(image_list, batch_size=vit_batch)
+                vit_batch_size = get_config("clustering", "vit_batch_size", default=32)
+                emb_results = extract_embeddings_in_subprocess(
+                    image_list,
+                    batch_size=vit_batch_size,
+                )
 
                 for row_idx, emb in zip(row_idx_list, emb_results):
                     if emb is not None:
@@ -312,20 +314,15 @@ def cluster_all_types(
     manifests_dir: Path,
     max_k: int = 10,
     progress_callback=None,
-    extractor: CLIPEmbeddingExtractor | None = None,
 ) -> dict:
     """对 text / formula / table 分别做 ViT embedding + MiniBatchKMeans 聚类。
 
-    Args:
-        extractor: 可选的预加载模型，避免在线程中首次初始化 CUDA
+    Embedding 提取在独立子进程中执行，避免 cuBLAS LT 线程安全问题。
 
     Returns:
         {"text": {...}, "formula": {...}, "table": {...}}
     """
     import lance as _lance
-
-    if extractor is None:
-        extractor = CLIPEmbeddingExtractor()
 
     # 预先统计所有类型的总 block 数（用于固定进度 total）
     cat_totals: dict[str, int] = {}
@@ -367,8 +364,8 @@ def cluster_all_types(
                 global_cur = min(_completed + mapped, _grand)
                 progress_callback(global_cur, _grand, f"[{cat}] {msg}")
 
-        print(f"[DEBUG] cluster_all_types: processing cat={cat}, total={cat_total}, extractor={extractor is not None}", flush=True)
-        result[cat] = cluster_by_type(manifests_dir, cat, extractor, max_k=max_k, progress_callback=_cb)
+        print(f"[DEBUG] cluster_all_types: processing cat={cat}, total={cat_total}", flush=True)
+        result[cat] = cluster_by_type(manifests_dir, cat, max_k=max_k, progress_callback=_cb)
         completed += cat_total
         logger.info(
             "[layout_features] %s: %d blocks -> %d clusters (silhouette=%.3f)",
@@ -377,7 +374,6 @@ def cluster_all_types(
 
     # 清理
     import gc, torch
-    del extractor
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

@@ -3297,25 +3297,10 @@ async def start_element_clusters(source_id: str, batch_id: str, request: Request
                 import json
                 import lance
                 
-                print(f"[DEBUG-Thread] step 2: CUDA batch test...", flush=True)
-                if _shared_extractor and hasattr(_shared_extractor, 'model'):
-                    from PIL import Image as _PILImage
-                    import io as _io
-                    _test_imgs = []
-                    for _c in range(4):
-                        _img = _PILImage.new('RGB', (224, 224), color=(_c*7 % 256, _c*13 % 256, _c*19 % 256))
-                        _buf = _io.BytesIO()
-                        _img.save(_buf, format='PNG')
-                        _test_imgs.append(_buf.getvalue())
-                    # 使用 batch_size=1 避免 cuBLAS LT
-                    _test = _shared_extractor.extract_embeddings_from_bytes_batch(_test_imgs, batch_size=1)
-                    print(f"[DEBUG-Thread] CUDA batch=1 test OK: {len([r for r in _test if r])} results", flush=True)
-                    del _test_imgs, _test
-                
-                print(f"[DEBUG-Thread] step 3: import layout_features...", flush=True)
+                print(f"[DEBUG-Thread] step 2: import layout_features...", flush=True)
                 from data_engine.ocr.layout_features import cluster_all_types
                 
-                print(f"[DEBUG-Thread] step 4: counting blocks...", flush=True)
+                print(f"[DEBUG-Thread] step 3: counting blocks...", flush=True)
                 total_blocks = 0
                 for cat in ("text", "formula", "table"):
                     lp = manifests_dir / f"{cat}.lance"
@@ -3335,9 +3320,9 @@ async def start_element_clusters(source_id: str, batch_id: str, request: Request
                 def cb(cur, tot, msg):
                     progress_tracker.update_progress(task_id, current=cur, total=tot, message=msg)
                 
-                print(f"[DEBUG-Thread] step 5: calling cluster_all_types (extractor={_shared_extractor is not None})...", flush=True)
-                result = cluster_all_types(manifests_dir, max_k=max_k, progress_callback=cb, extractor=_shared_extractor)
-                print(f"[DEBUG-Thread] step 6: cluster_all_types done!", flush=True)
+                print(f"[DEBUG-Thread] step 4: calling cluster_all_types...", flush=True)
+                result = cluster_all_types(manifests_dir, max_k=max_k, progress_callback=cb)
+                print(f"[DEBUG-Thread] step 5: cluster_all_types done!", flush=True)
                 
                 # 保存结果
                 out_path = batch_dir / "artifacts" / "element_clusters.json"

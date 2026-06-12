@@ -157,6 +157,101 @@ class CLIPEmbeddingExtractor:
         return results
 
 
+# ─── 子进程 embedding 提取（避免 cuBLAS LT 在线程中崩溃） ────────────────────
+
+def _subprocess_worker(
+    image_bytes_list: list[bytes],
+    batch_size: int,
+    model_name: str,
+    local_path: str | None,
+    gpu_id: int,
+    result_queue,
+):
+    """子进程工作函数：创建独立的 extractor 并执行 batch 推理。"""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    os.environ["TORCH_NUM_THREADS"] = "1"
+
+    try:
+        from data_engine.config import load_config
+        import torch
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+
+        cfg = load_config()
+        emb_cfg = cfg.get("embedding", {})
+        _model_name = model_name or emb_cfg.get("model_name", "google/siglip2-base-patch16-224")
+        _local_path = local_path or emb_cfg.get("local_path")
+        _gpu_id = gpu_id if gpu_id is not None else emb_cfg.get("gpu_id", 0)
+
+        extractor = CLIPEmbeddingExtractor(model_name=_model_name)
+
+        results = extractor.extract_embeddings_from_bytes_batch(image_bytes_list, batch_size=batch_size)
+        result_queue.put(("ok", results))
+    except Exception as e:
+        import traceback
+        result_queue.put(("error", traceback.format_exc()))
+    finally:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def extract_embeddings_in_subprocess(
+    image_bytes_list: list[bytes],
+    batch_size: int = 32,
+    model_name: str | None = None,
+    local_path: str | None = None,
+    gpu_id: int = 0,
+    timeout: float = 600,
+) -> list[list[float] | None]:
+    """在独立子进程中批量提取 embedding，避免 cuBLAS LT 线程安全问题。
+
+    Args:
+        image_bytes_list: 图片 bytes 列表
+        batch_size: GPU 推理批大小
+        model_name: 模型名称
+        local_path: 本地模型路径
+        gpu_id: GPU 编号
+        timeout: 超时时间（秒）
+
+    Returns:
+        embedding 列表，失败的为 None
+    """
+    import multiprocessing
+
+    if not image_bytes_list:
+        return []
+
+    result_queue = multiprocessing.Queue()
+    p = multiprocessing.Process(
+        target=_subprocess_worker,
+        args=(image_bytes_list, batch_size, model_name, local_path, gpu_id, result_queue),
+    )
+    p.start()
+
+    try:
+        status, data = result_queue.get(timeout=timeout)
+        if status == "ok":
+            return data
+        else:
+            print(f"[Embedding-Subprocess] worker failed:\n{data}", file=sys.stderr)
+            return [None] * len(image_bytes_list)
+    except Exception:
+        print(f"[Embedding-Subprocess] timed out or queue error", file=sys.stderr)
+        return [None] * len(image_bytes_list)
+    finally:
+        p.join(timeout=10)
+        if p.is_alive():
+            p.terminate()
+
+
 def _ensure_pure_list(embedding: Any) -> list[float] | None:
     """确保 embedding 是纯 Python list，切断 PyTorch/numpy 底层引用。"""
     if embedding is None:
