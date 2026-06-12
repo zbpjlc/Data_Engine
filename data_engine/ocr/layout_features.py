@@ -100,7 +100,12 @@ def cluster_by_type(
         }
     """
     lance_path = manifests_dir / f"{cat}.lance"
-    rows = _read_lance_rows(lance_path, columns=_SCAN_COLUMNS)
+    if not lance_path.exists():
+        return {"n_clusters": 0, "silhouette": 0, "total_blocks": 0, "clusters": {}, "labels": {}}
+
+    # 第一次读取：只读轻量列（不含 image_data），避免内存爆炸
+    _LIGHT_COLUMNS = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence", "embedding"]
+    rows = _read_lance_rows(lance_path, columns=_LIGHT_COLUMNS)
     if not rows:
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": 0, "clusters": {}, "labels": {}}
 
@@ -126,39 +131,68 @@ def cluster_by_type(
             embeddings.append(None)
             need_generate.append(idx)
 
-        if progress_callback and (idx + 1) % 200 == 0:
+        if progress_callback and (idx + 1) % 5000 == 0:
             progress_callback(idx + 1, total, f"{cat} 扫描 {idx + 1}/{total}")
 
-    # 2. 为缺失 embedding 的 block 生成（直接从 block 自身的 image_data 读取裁剪图）
+    # 2. 为缺失 embedding 的 block 生成（分批从 lance 读取 image_data）
     generated_count = 0
     if need_generate:
         logger.info("[layout_features] %s: %d/%d blocks need embedding generation", cat, len(need_generate), total)
 
-        # 分批处理，避免一次性加载过多图片
+        # 分批处理：每次从 lance 读取一批 image_data
         chunk_size = 200
-        processed_count = 0  # 已处理数（含跳过无图片的 block）
+        processed_count = 0
+
         for chunk_start in range(0, len(need_generate), chunk_size):
             chunk_indices = need_generate[chunk_start:chunk_start + chunk_size]
 
-            # 收集本批有效图片
-            crop_items: list[tuple[int, bytes]] = []  # (row_idx, image_bytes)
-            for row_idx in chunk_indices:
-                row = rows[row_idx]
-                img_data = row.get("image_data")
-                if img_data:
-                    img_bytes = _coerce_image_bytes(img_data)
-                    if img_bytes:
-                        crop_items.append((row_idx, img_bytes))
+            # 从 lance 只读取本批需要的 image_data
+            chunk_images: dict[int, bytes] = {}  # row_idx -> image_bytes
+            try:
+                import lance
+                ds = lance.dataset(str(lance_path))
+                # 构建 sample_id IN (...) 过滤条件
+                chunk_sids = [rows[idx]["sample_id"] for idx in chunk_indices]
+                sids_str = ",".join(f"'{sid}'" for sid in set(chunk_sids))
+                filter_str = f"sample_id IN ({sids_str})"
+                
+                # 批量查询 image_data
+                result = ds.to_table(columns=["sample_id", "block_idx", "image_data"], filter=filter_str)
+                if result.num_rows > 0:
+                    res_sids = result.column("sample_id").to_pylist()
+                    res_bidxs = result.column("block_idx").to_pylist()
+                    res_imgs = result.column("image_data").to_pylist()
+                    
+                    # 构建 sid:bidx -> image_bytes 映射
+                    img_map: dict[tuple, bytes] = {}
+                    for sid, bidx, img in zip(res_sids, res_bidxs, res_imgs):
+                        if img:
+                            img_bytes = _coerce_image_bytes(img)
+                            if img_bytes:
+                                img_map[(sid, bidx)] = img_bytes
+                    
+                    # 按 row_idx 匹配
+                    for row_idx in chunk_indices:
+                        key = (rows[row_idx]["sample_id"], rows[row_idx]["block_idx"])
+                        if key in img_map:
+                            chunk_images[row_idx] = img_map[key]
+                    
+                    del img_map
+                del result
+            except Exception as e:
+                logger.warning("[layout_features] %s: failed to load image_data chunk: %s", cat, e)
 
             # 批量 ViT 推理
-            if crop_items:
-                image_list = [item[1] for item in crop_items]
-                vit_batch = get_config("clustering", "vit_batch_size", default=32)
+            if chunk_images:
+                image_list = list(chunk_images.values())
+                row_idx_list = list(chunk_images.keys())
+                vit_batch = 1  # 强制 batch=1 避免 cuBLAS LT 在线程中崩溃
                 emb_results = extractor.extract_embeddings_from_bytes_batch(image_list, batch_size=vit_batch)
 
-                for (row_idx, _), emb in zip(crop_items, emb_results):
-                    embeddings[row_idx] = emb
-                    generated_count += 1
+                for row_idx, emb in zip(row_idx_list, emb_results):
+                    if emb is not None:
+                        embeddings[row_idx] = emb
+                        generated_count += 1
 
             processed_count += len(chunk_indices)
             if progress_callback:
@@ -168,6 +202,9 @@ def cluster_by_type(
                     processed_count, len(need_generate),
                     f"{cat} embedding {generated_count}/{len(need_generate)}{skip_hint}"
                 )
+
+            # 清理本批内存
+            del chunk_images
 
         # 3. 写回 lance（更新 embedding 列）
         if generated_count > 0:
@@ -275,15 +312,20 @@ def cluster_all_types(
     manifests_dir: Path,
     max_k: int = 10,
     progress_callback=None,
+    extractor: CLIPEmbeddingExtractor | None = None,
 ) -> dict:
     """对 text / formula / table 分别做 ViT embedding + MiniBatchKMeans 聚类。
+
+    Args:
+        extractor: 可选的预加载模型，避免在线程中首次初始化 CUDA
 
     Returns:
         {"text": {...}, "formula": {...}, "table": {...}}
     """
     import lance as _lance
 
-    extractor = CLIPEmbeddingExtractor()
+    if extractor is None:
+        extractor = CLIPEmbeddingExtractor()
 
     # 预先统计所有类型的总 block 数（用于固定进度 total）
     cat_totals: dict[str, int] = {}
@@ -325,6 +367,7 @@ def cluster_all_types(
                 global_cur = min(_completed + mapped, _grand)
                 progress_callback(global_cur, _grand, f"[{cat}] {msg}")
 
+        print(f"[DEBUG] cluster_all_types: processing cat={cat}, total={cat_total}, extractor={extractor is not None}", flush=True)
         result[cat] = cluster_by_type(manifests_dir, cat, extractor, max_k=max_k, progress_callback=_cb)
         completed += cat_total
         logger.info(

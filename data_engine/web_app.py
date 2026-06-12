@@ -21,9 +21,46 @@ import pyarrow as pa
 try:
     import torch
     HAS_TORCH = True
+    # 禁用 TF32 避免 cuBLAS LT 问题
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    # 预初始化 CUDA/cuBLAS，避免后台线程首次初始化时崩溃
+    if torch.cuda.is_available():
+        try:
+            # 临时放开 OMP 线程数，让 cuBLAS 正常初始化内部线程池
+            _old_omp = os.environ.get("OMP_NUM_THREADS", "1")
+            os.environ["OMP_NUM_THREADS"] = "4"
+            _dummy = torch.zeros(1, device="cuda")
+            _dummy = _dummy @ _dummy.unsqueeze(0)  # 触发 cuBLAS 初始化
+            del _dummy
+            torch.cuda.synchronize()
+            os.environ["OMP_NUM_THREADS"] = _old_omp
+            print("[CUDA] cuBLAS 预初始化成功", file=sys.stderr)
+        except Exception as _e:
+            print(f"[CUDA] cuBLAS 预初始化失败 (非致命): {_e}", file=sys.stderr)
+        # 预加载 SigLIP2 模型，确保 cuBLAS LT 在主线程中初始化
+        try:
+            from data_engine.embedding import CLIPEmbeddingExtractor
+            _shared_extractor = CLIPEmbeddingExtractor()
+            # 在主线程做一次批量推理预热，触发 cuBLAS LT 初始化
+            from PIL import Image as _PILImage
+            import io as _io
+            _warmup_imgs = []
+            for _ in range(4):
+                _img = _PILImage.new('RGB', (224, 224), color='gray')
+                _buf = _io.BytesIO()
+                _img.save(_buf, format='PNG')
+                _warmup_imgs.append(_buf.getvalue())
+            _warmup_result = _shared_extractor.extract_embeddings_from_bytes_batch(_warmup_imgs, batch_size=4)
+            del _warmup_imgs, _warmup_result, _PILImage, _io
+            print(f"[CUDA] SigLIP2 模型预加载 + 批量预热成功: {_shared_extractor.device}", file=sys.stderr)
+        except Exception as _e:
+            print(f"[CUDA] SigLIP2 预加载失败 (非致命): {_e}", file=sys.stderr)
+            _shared_extractor = None
 except ImportError:
     HAS_TORCH = False
     torch = None
+    _shared_extractor = None
 
 # 设置 Lance 内存限制（必须在 import lance 之前）
 from data_engine.config import get_config
@@ -697,7 +734,7 @@ async def stop_task(source_id: str, batch_id: str = None):
         raise HTTPException(status_code=400, detail="batch_id is required")
     
     stopped = []
-    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "split", "layout_batch"]:
+    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "split", "layout_batch", "repair"]:
         task_id = f"{task_type}_{source_id}_{batch_id}"
         task = progress_tracker.get_task(task_id)
         if task and task.status.value in ["running", "pending"]:
@@ -1846,9 +1883,15 @@ async def get_category_stats(source_id: str, batch_id: str):
                     ds = lance.dataset(str(lance_path))
                     n = ds.count_rows()
                     cols = ds.schema.names
-                stats[cat] = {"count": n, "columns": cols}
+                    no_img = 0
+                    if "image_data" in cols:
+                        try:
+                            no_img = ds.count_rows("image_data IS NULL")
+                        except Exception:
+                            pass
+                stats[cat] = {"count": n, "columns": cols, "no_image": no_img}
             else:
-                stats[cat] = {"count": 0, "columns": []}
+                stats[cat] = {"count": 0, "columns": [], "no_image": 0}
 
         return {"source_id": source_id, "batch_id": batch_id, "categories": stats}
     except Exception as e:
@@ -2967,7 +3010,262 @@ async def get_layout_batch_results(source_id: str, batch_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── 补齐无图 API ───────────────────────────────────────────────────────────────────────
+
+@app.post("/api/repair-images/{source_id}/{batch_id}")
+async def repair_images(source_id: str, batch_id: str):
+    """补齐 text/formula/table.lance 中缺失 image_data 的 block。
+
+    扫描无图 block → 找出涉及页面 → 重新跑 layout + 拆分 → 替换旧行写入。
+    """
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        # 1. 扫描无图 block 涉及的 sample_id
+        no_image_sids: set[str] = set()
+        no_image_counts: dict[str, int] = {}
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if lp.exists():
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    cols = ds.schema.names
+                    if "image_data" in cols:
+                        try:
+                            null_rows = ds.to_table(
+                                columns=["sample_id"],
+                                filter="image_data IS NULL"
+                            ).to_pylist()
+                            sids = {r["sample_id"] for r in null_rows}
+                            no_image_sids.update(sids)
+                            no_image_counts[cat] = len(null_rows)
+                        except Exception:
+                            no_image_counts[cat] = 0
+
+        if not no_image_sids:
+            return {"message": "所有 block 均已有图片，无需补齐", "no_image": 0}
+
+        # 检查 ingest.lance 是否存在
+        ingest_path = find_stage_manifest(manifests_dir, "ingest")
+        if not ingest_path or not ingest_path.exists():
+            raise HTTPException(status_code=400, detail="ingest.lance 不存在，无法获取页面原图")
+
+        task_id = f"repair_{source_id}_{batch_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            return {"message": "补齐任务已在运行中", "task_id": task_id}
+
+        total_pages = len(no_image_sids)
+
+        def execute():
+            try:
+                progress_tracker.start_task(
+                    task_id=task_id, task_type="repair",
+                    source_id=source_id, batch_id=batch_id,
+                    total=total_pages,
+                    message=f"补齐 {total_pages} 个页面的无图 block",
+                )
+
+                # 2. 从 ingest.lance 加载页面图片
+                image_map: dict[str, bytes] = {}
+                try:
+                    with _lance_write_lock:
+                        ds = lance.dataset(str(ingest_path))
+                        all_sids = list(no_image_sids)
+                        chunk_size = 200
+                        for ci in range(0, len(all_sids), chunk_size):
+                            chunk = all_sids[ci:ci + chunk_size]
+                            ids_str = ",".join(repr(s) for s in chunk)
+                            try:
+                                recs = ds.to_table(
+                                    columns=["sample_id", "image_data"],
+                                    filter=f"sample_id IN ({ids_str})",
+                                ).to_pylist()
+                                for r in recs:
+                                    if r.get("image_data"):
+                                        image_map[r["sample_id"]] = r["image_data"]
+                            except Exception:
+                                pass
+                except Exception as e:
+                    progress_tracker.fail_task(task_id, f"加载页面图片失败: {e}")
+                    return
+
+                if not image_map:
+                    progress_tracker.complete_task(task_id, "无法加载任何页面图片")
+                    return
+
+                # 3. 重新跑 layout 检测
+                from data_engine.ocr.layout_provider import get_layout_provider
+                layout = get_layout_provider()
+
+                progress_tracker.update_progress(task_id, current=0, message="加载模型中...")
+                try:
+                    _ = layout._ensure_model()
+                except Exception as e:
+                    progress_tracker.fail_task(task_id, f"模型加载失败: {e}")
+                    return
+
+                # 写入临时文件，批量推理
+                import tempfile, shutil
+                tmp_dir = tempfile.mkdtemp(prefix="repair_")
+                errors: list[dict] = []
+                repaired_results: list[dict] = []
+                done = 0
+                process_batch_size = 200
+                pending_sids = [sid for sid in no_image_sids if sid in image_map]
+
+                for batch_start in range(0, len(pending_sids), process_batch_size):
+                    if progress_tracker.is_stopped(task_id):
+                        break
+
+                    batch_ids = pending_sids[batch_start:batch_start + process_batch_size]
+                    tmp_paths: list[Path] = []
+                    try:
+                        for sid in batch_ids:
+                            tmp_path = Path(tmp_dir) / f"{sid}.png"
+                            tmp_path.write_bytes(image_map[sid])
+                            tmp_paths.append(tmp_path)
+
+                        try:
+                            all_blocks_list = layout.detect_layout_batch(tmp_paths)
+                            for sid, blocks in zip(batch_ids, all_blocks_list):
+                                repaired_results.append({
+                                    "sample_id": sid,
+                                    "blocks": [
+                                        {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                                        for b in blocks
+                                    ],
+                                    "block_count": len(blocks),
+                                })
+                        except Exception as e:
+                            print(f"[repair] batch failed, fallback to single: {e}", file=sys.stderr)
+                            for sid in batch_ids:
+                                try:
+                                    blocks = layout.detect_layout_from_bytes(image_map[sid])
+                                    repaired_results.append({
+                                        "sample_id": sid,
+                                        "blocks": [
+                                            {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                                            for b in blocks
+                                        ],
+                                        "block_count": len(blocks),
+                                    })
+                                except Exception as e2:
+                                    errors.append({"sample_id": sid, "error": str(e2)})
+                    finally:
+                        for p in tmp_paths:
+                            try:
+                                p.unlink()
+                            except Exception:
+                                pass
+
+                    done += len(batch_ids)
+                    error_summary = f"（{len(errors)} 错误）" if errors else ""
+                    progress_tracker.update_progress(
+                        task_id, current=done,
+                        message=f"layout {done}/{total_pages}{error_summary}",
+                    )
+
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+                if progress_tracker.is_stopped(task_id):
+                    progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{total_pages}）")
+                    return
+
+                # 4. 删除旧行 + 写入新行
+                progress_tracker.update_progress(task_id, current=done, message="写入 Lance...")
+                repair_sids_set = set(no_image_sids)
+
+                # 先生成新行（写入临时 lance 文件）
+                new_stats: dict[str, int] = {"text": 0, "formula": 0, "table": 0}
+                if repaired_results:
+                    # 用临时目录避免覆盖现有数据
+                    tmp_manifests = Path(tempfile.mkdtemp(prefix="repair_manifests_"))
+                    try:
+                        new_stats = _write_layout_to_category_lances(
+                            repaired_results, tmp_manifests,
+                            flush_size=10_000,
+                            write_mode="create",
+                            image_map=image_map,
+                        )
+
+                        # 对每个 category，合并：删除旧行 + 追加新行
+                        for cat in ("text", "formula", "table"):
+                            lp = manifests_dir / f"{cat}.lance"
+                            new_lp = tmp_manifests / f"{cat}.lance"
+                            if not lp.exists():
+                                # 如果原来不存在，直接复制新文件
+                                if new_lp.exists():
+                                    import shutil as _sh
+                                    _sh.copytree(str(new_lp), str(lp))
+                                continue
+
+                            with _lance_write_lock:
+                                ds = lance.dataset(str(lp))
+                                full_table = ds.to_table()
+
+                            # 过滤掉需要替换的 sample_id 行
+                            sids_col = full_table.column("sample_id").to_pylist()
+                            keep_indices = [i for i, sid in enumerate(sids_col) if sid not in repair_sids_set]
+                            if keep_indices:
+                                kept_table = full_table.take(keep_indices)
+                            else:
+                                kept_table = full_table.slice(0, 0)
+
+                            # overwrite 保留的行
+                            with _lance_write_lock:
+                                lance.write_dataset(kept_table, str(lp), mode="overwrite")
+
+                            # append 新行
+                            if new_lp.exists() and new_stats.get(cat, 0) > 0:
+                                with _lance_write_lock:
+                                    new_ds = lance.dataset(str(new_lp))
+                                    new_table = new_ds.to_table()
+                                    ds2 = lance.dataset(str(lp))
+                                    ds2.merge_insert(["sample_id", "block_idx"]).when_not_matched_insert_all().execute(new_table)
+
+                            print(f"[repair] {cat}.lance: 保留 {kept_table.num_rows} 行, 新写入 {new_stats.get(cat, 0)} 行", file=sys.stderr)
+                    finally:
+                        try:
+                            shutil.rmtree(str(tmp_manifests), ignore_errors=True)
+                        except Exception:
+                            pass
+
+                # 5. 完成
+                err_msg = f"（{len(errors)} 错误）" if errors else ""
+                final_msg = f"补齐完成: {done} 页面{err_msg}"
+                progress_tracker.complete_task(task_id, message=final_msg)
+                invalidate_status_cache()
+
+            except Exception as e:
+                print(f"[repair] 任务失败: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc()
+                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
+
+        thread = threading.Thread(target=execute, name=task_id)
+        thread.daemon = True
+        thread.start()
+
+        return {
+            "message": f"已启动补齐任务: {total_pages} 个页面",
+            "task_id": task_id,
+            "no_image": no_image_counts,
+            "pages": total_pages,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─── Element-Type Layout 聚类 API ─────────────────────────────────────────────────────
+
 
 @app.post("/api/element-clusters/{source_id}/{batch_id}")
 async def start_element_clusters(source_id: str, batch_id: str, request: Request):
@@ -2993,17 +3291,36 @@ async def start_element_clusters(source_id: str, batch_id: str, request: Request
         if existing and existing.status.value in ["running", "pending"]:
             return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
         
-        def execute():
+        def execute_element_clustering():
             try:
+                print(f"[DEBUG-Thread] step 1: imports...", flush=True)
+                import json
+                import lance
+                
+                print(f"[DEBUG-Thread] step 2: CUDA batch test...", flush=True)
+                if _shared_extractor and hasattr(_shared_extractor, 'model'):
+                    from PIL import Image as _PILImage
+                    import io as _io
+                    _test_imgs = []
+                    for _c in range(4):
+                        _img = _PILImage.new('RGB', (224, 224), color=(_c*7 % 256, _c*13 % 256, _c*19 % 256))
+                        _buf = _io.BytesIO()
+                        _img.save(_buf, format='PNG')
+                        _test_imgs.append(_buf.getvalue())
+                    # 使用 batch_size=1 避免 cuBLAS LT
+                    _test = _shared_extractor.extract_embeddings_from_bytes_batch(_test_imgs, batch_size=1)
+                    print(f"[DEBUG-Thread] CUDA batch=1 test OK: {len([r for r in _test if r])} results", flush=True)
+                    del _test_imgs, _test
+                
+                print(f"[DEBUG-Thread] step 3: import layout_features...", flush=True)
                 from data_engine.ocr.layout_features import cluster_all_types
                 
-                # 先统计总 block 数作为 total
+                print(f"[DEBUG-Thread] step 4: counting blocks...", flush=True)
                 total_blocks = 0
                 for cat in ("text", "formula", "table"):
                     lp = manifests_dir / f"{cat}.lance"
                     if lp.exists():
                         try:
-                            import lance
                             total_blocks += lance.dataset(str(lp)).count_rows()
                         except Exception:
                             pass
@@ -3018,14 +3335,15 @@ async def start_element_clusters(source_id: str, batch_id: str, request: Request
                 def cb(cur, tot, msg):
                     progress_tracker.update_progress(task_id, current=cur, total=tot, message=msg)
                 
-                result = cluster_all_types(manifests_dir, max_k=max_k, progress_callback=cb)
+                print(f"[DEBUG-Thread] step 5: calling cluster_all_types (extractor={_shared_extractor is not None})...", flush=True)
+                result = cluster_all_types(manifests_dir, max_k=max_k, progress_callback=cb, extractor=_shared_extractor)
+                print(f"[DEBUG-Thread] step 6: cluster_all_types done!", flush=True)
                 
-                # 保存结果到 artifacts/element_clusters.json
+                # 保存结果
                 out_path = batch_dir / "artifacts" / "element_clusters.json"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
                 
-                # 汇总消息
                 summary_parts = []
                 for cat in ("text", "formula", "table"):
                     info = result.get(cat, {})
@@ -3036,18 +3354,26 @@ async def start_element_clusters(source_id: str, batch_id: str, request: Request
                 progress_tracker.complete_task(task_id, f"完成: {summary}")
             except Exception as e:
                 import traceback
-                traceback.print_exc(file=sys.stderr)
-                progress_tracker.fail_task(task_id, str(e))
+                traceback.print_exc()
+                try:
+                    progress_tracker.fail_task(task_id, str(e))
+                except Exception:
+                    pass
         
-        import threading
-        thread = threading.Thread(target=execute, daemon=True)
+        thread = threading.Thread(target=execute_element_clustering, name=task_id)
+        thread.daemon = True
         thread.start()
+        
+        print(f"[INFO] Element clustering started in thread: {task_id}", flush=True)
         
         return {"message": "已启动 Element-Type 聚类", "task_id": task_id}
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        traceback.print_exc()
+        print(f"[ERROR] start_element_clusters failed: {type(e).__name__}: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 @app.get("/api/element-clusters/{source_id}/{batch_id}")

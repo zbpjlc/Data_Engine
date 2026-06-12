@@ -281,14 +281,26 @@
                                 <div class="bg-blue-50 border border-blue-200 rounded-lg p-3 text-center">
                                     <div class="text-xs text-blue-600">Text</div>
                                     <div id="split-text-count" class="text-xl font-bold text-blue-800">-</div>
+                                    <div id="split-text-noimg" class="text-xs text-red-500 hidden"></div>
                                 </div>
                                 <div class="bg-purple-50 border border-purple-200 rounded-lg p-3 text-center">
                                     <div class="text-xs text-purple-600">Formula</div>
                                     <div id="split-formula-count" class="text-xl font-bold text-purple-800">-</div>
+                                    <div id="split-formula-noimg" class="text-xs text-red-500 hidden"></div>
                                 </div>
                                 <div class="bg-orange-50 border border-orange-200 rounded-lg p-3 text-center">
                                     <div class="text-xs text-orange-600">Table</div>
                                     <div id="split-table-count" class="text-xl font-bold text-orange-800">-</div>
+                                    <div id="split-table-noimg" class="text-xs text-red-500 hidden"></div>
+                                </div>
+                            </div>
+                            <!-- 补齐无图 -->
+                            <div id="repair-section" class="hidden mt-3 flex items-center gap-3">
+                                <button id="btn-repair-images" class="px-3 py-1.5 bg-amber-600 text-white rounded-md hover:bg-amber-700 font-medium text-xs">补齐无图</button>
+                                <span id="repair-summary" class="text-xs text-gray-500"></span>
+                                <div id="repair-progress" class="hidden text-xs text-gray-600 flex items-center gap-2">
+                                    <div class="animate-spin h-3 w-3 border-2 border-amber-600 border-t-transparent rounded-full"></div>
+                                    <span id="repair-progress-msg">...</span>
                                 </div>
                             </div>
                         </div>
@@ -572,10 +584,42 @@
             document.getElementById('btn-run-layout').classList.add('hidden');
             document.getElementById('diff-summary').classList.add('hidden');
             document.getElementById('diff-empty').classList.remove('hidden');
+            document.getElementById('split-results').classList.add('hidden');
+            document.getElementById('repair-section').classList.add('hidden');
             updateOcrBatchSelect();
+
+            // 直接加载 category-stats（显示无图统计，不依赖抽样缓存）
+            loadCategoryStatsDirectly(sourceId, filtered);
 
             // 加载缓存数据（逐批加载后合并）
             loadAllCachedBuckets(sourceId, filtered);
+        }
+
+        // 直接加载 category-stats，显示拆分结果和无图统计
+        function loadCategoryStatsDirectly(sourceId, batchList) {
+            if (!batchList || batchList.length === 0) return;
+            const statsPromises = batchList.map(b =>
+                fetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
+                    .then(r => r.json())
+                    .catch(() => null)
+            );
+            Promise.all(statsPromises).then(results => {
+                let totalText = 0, totalFormula = 0, totalTable = 0;
+                results.forEach(sr => {
+                    if (sr && sr.categories) {
+                        totalText += sr.categories.text?.count || 0;
+                        totalFormula += sr.categories.formula?.count || 0;
+                        totalTable += sr.categories.table?.count || 0;
+                    }
+                });
+                if (totalText + totalFormula + totalTable > 0) {
+                    document.getElementById('split-results').classList.remove('hidden');
+                    document.getElementById('split-text-count').textContent = totalText.toLocaleString();
+                    document.getElementById('split-formula-count').textContent = totalFormula.toLocaleString();
+                    document.getElementById('split-table-count').textContent = totalTable.toLocaleString();
+                    updateNoImageDisplay(results);
+                }
+            });
         }
 
         function loadAllCachedBuckets(sourceId, batchList) {
@@ -667,11 +711,15 @@
             document.getElementById('btn-run-layout').classList.add('hidden');
             document.getElementById('diff-summary').classList.add('hidden');
             document.getElementById('diff-empty').classList.remove('hidden');
+            document.getElementById('split-results').classList.add('hidden');
+            document.getElementById('repair-section').classList.add('hidden');
 
             if (batchId && sourceId) {
                 document.getElementById('source-info').textContent = `${sourceId}/${batchId}`;
                 loadIndexStats(sourceId, batchId);
                 loadCachedBucketSamples(sourceId, batchId);
+                // 直接加载 category-stats（显示无图统计）
+                loadCategoryStatsDirectly(sourceId, [{source_id: sourceId, batch_id: batchId}]);
             } else {
                 const totalSamples = batchData.reduce((s,b)=>s+b.sample_count, 0);
                 document.getElementById('source-info').textContent = `全部 ${batchData.length} 个批次 | 共 ${totalSamples.toLocaleString()} 样本`;
@@ -1609,14 +1657,16 @@
                 if (!Object.keys(resultMap).length) return;
 
                 // 合并到 bucketSampleData
-                for (const tier of Object.keys(bucketSampleData.buckets || {})) {
-                    bucketSampleData.buckets[tier].forEach(s => {
-                        const lr = resultMap[s.sample_id];
-                        if (lr) { s._layout_blocks = lr.blocks; s._layout_block_count = lr.block_count; }
-                    });
+                if (bucketSampleData && bucketSampleData.buckets) {
+                    for (const tier of Object.keys(bucketSampleData.buckets || {})) {
+                        bucketSampleData.buckets[tier].forEach(s => {
+                            const lr = resultMap[s.sample_id];
+                            if (lr) { s._layout_blocks = lr.blocks; s._layout_block_count = lr.block_count; }
+                        });
+                    }
+                    // 刷新分区显示（重新渲染全部导航，layout 数据已合并到 bucketSampleData）
+                    renderBucketResults(bucketSampleData);
                 }
-                // 刷新分区显示（重新渲染全部导航，layout 数据已合并到 bucketSampleData）
-                if (bucketSampleData) renderBucketResults(bucketSampleData);
             });
         }
 
@@ -2075,9 +2125,142 @@
                     document.getElementById('split-table-count').textContent = totalTable.toLocaleString();
                     document.getElementById('split-status').innerHTML =
                         `<span class="text-green-600 font-medium">上次拆分结果已恢复</span>`;
+                    updateNoImageDisplay(results);
                 }
             });
         }
+
+        // 更新无图统计显示 + 补齐按钮
+        function updateNoImageDisplay(statsResults) {
+            let totalNoImg = 0;
+            const cats = ['text', 'formula', 'table'];
+            cats.forEach(cat => {
+                let catNoImg = 0;
+                statsResults.forEach(sr => {
+                    if (sr && sr.categories) {
+                        catNoImg += sr.categories[cat]?.no_image || 0;
+                    }
+                });
+                const el = document.getElementById(`split-${cat}-noimg`);
+                if (el) {
+                    if (catNoImg > 0) {
+                        el.textContent = `无图: ${catNoImg.toLocaleString()}`;
+                        el.classList.remove('hidden');
+                    } else {
+                        el.classList.add('hidden');
+                    }
+                }
+                totalNoImg += catNoImg;
+            });
+            const repairSection = document.getElementById('repair-section');
+            const repairSummary = document.getElementById('repair-summary');
+            if (repairSection) {
+                if (totalNoImg > 0) {
+                    repairSection.classList.remove('hidden');
+                    repairSummary.textContent = `共 ${totalNoImg.toLocaleString()} 个 block 无图`;
+                } else {
+                    repairSection.classList.add('hidden');
+                }
+            }
+        }
+
+        // 补齐无图按钮
+        let _repairPollTimer = null;
+        document.getElementById('btn-repair-images').addEventListener('click', function() {
+            const btn = this;
+            const progressDiv = document.getElementById('repair-progress');
+            const progressMsg = document.getElementById('repair-progress-msg');
+            const summaryEl = document.getElementById('repair-summary');
+
+            // 如果正在运行 → 停止
+            if (btn.dataset.running === 'true') {
+                const sourceId = selSource.value;
+                const batchId = selBatch.value;
+                if (sourceId && batchId) {
+                    fetch(`/api/stop/${sourceId}?batch_id=${batchId}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({task_types: ['repair']})
+                    }).catch(() => {});
+                }
+                btn.textContent = '补齐无图';
+                btn.classList.remove('bg-red-500','hover:bg-red-600');
+                btn.classList.add('bg-amber-600','hover:bg-amber-700');
+                btn.dataset.running = 'false';
+                if (_repairPollTimer) { clearInterval(_repairPollTimer); _repairPollTimer = null; }
+                progressDiv.classList.add('hidden');
+                return;
+            }
+
+            const sourceId = selSource.value;
+            const batchId = selBatch.value;
+            if (!sourceId || !batchId) { alert('请先选择数据源和批次'); return; }
+
+            btn.textContent = '停止';
+            btn.classList.remove('bg-amber-600','hover:bg-amber-700');
+            btn.classList.add('bg-red-500','hover:bg-red-600');
+            btn.dataset.running = 'true';
+            progressDiv.classList.remove('hidden');
+            progressMsg.textContent = '启动中...';
+
+            fetch(`/api/repair-images/${sourceId}/${batchId}`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.no_image === 0) {
+                        progressMsg.textContent = '所有 block 均已有图片';
+                        btn.textContent = '补齐无图';
+                        btn.classList.remove('bg-red-500','hover:bg-red-600');
+                        btn.classList.add('bg-amber-600','hover:bg-amber-700');
+                        btn.dataset.running = 'false';
+                        return;
+                    }
+                    const taskId = data.task_id;
+                    progressMsg.textContent = data.message || '已启动';
+
+                    // 轮询进度
+                    _repairPollTimer = setInterval(() => {
+                        fetch('/api/progress').then(r => r.json()).then(pd => {
+                            const task = (pd.tasks || {})[taskId];
+                            if (!task) return;
+                            const st = task.status;
+                            const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                            progressMsg.textContent = `${task.message || st} (${pct}%)`;
+                            if (st === 'completed' || st === 'failed' || st === 'stopped') {
+                                clearInterval(_repairPollTimer);
+                                _repairPollTimer = null;
+                                btn.textContent = '补齐无图';
+                                btn.classList.remove('bg-red-500','hover:bg-red-600');
+                                btn.classList.add('bg-amber-600','hover:bg-amber-700');
+                                btn.dataset.running = 'false';
+                                progressDiv.classList.add('hidden');
+                                if (st === 'completed') {
+                                    summaryEl.innerHTML = `<span class="text-green-600">${task.message}</span>`;
+                                } else if (st === 'failed') {
+                                    summaryEl.innerHTML = `<span class="text-red-600">${task.error_message || '失败'}</span>`;
+                                }
+                                // 刷新 category-stats
+                                fetch(`/api/category-stats/${sourceId}/${batchId}`)
+                                    .then(r => r.json())
+                                    .then(sr => {
+                                        if (sr && sr.categories) {
+                                            ['text','formula','table'].forEach(cat => {
+                                                document.getElementById(`split-${cat}-count`).textContent = (sr.categories[cat]?.count || 0).toLocaleString();
+                                            });
+                                            updateNoImageDisplay([sr]);
+                                        }
+                                    });
+                            }
+                        }).catch(() => {});
+                    }, 2000);
+                })
+                .catch(e => {
+                    progressMsg.textContent = `启动失败: ${e.message}`;
+                    btn.textContent = '补齐无图';
+                    btn.classList.remove('bg-red-500','hover:bg-red-600');
+                    btn.classList.add('bg-amber-600','hover:bg-amber-700');
+                    btn.dataset.running = 'false';
+                });
+        });
 
         document.getElementById('btn-split-categories').addEventListener('click', function() {
             if (!bucketSampleData) { alert('请先完成抽样（常规抽样或按难度抽样）'); return; }
@@ -2244,6 +2427,7 @@
                             document.getElementById('split-text-count').textContent = aggStats.text.toLocaleString();
                             document.getElementById('split-formula-count').textContent = aggStats.formula.toLocaleString();
                             document.getElementById('split-table-count').textContent = aggStats.table.toLocaleString();
+                            updateNoImageDisplay(statsResults);
                         });
 
                         if (allDone) {

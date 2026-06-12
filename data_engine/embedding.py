@@ -138,6 +138,9 @@ class CLIPEmbeddingExtractor:
                 inputs = self.processor(images=images, return_tensors="pt").to(self.device)
                 with torch.inference_mode():
                     outputs = self.model.get_image_features(**inputs)
+                # 处理 BaseModelOutputWithPooling 对象
+                if hasattr(outputs, "pooler_output"):
+                    outputs = outputs.pooler_output
                 embeddings = outputs.cpu().numpy()
 
                 for j, idx in enumerate(valid_indices):
