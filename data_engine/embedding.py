@@ -9,6 +9,7 @@ os.environ["TORCH_NUM_THREADS"] = "1"
 
 import gc
 import io
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -157,50 +158,260 @@ class CLIPEmbeddingExtractor:
         return results
 
 
-# ─── 子进程 embedding 提取（避免 cuBLAS LT 在线程中崩溃） ────────────────────
+# ─── HTTP 客户端：调用 embedding 服务 ─────────────────────────────────────────
 
-def _subprocess_worker(
+def extract_embeddings_via_http(
     image_bytes_list: list[bytes],
-    batch_size: int,
-    model_name: str,
-    local_path: str | None,
-    gpu_id: int,
-    result_queue,
-):
-    """子进程工作函数：创建独立的 extractor 并执行 batch 推理。"""
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
-    os.environ["TORCH_NUM_THREADS"] = "1"
+    batch_size: int = 32,
+    timeout: float = 300,
+) -> list[list[float] | None]:
+    """通过 HTTP 调用独立 embedding 服务提取 embedding。
+
+    这是推荐的方式：embedding 服务是独立进程，有自己的 CUDA 上下文，
+    不受 web_app 主进程的 CUDA 状态影响，支持 batch_size > 1。
+
+    Args:
+        image_bytes_list: 图片 bytes 列表
+        batch_size: 批量推理批大小
+        timeout: HTTP 请求超时时间（秒）
+
+    Returns:
+        embedding 列表，失败的为 None
+    """
+    import requests
+    import base64
+
+    if not image_bytes_list:
+        return []
+
+    host = get_config("embedding", "server", "host", default="127.0.0.1")
+    port = get_config("embedding", "server", "port", default=8090)
+    url = f"http://{host}:{port}/embed"
+
+    # 编码图片为 base64
+    images_b64 = [base64.b64encode(img).decode("utf-8") for img in image_bytes_list]
+
+    payload = {"images": images_b64, "batch_size": batch_size}
 
     try:
-        from data_engine.config import load_config
-        import torch
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-
-        cfg = load_config()
-        emb_cfg = cfg.get("embedding", {})
-        _model_name = model_name or emb_cfg.get("model_name", "google/siglip2-base-patch16-224")
-        _local_path = local_path or emb_cfg.get("local_path")
-        _gpu_id = gpu_id if gpu_id is not None else emb_cfg.get("gpu_id", 0)
-
-        extractor = CLIPEmbeddingExtractor(model_name=_model_name)
-
-        results = extractor.extract_embeddings_from_bytes_batch(image_bytes_list, batch_size=batch_size)
-        result_queue.put(("ok", results))
+        resp = requests.post(url, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["embeddings"]
+    except requests.exceptions.ConnectionError:
+        print(f"[Embedding] 无法连接 embedding 服务 {url}", file=sys.stderr)
+        return [None] * len(image_bytes_list)
+    except requests.exceptions.Timeout:
+        print(f"[Embedding] embedding 服务请求超时 ({timeout}s)", file=sys.stderr)
+        return [None] * len(image_bytes_list)
     except Exception as e:
-        import traceback
-        result_queue.put(("error", traceback.format_exc()))
-    finally:
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+        print(f"[Embedding] HTTP 调用失败: {e}", file=sys.stderr)
+        return [None] * len(image_bytes_list)
+
+
+def _check_embedding_server() -> bool:
+    """检查 embedding 服务是否可用。"""
+    import requests
+    host = get_config("embedding", "server", "host", default="127.0.0.1")
+    port = get_config("embedding", "server", "port", default=8090)
+    try:
+        resp = requests.get(f"http://{host}:{port}/health", timeout=5)
+        return resp.status_code == 200 and resp.json().get("status") == "ready"
+    except Exception:
+        return False
+
+
+# ─── 常驻子进程 Embedding Worker（避免 cuBLAS LT 在线程中崩溃） ──────────────
+
+_WORKER_SCRIPT = '''\
+import sys, os, json, pickle, signal
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["TORCH_NUM_THREADS"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "{gpu_id}"
+
+import torch
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
+sys.path.insert(0, "{project_root}")
+from data_engine.embedding import CLIPEmbeddingExtractor
+
+extractor = CLIPEmbeddingExtractor()
+print(json.dumps({{"status": "ready"}}), flush=True)
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+        if req.get("action") == "shutdown":
+            break
+        img_file = req.get("img_file")
+        batch_size = req.get("batch_size", 32)
+        result_file = req.get("result_file")
+        if not img_file or not result_file:
+            print(json.dumps({{"status": "error", "message": "missing img_file or result_file"}}), flush=True)
+            continue
+        with open(img_file, "rb") as f:
+            image_bytes_list = pickle.load(f)
+        results = extractor.extract_embeddings_from_bytes_batch(image_bytes_list, batch_size=batch_size)
+        with open(result_file, "wb") as f:
+            pickle.dump(results, f)
+        print(json.dumps({{"status": "ok", "count": len(results)}}), flush=True)
+    except Exception as e:
+        print(json.dumps({{"status": "error", "message": str(e)}}), flush=True)
+
+del extractor
+'''
+
+
+class EmbeddingWorker:
+    """常驻子进程 embedding worker，通过 stdin/stdout JSON 协议通信。
+
+    用法:
+        worker = EmbeddingWorker(gpu_id=1)
+        worker.start()
+        results = worker.extract(image_bytes_list, batch_size=32)
+        worker.shutdown()
+    """
+
+    def __init__(self, gpu_id: int = 1, batch_size: int = 32):
+        self.gpu_id = gpu_id
+        self.default_batch_size = batch_size
+        self._process = None
+        self._script_path = None
+        self._lock = None
+
+    def start(self):
+        """启动 worker 子进程。"""
+        import subprocess
+        import tempfile
+        import threading
+
+        if self._lock is None:
+            self._lock = threading.Lock()
+
+        project_root = str(Path(__file__).parent.parent)
+        script_content = _WORKER_SCRIPT.format(
+            gpu_id=self.gpu_id,
+            project_root=project_root,
+        )
+
+        fd, self._script_path = tempfile.mkstemp(suffix="_embed_worker.py")
+        with os.fdopen(fd, "w") as f:
+            f.write(script_content)
+
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": str(self.gpu_id),
+               "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+               "OPENBLAS_NUM_THREADS": "1", "TORCH_NUM_THREADS": "1"}
+
+        self._process = subprocess.Popen(
+            [sys.executable, self._script_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            bufsize=0,
+        )
+
+        # 等待 "ready" 信号
+        import select
+        ready = False
+        for _ in range(60):
+            if select.select([self._process.stdout], [], [], 1.0)[0]:
+                line = self._process.stdout.readline()
+                if line:
+                    try:
+                        msg = json.loads(line.strip())
+                        if msg.get("status") == "ready":
+                            ready = True
+                            break
+                    except json.JSONDecodeError:
+                        pass
+
+        if ready:
+            print(f"[EmbeddingWorker] 启动成功 (pid={self._process.pid}, gpu={self.gpu_id})", file=sys.stderr)
+        else:
+            stderr_out = self._process.stderr.read(500).decode(errors="replace") if self._process.stderr else ""
+            print(f"[EmbeddingWorker] 启动失败: {stderr_out[-300:]}", file=sys.stderr)
+            self._process.terminate()
+
+    def extract(self, image_bytes_list: list[bytes], batch_size: int | None = None, timeout: float = 300) -> list[list[float] | None]:
+        """发送 embedding 请求并等待结果。"""
+        import tempfile
+        import pickle
+
+        if not image_bytes_list:
+            return []
+        if not self._process or self._process.poll() is not None:
+            raise RuntimeError("EmbeddingWorker 未运行")
+
+        with self._lock:
+            # 将图片数据写入临时文件（避免通过 stdin 传输大数据）
+            img_fd, img_file = tempfile.mkstemp(suffix=".pkl")
+            os.close(img_fd)
+            result_fd, result_file = tempfile.mkstemp(suffix=".pkl")
+            os.close(result_fd)
+
+            try:
+                with open(img_file, "wb") as f:
+                    pickle.dump(image_bytes_list, f)
+
+                req = json.dumps({
+                    "action": "embed",
+                    "img_file": img_file,
+                    "batch_size": batch_size or self.default_batch_size,
+                    "result_file": result_file,
+                })
+                self._process.stdin.write((req + "\n").encode())
+                self._process.stdin.flush()
+
+                # 等待结果文件
+                import time
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    if os.path.exists(result_file) and os.path.getsize(result_file) > 0:
+                        with open(result_file, "rb") as f:
+                            results = pickle.load(f)
+                        return results
+                    time.sleep(0.1)
+
+                print(f"[EmbeddingWorker] 超时 ({timeout}s)", file=sys.stderr)
+                return [None] * len(image_bytes_list)
+            finally:
+                for p in (img_file, result_file):
+                    try:
+                        os.unlink(p)
+                    except Exception:
+                        pass
+
+    @property
+    def is_alive(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def shutdown(self):
+        """关闭 worker 子进程。"""
+        if self._process and self._process.poll() is None:
+            try:
+                self._process.stdin.write(b'{"action":"shutdown"}\n')
+                self._process.stdin.flush()
+                self._process.wait(timeout=10)
+            except Exception:
+                pass
+            if self._process.poll() is None:
+                self._process.terminate()
+                self._process.wait(timeout=5)
+        if self._script_path:
+            try:
+                os.unlink(self._script_path)
+            except Exception:
+                pass
+        print("[EmbeddingWorker] 已关闭", file=sys.stderr)
 
 
 def extract_embeddings_in_subprocess(
@@ -211,45 +422,22 @@ def extract_embeddings_in_subprocess(
     gpu_id: int = 0,
     timeout: float = 600,
 ) -> list[list[float] | None]:
-    """在独立子进程中批量提取 embedding，避免 cuBLAS LT 线程安全问题。
+    """兼容旧接口。直接在调用线程中提取 embedding。
 
-    Args:
-        image_bytes_list: 图片 bytes 列表
-        batch_size: GPU 推理批大小
-        model_name: 模型名称
-        local_path: 本地模型路径
-        gpu_id: GPU 编号
-        timeout: 超时时间（秒）
-
-    Returns:
-        embedding 列表，失败的为 None
+    注：cuBLAS LT 在线程中 batch>1 会崩溃，因此 batch_size 固定为 1。
     """
-    import multiprocessing
-
     if not image_bytes_list:
         return []
 
-    result_queue = multiprocessing.Queue()
-    p = multiprocessing.Process(
-        target=_subprocess_worker,
-        args=(image_bytes_list, batch_size, model_name, local_path, gpu_id, result_queue),
-    )
-    p.start()
-
     try:
-        status, data = result_queue.get(timeout=timeout)
-        if status == "ok":
-            return data
-        else:
-            print(f"[Embedding-Subprocess] worker failed:\n{data}", file=sys.stderr)
-            return [None] * len(image_bytes_list)
-    except Exception:
-        print(f"[Embedding-Subprocess] timed out or queue error", file=sys.stderr)
+        from data_engine.embedding import CLIPEmbeddingExtractor
+        extractor = CLIPEmbeddingExtractor()
+        results = extractor.extract_embeddings_from_bytes_batch(image_bytes_list, batch_size=1)
+        del extractor
+        return results
+    except Exception as e:
+        print(f"[Embedding] failed: {e}", file=sys.stderr)
         return [None] * len(image_bytes_list)
-    finally:
-        p.join(timeout=10)
-        if p.is_alive():
-            p.terminate()
 
 
 def _ensure_pure_list(embedding: Any) -> list[float] | None:

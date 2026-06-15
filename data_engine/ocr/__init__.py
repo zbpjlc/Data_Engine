@@ -54,10 +54,20 @@ TEXT_LANCE_SCHEMA = pa.schema([
     pa.field("layout_confidence", pa.float32(), nullable=False),
     pa.field("image_data", pa.large_binary(), nullable=True),
     pa.field("embedding", pa.large_list(pa.float32()), nullable=True),
+    # 单模型结果（兼容旧字段）
     pa.field("text_content", pa.large_string(), nullable=True),
     pa.field("text_confidence", pa.float32(), nullable=True),
     pa.field("source_model", pa.large_string(), nullable=True),
+    # 多模型 OCR 结果
+    pa.field("paddle_text", pa.large_string(), nullable=True),
+    pa.field("paddle_confidence", pa.float32(), nullable=True),
+    pa.field("glm_text", pa.large_string(), nullable=True),
+    pa.field("glm_confidence", pa.float32(), nullable=True),
+    pa.field("self_text", pa.large_string(), nullable=True),
+    pa.field("self_confidence", pa.float32(), nullable=True),
+    # CMCV 结果
     pa.field("consistency_pattern", pa.large_string(), nullable=True),
+    pa.field("block_diff_json", pa.large_string(), nullable=True),
     pa.field("schema_version", pa.large_string(), nullable=False),
     pa.field("created_at", pa.large_string(), nullable=True),
 ])
@@ -72,10 +82,20 @@ FORMULA_LANCE_SCHEMA = pa.schema([
     pa.field("layout_confidence", pa.float32(), nullable=False),
     pa.field("image_data", pa.large_binary(), nullable=True),
     pa.field("embedding", pa.large_list(pa.float32()), nullable=True),
+    # 单模型结果（兼容旧字段）
     pa.field("formula_latex", pa.large_string(), nullable=True),
     pa.field("formula_confidence", pa.float32(), nullable=True),
     pa.field("source_model", pa.large_string(), nullable=True),
+    # 多模型 OCR 结果
+    pa.field("paddle_formula", pa.large_string(), nullable=True),
+    pa.field("paddle_confidence", pa.float32(), nullable=True),
+    pa.field("glm_formula", pa.large_string(), nullable=True),
+    pa.field("glm_confidence", pa.float32(), nullable=True),
+    pa.field("self_formula", pa.large_string(), nullable=True),
+    pa.field("self_confidence", pa.float32(), nullable=True),
+    # CMCV 结果
     pa.field("consistency_pattern", pa.large_string(), nullable=True),
+    pa.field("block_diff_json", pa.large_string(), nullable=True),
     pa.field("schema_version", pa.large_string(), nullable=False),
     pa.field("created_at", pa.large_string(), nullable=True),
 ])
@@ -90,11 +110,21 @@ TABLE_LANCE_SCHEMA = pa.schema([
     pa.field("layout_confidence", pa.float32(), nullable=False),
     pa.field("image_data", pa.large_binary(), nullable=True),
     pa.field("embedding", pa.large_list(pa.float32()), nullable=True),
+    # 单模型结果（兼容旧字段）
     pa.field("table_html", pa.large_string(), nullable=True),
     pa.field("table_json", pa.large_string(), nullable=True),
     pa.field("table_confidence", pa.float32(), nullable=True),
     pa.field("source_model", pa.large_string(), nullable=True),
+    # 多模型 OCR 结果
+    pa.field("paddle_table_json", pa.large_string(), nullable=True),
+    pa.field("paddle_confidence", pa.float32(), nullable=True),
+    pa.field("glm_table_json", pa.large_string(), nullable=True),
+    pa.field("glm_confidence", pa.float32(), nullable=True),
+    pa.field("self_table_json", pa.large_string(), nullable=True),
+    pa.field("self_confidence", pa.float32(), nullable=True),
+    # CMCV 结果
     pa.field("consistency_pattern", pa.large_string(), nullable=True),
+    pa.field("block_diff_json", pa.large_string(), nullable=True),
     pa.field("schema_version", pa.large_string(), nullable=False),
     pa.field("created_at", pa.large_string(), nullable=True),
 ])
@@ -102,7 +132,8 @@ TABLE_LANCE_SCHEMA = pa.schema([
 # ─── 类型分组映射 ──────────────────────────────────────────────────────────
 
 TEXT_BLOCK_TYPES = {"text", "title", "paragraph_title", "number", "header", "footer", "code_txt", "reference"}
-FORMULA_BLOCK_TYPES = {"equation_isolated", "equation_inline", "formula"}
+FORMULA_BLOCK_TYPES = {"equation_isolated", "equation_inline", "formula",
+                       "display_formula", "formula_number", "inline_formula"}
 TABLE_BLOCK_TYPES = {"table"}
 SKIP_BLOCK_TYPES = {"figure", "figure_caption", "figure_footnote", "abandon", "image"}
 

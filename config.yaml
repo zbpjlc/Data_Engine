@@ -27,6 +27,11 @@ embedding:
   batch_update_interval: 10000    # 每N条记录保存一次（降低以减少内存占用）
   progress_update_interval: 100  # 每N条记录更新一次进度到progress_state.json
   gc_interval: 1000              # 每N条记录做一次 gc.collect()
+  server:
+    host: "127.0.0.1"
+    port: 8090
+    gpu_id: 1                    # embedding 服务使用 GPU 1
+    batch_size: 32               # 批量推理批大小
 
 index:
   num_partitions: 64            # IVF_PQ 聚类分区数

@@ -10,7 +10,7 @@ import numpy as np
 
 from data_engine.clustering import KMeansClusterer, find_optimal_clusters
 from data_engine.config import get_config
-from data_engine.embedding import CLIPEmbeddingExtractor, _coerce_image_bytes, extract_embeddings_in_subprocess
+from data_engine.embedding import CLIPEmbeddingExtractor, _coerce_image_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ def cluster_by_type(
     cat: str,
     max_k: int = 10,
     progress_callback=None,
+    sample_ids: set[str] | None = None,
 ) -> dict:
     """读取 {cat}.lance，用 ViT 提取/复用每个 block 的 embedding，MiniBatchKMeans 聚类。
 
@@ -102,11 +103,20 @@ def cluster_by_type(
     if not lance_path.exists():
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": 0, "clusters": {}, "labels": {}}
 
+    # 创建本地 extractor（batch_size=1 避免 cuBLAS LT 在线程中崩溃）
+    _local_extractor = CLIPEmbeddingExtractor()
+
     # 第一次读取：只读轻量列（不含 image_data），避免内存爆炸
     _LIGHT_COLUMNS = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence", "embedding"]
     rows = _read_lance_rows(lance_path, columns=_LIGHT_COLUMNS)
     if not rows:
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": 0, "clusters": {}, "labels": {}}
+
+    # 按抽样 sample_ids 过滤（如有）
+    if sample_ids is not None:
+        rows = [r for r in rows if r.get("sample_id", "") in sample_ids]
+        if not rows:
+            return {"n_clusters": 0, "silhouette": 0, "total_blocks": 0, "clusters": {}, "labels": {}}
 
     total = len(rows)
     has_embedding_col = "embedding" in (rows[0] if rows else {})
@@ -181,15 +191,11 @@ def cluster_by_type(
             except Exception as e:
                 logger.warning("[layout_features] %s: failed to load image_data chunk: %s", cat, e)
 
-            # 批量 ViT 推理（在子进程中执行，避免 cuBLAS LT 线程安全问题）
+            # 批量 ViT 推理（batch_size=1 避免 cuBLAS LT 在线程中崩溃）
             if chunk_images:
                 image_list = list(chunk_images.values())
                 row_idx_list = list(chunk_images.keys())
-                vit_batch_size = get_config("clustering", "vit_batch_size", default=32)
-                emb_results = extract_embeddings_in_subprocess(
-                    image_list,
-                    batch_size=vit_batch_size,
-                )
+                emb_results = _local_extractor.extract_embeddings_from_bytes_batch(image_list, batch_size=1)
 
                 for row_idx, emb in zip(row_idx_list, emb_results):
                     if emb is not None:
@@ -223,12 +229,16 @@ def cluster_by_type(
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": total, "clusters": {}, "labels": {}}
 
     # 5. MiniBatchKMeans 聚类（与 Page-Level 相同：find_optimal_clusters + KMeansClusterer）
-    optimal_k = find_optimal_clusters(valid_embeddings, max_clusters=min(max_k, len(valid_embeddings)))
+    def _cluster_cb(cur, tot, msg):
+        if progress_callback:
+            progress_callback(total, total, f"{cat} {msg}")
+
+    optimal_k = find_optimal_clusters(valid_embeddings, max_clusters=min(max_k, len(valid_embeddings)), progress_callback=_cluster_cb)
     if progress_callback:
-        progress_callback(0, 1, f"{cat} 聚类 K={optimal_k}...")
+        progress_callback(total, total, f"{cat} 聚类 K={optimal_k}...")
 
     clusterer = KMeansClusterer(n_clusters=optimal_k)
-    labels_full = clusterer.fit_predict(embeddings)  # -1 for invalid embeddings
+    labels_full = clusterer.fit_predict(embeddings, progress_callback=_cluster_cb)  # -1 for invalid embeddings
     stats = clusterer.get_cluster_stats()
 
     # 6. 构建 cluster 统计（bbox 均值）
@@ -288,11 +298,28 @@ def _write_embeddings_back(lance_path: Path, rows: list[dict], keys: list[str], 
         sids = table.column("sample_id").to_pylist()
         bidxs = table.column("block_idx").to_pylist()
 
+        # 读取已有 embedding 列（用于保留未更新的行）
+        existing_embs = []
+        try:
+            existing_embs = table.column("embedding").to_pylist()
+        except (KeyError, ValueError):
+            existing_embs = [None] * len(sids)
+
         new_embeddings = []
-        for sid, bidx in zip(sids, bidxs):
+        for i, (sid, bidx) in enumerate(zip(sids, bidxs)):
             key = f"{sid}:{bidx}"
             emb = emb_map.get(key)
-            new_embeddings.append(emb)
+            if emb is not None:
+                # 新计算的 embedding → 安全转换
+                if hasattr(emb, 'tolist'):
+                    emb = emb.tolist()
+                elif not isinstance(emb, list):
+                    emb = list(emb)
+                emb = [float(x) for x in emb]
+                new_embeddings.append(emb)
+            else:
+                # 未计算的行 → 保留已有 embedding
+                new_embeddings.append(existing_embs[i] if i < len(existing_embs) else None)
 
         # 用新 embedding 列替换或添加
         new_col = pa.array(new_embeddings, type=pa.large_list(pa.float32()))
@@ -314,10 +341,14 @@ def cluster_all_types(
     manifests_dir: Path,
     max_k: int = 10,
     progress_callback=None,
+    sample_ids: set[str] | None = None,
 ) -> dict:
     """对 text / formula / table 分别做 ViT embedding + MiniBatchKMeans 聚类。
 
-    Embedding 提取在独立子进程中执行，避免 cuBLAS LT 线程安全问题。
+    每个类别创建独立的 extractor，batch_size=1 避免 cuBLAS LT 在线程中崩溃。
+
+    Args:
+        sample_ids: 可选，仅处理这些 sample_id 对应的 block（过滤旧数据）
 
     Returns:
         {"text": {...}, "formula": {...}, "table": {...}}
@@ -331,7 +362,13 @@ def cluster_all_types(
         lp = manifests_dir / f"{cat}.lance"
         if lp.exists():
             try:
-                n = _lance.dataset(str(lp)).count_rows()
+                ds = _lance.dataset(str(lp))
+                if sample_ids is not None:
+                    # 按抽样 ID 过滤计数
+                    all_sids = ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
+                    n = sum(1 for sid in all_sids if sid in sample_ids)
+                else:
+                    n = ds.count_rows()
                 cat_totals[cat] = n
                 grand_total += n
             except Exception:
@@ -365,7 +402,7 @@ def cluster_all_types(
                 progress_callback(global_cur, _grand, f"[{cat}] {msg}")
 
         print(f"[DEBUG] cluster_all_types: processing cat={cat}, total={cat_total}", flush=True)
-        result[cat] = cluster_by_type(manifests_dir, cat, max_k=max_k, progress_callback=_cb)
+        result[cat] = cluster_by_type(manifests_dir, cat, max_k=max_k, progress_callback=_cb, sample_ids=sample_ids)
         completed += cat_total
         logger.info(
             "[layout_features] %s: %d blocks -> %d clusters (silhouette=%.3f)",

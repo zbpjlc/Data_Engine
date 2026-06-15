@@ -26,7 +26,7 @@ class KMeansClusterer:
         self.labels = None
         self.silhouette_score = None
     
-    def fit_predict(self, embeddings: list[list[float]]) -> list[int]:
+    def fit_predict(self, embeddings: list[list[float]], progress_callback=None) -> list[int]:
         """拟合模型并预测聚类标签
         
         大数据集（>50K）：采样 fit + 全量 predict，大幅加速。
@@ -39,10 +39,16 @@ class KMeansClusterer:
         if not valid_indices:
             return []
         
+        if progress_callback:
+            progress_callback(0, 3, "构建特征矩阵...")
+        
         # 只转换有效 embedding（节省内存）
         X_valid = np.array([embeddings[i] for i in valid_indices], dtype=np.float32)
         
         sample_limit = get_config("clustering", "fit_sample_limit", default=50000)
+        
+        if progress_callback:
+            progress_callback(1, 3, f"KMeans 拟合 {len(X_valid)} 个 embedding...")
         
         if len(X_valid) > sample_limit:
             # 大数据集：采样 fit 学习质心，全量 predict 分配标签
@@ -56,6 +62,9 @@ class KMeansClusterer:
         
         self.cluster_centers = self.model.cluster_centers_
         
+        if progress_callback:
+            progress_callback(2, 3, "计算轮廓系数...")
+        
         # 计算轮廓系数（用采样数据加速）
         if len(set(self.labels)) > 1:
             if len(X_valid) > 10000:
@@ -66,15 +75,18 @@ class KMeansClusterer:
         else:
             self.silhouette_score = 0.0
         
+        if progress_callback:
+            progress_callback(3, 3, "聚类完成")
+        
         # 返回完整标签列表（包含无效embedding的标签）
         full_labels = [-1] * len(embeddings)  # -1表示无效embedding
         for i, idx in enumerate(valid_indices):
             full_labels[idx] = int(self.labels[i])
         
         # 释放内存
-        del X_valid
-        if len(X_valid) > sample_limit:
+        if valid_indices and len(valid_indices) > sample_limit:
             del X_fit
+        del X_valid
         
         return full_labels
     
@@ -92,7 +104,7 @@ class KMeansClusterer:
         }
 
 
-def find_optimal_clusters(embeddings: list[list[float]], max_clusters: int | None = None) -> int:
+def find_optimal_clusters(embeddings: list[list[float]], max_clusters: int | None = None, progress_callback=None) -> int:
     """使用轮廓系数找到最优聚类数量（MiniBatchKMeans 加速）
     
     大数据集（>50K）自动采样以加速最优 K 搜索。
@@ -123,8 +135,11 @@ def find_optimal_clusters(embeddings: list[list[float]], max_clusters: int | Non
     
     best_score = -1
     best_k = 1
+    k_range = list(range(2, min(max_clusters + 1, len(X_search))))
     
-    for k in range(2, min(max_clusters + 1, len(X_search))):
+    for k_idx, k in enumerate(k_range):
+        if progress_callback:
+            progress_callback(k_idx, len(k_range), f"搜索最优 K ({k}/{len(k_range)})...")
         kmeans = MiniBatchKMeans(
             n_clusters=k,
             random_state=random_state,
@@ -144,6 +159,9 @@ def find_optimal_clusters(embeddings: list[list[float]], max_clusters: int | Non
             if score > best_score:
                 best_score = score
                 best_k = k
+    
+    if progress_callback:
+        progress_callback(len(k_range), len(k_range), f"最优 K={best_k}")
     
     return best_k
 

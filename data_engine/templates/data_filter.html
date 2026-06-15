@@ -53,13 +53,13 @@
 
                 <!-- Tab 按钮 -->
                 <div class="flex space-x-1 mb-6">
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" data-panel="index">向量索引</button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" data-panel="index">Page_index</button>
                     <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="bucket">Page-Level Clusters</button>
                     <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="ocr">Page_OCR</button>
                     <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="diffsample">Page_CMCV</button>
                 </div>
 
-                <!-- ====== Panel: 向量索引 ====== -->
+                <!-- ====== Panel: Page_index ====== -->
                 <div id="panel-index" class="panel-content">
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <!-- 左侧：索引构建 -->
@@ -75,7 +75,7 @@
                                 </div>
                             </div>
                             <button id="btn-index" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium">
-                                构建向量索引
+                                构建Page_index
                             </button>
                         <div id="index-progress" class="hidden">
                             <div class="flex items-center justify-between text-sm mb-1">
@@ -418,6 +418,143 @@
                         请先完成 Element-Type 聚类
                     </div>
                 </div>
+
+                <!-- Section: Element OCR -->
+                <div class="border rounded-lg p-4 mb-6">
+                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">Element OCR (多模型识别)</h3>
+                    <div class="text-xs text-gray-500 mb-4">对抽样的 block 运行三个 OCR 模型，结果写回 text/formula/table.lance。</div>
+                    <div class="flex flex-wrap items-center gap-4 mb-4">
+                        <div class="flex items-center gap-2">
+                            <label class="text-xs text-gray-500">模型</label>
+                            <select id="eo-model" class="px-2 py-1 border border-gray-300 rounded text-sm">
+                                <option value="paddleocr">PaddleOCR</option>
+                                <option value="glm_ocr">GLM-OCR</option>
+                                <option value="self_ocr">Self-OCR</option>
+                            </select>
+                        </div>
+                        <label class="flex items-center gap-1 text-xs text-gray-500">
+                            <input type="checkbox" id="eo-test-mode"> Test Mode
+                        </label>
+                        <button id="btn-run-eo" class="px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 font-medium text-sm hidden">运行 OCR</button>
+                        <button id="btn-run-eo-all" class="px-4 py-2 bg-teal-800 text-white rounded-md hover:bg-teal-900 font-medium text-sm hidden">运行全部三模型</button>
+                    </div>
+                    <div id="eo-progress" class="hidden mb-4 space-y-2">
+                        <div id="eo-prog-paddleocr" class="hidden">
+                            <div class="flex items-center gap-2 mb-0.5">
+                                <div class="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full eo-spinner"></div>
+                                <span class="text-xs font-medium text-blue-700">PaddleOCR</span>
+                                <span class="text-xs text-gray-500 eo-msg">...</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-1.5">
+                                <div class="bg-blue-500 h-1.5 rounded-full transition-all duration-300 eo-bar" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <div id="eo-prog-glm_ocr" class="hidden">
+                            <div class="flex items-center gap-2 mb-0.5">
+                                <div class="animate-spin h-4 w-4 border-2 border-purple-500 border-t-transparent rounded-full eo-spinner"></div>
+                                <span class="text-xs font-medium text-purple-700">GLM OCR</span>
+                                <span class="text-xs text-gray-500 eo-msg">...</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-1.5">
+                                <div class="bg-purple-500 h-1.5 rounded-full transition-all duration-300 eo-bar" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <div id="eo-prog-self_ocr" class="hidden">
+                            <div class="flex items-center gap-2 mb-0.5">
+                                <div class="animate-spin h-4 w-4 border-2 border-green-500 border-t-transparent rounded-full eo-spinner"></div>
+                                <span class="text-xs font-medium text-green-700">Self OCR</span>
+                                <span class="text-xs text-gray-500 eo-msg">...</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-1.5">
+                                <div class="bg-green-500 h-1.5 rounded-full transition-all duration-300 eo-bar" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="eo-status" class="hidden mb-3">
+                        <div class="grid grid-cols-3 gap-2">
+                            <div class="bg-teal-50 border rounded p-2 text-center text-xs">
+                                <span class="text-teal-600">PaddleOCR</span>
+                                <span id="eo-paddle-status" class="ml-1">-</span>
+                            </div>
+                            <div class="bg-teal-50 border rounded p-2 text-center text-xs">
+                                <span class="text-teal-600">GLM-OCR</span>
+                                <span id="eo-glm-status" class="ml-1">-</span>
+                            </div>
+                            <div class="bg-teal-50 border rounded p-2 text-center text-xs">
+                                <span class="text-teal-600">Self-OCR</span>
+                                <span id="eo-self-status" class="ml-1">-</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="eo-empty" class="flex items-center justify-center h-16 text-gray-400 text-sm">
+                        请先完成每桶抽样
+                    </div>
+                </div>
+
+                <!-- Section: Element CMCV -->
+                <div class="border rounded-lg p-4 mb-6">
+                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">Element CMCV (一致性校验)</h3>
+                    <div class="text-xs text-gray-500 mb-4">对三模型 OCR 结果做 Cross-Model Consistency Verification，生成 easy/medium/hard 难度。</div>
+                    <div class="flex items-center gap-4 mb-4">
+                        <button id="btn-run-ecmcv" class="px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium text-sm hidden">运行 CMCV</button>
+                    </div>
+                    <div id="ecmcv-progress" class="hidden mb-4">
+                        <div class="flex items-center gap-3 mb-1">
+                            <div class="animate-spin h-5 w-5 border-2 border-rose-600 border-t-transparent rounded-full"></div>
+                            <span id="ecmcv-progress-msg" class="text-sm text-gray-600">...</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2">
+                            <div id="ecmcv-progress-bar" class="bg-rose-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div id="ecmcv-results" class="hidden">
+                        <div class="grid grid-cols-3 gap-3 mb-3">
+                            <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
+                                <div class="text-xs text-green-600">Easy</div>
+                                <div id="ecmcv-easy" class="text-xl font-bold text-green-800">-</div>
+                            </div>
+                            <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
+                                <div class="text-xs text-yellow-600">Medium</div>
+                                <div id="ecmcv-medium" class="text-xl font-bold text-yellow-800">-</div>
+                            </div>
+                            <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+                                <div class="text-xs text-red-600">Hard</div>
+                                <div id="ecmcv-hard" class="text-xl font-bold text-red-800">-</div>
+                            </div>
+                        </div>
+                        <div id="ecmcv-detail" class="text-xs text-gray-500"></div>
+                    </div>
+                    <div id="ecmcv-empty" class="flex items-center justify-center h-16 text-gray-400 text-sm">
+                        请先完成三模型 OCR
+                    </div>
+                </div>
+
+                <!-- Section: Element Difficulty Sampling -->
+                <div class="border rounded-lg p-4 mb-6">
+                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">Element 难度感知抽样</h3>
+                    <div class="text-xs text-gray-500 mb-4">基于 CMCV 难度分层抽样，输出最终训练集。</div>
+                    <div class="flex flex-wrap items-center gap-4 mb-4">
+                        <div class="flex items-center gap-1">
+                            <label class="text-xs text-green-700">Easy %</label>
+                            <input id="eds-easy" type="number" value="50" min="0" max="100" class="w-14 px-2 py-1 border border-gray-300 rounded text-sm">
+                        </div>
+                        <div class="flex items-center gap-1">
+                            <label class="text-xs text-yellow-700">Medium %</label>
+                            <input id="eds-medium" type="number" value="35" min="0" max="100" class="w-14 px-2 py-1 border border-gray-300 rounded text-sm">
+                        </div>
+                        <div class="flex items-center gap-1">
+                            <label class="text-xs text-red-700">Hard %</label>
+                            <input id="eds-hard" type="number" value="15" min="0" max="100" class="w-14 px-2 py-1 border border-gray-300 rounded text-sm">
+                        </div>
+                        <button id="btn-run-eds" class="px-4 py-2 bg-amber-600 text-white rounded-md hover:bg-amber-700 font-medium text-sm hidden">按难度抽样</button>
+                    </div>
+                    <div id="eds-results" class="hidden">
+                        <div id="eds-summary" class="text-sm text-gray-600"></div>
+                    </div>
+                    <div id="eds-empty" class="flex items-center justify-center h-16 text-gray-400 text-sm">
+                        请先完成 Element CMCV
+                    </div>
+                </div>
             </div>
 
             <!-- Layout 结果弹窗 -->
@@ -720,6 +857,8 @@
                 loadCachedBucketSamples(sourceId, batchId);
                 // 直接加载 category-stats（显示无图统计）
                 loadCategoryStatsDirectly(sourceId, [{source_id: sourceId, batch_id: batchId}]);
+                // 加载 Element-Type 聚类结果
+                loadEcResults(sourceId, batchId);
             } else {
                 const totalSamples = batchData.reduce((s,b)=>s+b.sample_count, 0);
                 document.getElementById('source-info').textContent = `全部 ${batchData.length} 个批次 | 共 ${totalSamples.toLocaleString()} 样本`;
@@ -788,10 +927,24 @@
                 if (this.dataset.panel === 'ocr') {
                     updateOcrBatchSelect();
                 }
+                // 切换到 Element-Level Tab 时自动加载聚类结果
+                if (this.dataset.panel === 'element-level') {
+                    renderEcBatchSelect();
+                    const src = getSourceId();
+                    const bid = getBatchId();
+                    if (src && bid) {
+                        loadEcResults(src, bid);
+                    } else if (src) {
+                        const filtered = batchData.filter(b => b.source_id === src);
+                        if (filtered.length > 0) {
+                            loadEcResults(filtered[0].source_id, filtered[0].batch_id);
+                        }
+                    }
+                }
             });
         });
 
-        // ── 向量索引 ──────────────────────────────────────────────────────────
+        // ── Page_index ──────────────────────────────────────────────────────────
         document.getElementById('btn-index').addEventListener('click', function() {
             const sourceId = getSourceId();
             if (!sourceId) { alert('请选择数据源'); return; }
@@ -864,7 +1017,7 @@
         function resetIndexBtn() {
             const btn = document.getElementById('btn-index');
             btn.disabled = false;
-            btn.textContent = '构建向量索引';
+            btn.textContent = '构建Page_index';
         }
 
         function loadIndexStats(sourceId, batchId) {
@@ -2603,10 +2756,37 @@
             updateEcButtonVisibility();
             document.getElementById('ec-results').classList.add('hidden');
             document.getElementById('ec-empty').classList.remove('hidden');
+            // 尝试加载新数据源的聚类结果
+            const src = getSourceId();
+            const bid = getBatchId();
+            if (src && bid) loadEcResults(src, bid);
         });
 
         // 页面加载时初始化 EC 批次选择
         renderEcBatchSelect();
+
+        // 页面加载时尝试加载已有聚类结果
+        (function() {
+            const src = getSourceId();
+            const bid = getBatchId();
+            if (src && bid) {
+                loadEcResults(src, bid);
+            } else if (src && batchData.length > 0) {
+                // 没有选中具体批次 → 尝试加载第一个有结果的批次
+                const filtered = batchData.filter(b => b.source_id === src);
+                for (const b of filtered) {
+                    fetch(`/api/element-clusters/${b.source_id}/${b.batch_id}`)
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.status === 'completed' && data.result) {
+                                loadEcResults(b.source_id, b.batch_id);
+                            }
+                        })
+                        .catch(() => {});
+                    break;  // 只尝试第一个
+                }
+            }
+        })();
 
         document.getElementById('btn-run-ec').addEventListener('click', function() {
             if (ecSelectedBatches.size === 0) { alert('请选择批次'); return; }
@@ -2801,6 +2981,282 @@
 
         // 初始化
         renderEcBatchSelect();
+
+        // === Element OCR ===
+        const eoProgress = document.getElementById('eo-progress');
+        const eoProgressMsg = document.getElementById('eo-progress-msg');
+        const eoBtn = document.getElementById('btn-run-eo');
+        const eoBtnAll = document.getElementById('btn-run-eo-all');
+        const eoStatus = document.getElementById('eo-status');
+        const eoEmpty = document.getElementById('eo-empty');
+
+        function showElemOcrButtons(show) {
+            eoBtn.classList.toggle('hidden', !show);
+            eoBtnAll.classList.toggle('hidden', !show);
+            eoEmpty.classList.toggle('hidden', show);
+            if (show) eoStatus.classList.remove('hidden');
+        }
+
+        // === Element OCR polling helpers ===
+
+        // Per-model progress helpers
+        function _showModelProgress(model) {
+            const row = document.getElementById(`eo-prog-${model}`);
+            if (row) { row.classList.remove('hidden'); }
+            eoProgress.classList.remove('hidden');
+        }
+        function _hideAllModelProgress() {
+            ['paddleocr', 'glm_ocr', 'self_ocr'].forEach(m => {
+                const row = document.getElementById(`eo-prog-${m}`);
+                if (row) {
+                    row.classList.add('hidden');
+                    row.querySelector('.eo-msg').textContent = '...';
+                    row.querySelector('.eo-bar').style.width = '0%';
+                }
+            });
+        }
+        function _updateModelProgress(model, msg, pctVal) {
+            const row = document.getElementById(`eo-prog-${model}`);
+            if (!row) return;
+            row.querySelector('.eo-msg').textContent = `${msg} (${pctVal}%)`;
+            row.querySelector('.eo-bar').style.width = `${pctVal}%`;
+        }
+        function _stopModelSpinner(model) {
+            const row = document.getElementById(`eo-prog-${model}`);
+            if (!row) return;
+            const spinner = row.querySelector('.eo-spinner');
+            if (spinner) spinner.classList.add('hidden');
+        }
+        function _checkAllDone() {
+            const anyVisible = ['paddleocr', 'glm_ocr', 'self_ocr'].some(m => {
+                const row = document.getElementById(`eo-prog-${m}`);
+                return row && !row.classList.contains('hidden');
+            });
+            // hide only when user manually clicks again; leave visible for status reference
+        }
+
+        function pollElementOcr(taskId, model, onDone) {
+            const iv = setInterval(async () => {
+                try {
+                    const r = await fetch(`/api/tasks/${taskId}`);
+                    const d = await r.json();
+                    const prog = d.progress || {};
+                    const pctVal = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
+                    _updateModelProgress(model, d.message || '...', pctVal);
+                    if (d.status === 'completed' || d.status === 'failed' || d.status === 'stopped') {
+                        clearInterval(iv);
+                        _stopModelSpinner(model);
+                        const prefix = model === 'paddleocr' ? 'paddle' : model === 'glm_ocr' ? 'glm' : 'self';
+                        const statusEl = document.getElementById(`eo-${prefix}-status`);
+                        if (statusEl) statusEl.textContent = d.status === 'completed' ? '✅' : '❌';
+                        if (onDone) onDone();
+                    }
+                } catch { clearInterval(iv); }
+            }, 2000);
+        }
+
+        async function runElementOcr(model) {
+            const src = _ecsBatch?.source_id || getSourceId();
+            const bid = _ecsBatch?.batch_id || getBatchId();
+            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
+            eoBtn.disabled = true; eoBtnAll.disabled = true;
+            _showModelProgress(model);
+
+            const testMode = document.getElementById('eo-test-mode').checked;
+            try {
+                const resp = await fetch(`/api/element-ocr/${src}/${bid}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({model, test_mode: testMode}),
+                });
+                const data = await resp.json();
+                if (data.status === 'already_running') {
+                    _updateModelProgress(model, '任务已在运行', 0);
+                    return;
+                }
+                pollElementOcr(data.task_id, model, () => {
+                    eoBtn.disabled = false; eoBtnAll.disabled = false;
+                });
+            } catch (e) {
+                _hideAllModelProgress();
+                eoBtn.disabled = false; eoBtnAll.disabled = false;
+                alert(`启动失败: ${e.message}`);
+            }
+        }
+
+        eoBtn.addEventListener('click', () => runElementOcr(document.getElementById('eo-model').value));
+        eoBtnAll.addEventListener('click', async () => {
+            const src = _ecsBatch?.source_id || getSourceId();
+            const bid = _ecsBatch?.batch_id || getBatchId();
+            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
+            eoBtnAll.disabled = true; eoBtn.disabled = true;
+            _hideAllModelProgress();
+
+            const models = ['paddleocr', 'glm_ocr', 'self_ocr'];
+            const testMode = document.getElementById('eo-test-mode').checked;
+            let doneCount = 0;
+
+            // Start all models, show progress rows for each
+            for (const m of models) {
+                _showModelProgress(m);
+                _updateModelProgress(m, '启动中...', 0);
+                try {
+                    const resp = await fetch(`/api/element-ocr/${src}/${bid}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({model: m, test_mode: testMode}),
+                    });
+                    const data = await resp.json();
+                    if (data.task_id) {
+                        pollElementOcr(data.task_id, m, () => {
+                            doneCount++;
+                            if (doneCount >= models.length) {
+                                eoBtn.disabled = false; eoBtnAll.disabled = false;
+                            }
+                        });
+                    }
+                } catch (e) {
+                    _updateModelProgress(m, `启动失败: ${e.message}`, 0);
+                    _stopModelSpinner(m);
+                    doneCount++;
+                    if (doneCount >= models.length) {
+                        eoBtn.disabled = false; eoBtnAll.disabled = false;
+                    }
+                }
+            }
+        });
+
+        // === Element CMCV ===
+        const ecmcvBtn = document.getElementById('btn-run-ecmcv');
+        const ecmcvProgress = document.getElementById('ecmcv-progress');
+        const ecmcvProgressMsg = document.getElementById('ecmcv-progress-msg');
+        const ecmcvResults = document.getElementById('ecmcv-results');
+        const ecmcvEmpty = document.getElementById('ecmcv-empty');
+
+        function showElemCmcvButton(show) {
+            ecmcvBtn.classList.toggle('hidden', !show);
+            ecmcvEmpty.classList.toggle('hidden', show);
+        }
+
+        ecmcvBtn.addEventListener('click', async () => {
+            const src = _ecsBatch?.source_id || getSourceId();
+            const bid = _ecsBatch?.batch_id || getBatchId();
+            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
+            ecmcvBtn.disabled = true;
+            ecmcvProgress.classList.remove('hidden');
+            ecmcvProgressMsg.textContent = '启动 CMCV...';
+            try {
+                const resp = await fetch(`/api/element-cmcv/${src}/${bid}`, {method: 'POST'});
+                const data = await resp.json();
+                if (data.task_id) {
+                    const ecmcvBar = document.getElementById('ecmcv-progress-bar');
+                    const iv = setInterval(async () => {
+                        try {
+                            const r = await fetch(`/api/tasks/${data.task_id}`);
+                            const d = await r.json();
+                            const prog = d.progress || {};
+                            const pctVal = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
+                            ecmcvProgressMsg.textContent = `${d.message || '...'} (${pctVal}%)`;
+                            ecmcvBar.style.width = `${pctVal}%`;
+                            if (['completed','failed','stopped'].includes(d.status)) {
+                                clearInterval(iv);
+                                ecmcvProgress.classList.add('hidden');
+                                ecmcvBar.style.width = '0%';
+                                ecmcvBtn.disabled = false;
+                                if (d.status === 'completed') loadElemCmcvResults();
+                            }
+                        } catch { clearInterval(iv); }
+                    }, 2000);
+                }
+            } catch (e) {
+                ecmcvProgress.classList.add('hidden');
+                ecmcvBtn.disabled = false;
+                alert(`CMCV 启动失败: ${e.message}`);
+            }
+        });
+
+        async function loadElemCmcvResults() {
+            try {
+                const src = getSourceId();
+                const bid = getBatchId();
+                const resp = await fetch(`/api/element-cmcv/${src}/${bid}/results`);
+                const data = await resp.json();
+                if (data.status === 'not_found') return;
+                const hist = data.tier_histogram || {};
+                document.getElementById('ecmcv-easy').textContent = hist.easy || 0;
+                document.getElementById('ecmcv-medium').textContent = hist.medium || 0;
+                document.getElementById('ecmcv-hard').textContent = hist.hard || 0;
+                document.getElementById('ecmcv-detail').textContent =
+                    `处理 ${data.processed || 0} blocks, ${Object.keys(data.page_tiers || {}).length} pages`;
+                ecmcvResults.classList.remove('hidden');
+                ecmcvEmpty.classList.add('hidden');
+                showElemDiffSampling(true);
+            } catch {}
+        }
+
+        // === Element Difficulty Sampling ===
+        const edsBtn = document.getElementById('btn-run-eds');
+        const edsResults = document.getElementById('eds-results');
+        const edsEmpty = document.getElementById('eds-empty');
+
+        function showElemDiffSampling(show) {
+            edsBtn.classList.toggle('hidden', !show);
+            edsEmpty.classList.toggle('hidden', show);
+        }
+
+        edsBtn.addEventListener('click', async () => {
+            const src = _ecsBatch?.source_id || getSourceId();
+            const bid = _ecsBatch?.batch_id || getBatchId();
+            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
+            edsBtn.disabled = true;
+            edsBtn.textContent = '抽样中...';
+            const easy = document.getElementById('eds-easy').value;
+            const medium = document.getElementById('eds-medium').value;
+            const hard = document.getElementById('eds-hard').value;
+            try {
+                const resp = await fetch(
+                    `/api/element-difficulty-samples/${src}/${bid}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}`
+                );
+                const data = await resp.json();
+                const summary = data.summary || {};
+                let html = `<div class="font-medium mb-2">总计抽样: <b>${data.total_sampled || 0}</b> blocks</div>`;
+                html += '<div class="grid grid-cols-3 gap-2">';
+                for (const [tier, info] of Object.entries(summary)) {
+                    const color = tier === 'easy' ? 'green' : tier === 'medium' ? 'yellow' : 'red';
+                    html += `<div class="bg-${color}-50 border rounded p-2 text-center text-xs">
+                        <div class="text-${color}-700 font-medium">${tier}</div>
+                        <div>${info.sampled}/${info.total} (${(info.ratio * 100).toFixed(0)}%)</div>
+                    </div>`;
+                }
+                html += '</div>';
+                document.getElementById('eds-summary').innerHTML = html;
+                edsResults.classList.remove('hidden');
+                edsEmpty.classList.add('hidden');
+            } catch (e) {
+                alert(`抽样失败: ${e.message}`);
+            } finally {
+                edsBtn.disabled = false;
+                edsBtn.textContent = '按难度抽样';
+            }
+        });
+
+        // 当每桶抽样完成时，显示 OCR/CMCV 按钮
+        const origEcsHandler = document.getElementById('btn-run-ecs');
+        if (origEcsHandler) {
+            const obs = new MutationObserver(() => {
+                const ecsRes = document.getElementById('ecs-results');
+                if (ecsRes && !ecsRes.classList.contains('hidden')) {
+                    showElemOcrButtons(true);
+                    showElemCmcvButton(true);
+                    // 尝试加载已有 CMCV 结果
+                    const ecsSrc = getSourceId();
+                    const ecsBid = getBatchId();
+                    if (ecsSrc && ecsBid) loadElemCmcvResults();
+                }
+            });
+            const ecsResEl = document.getElementById('ecs-results');
+            if (ecsResEl) obs.observe(ecsResEl, {attributes: true, attributeFilter: ['class']});
+        }
     </script>
 </body>
 </html>
