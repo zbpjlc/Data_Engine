@@ -1879,21 +1879,60 @@ async def get_category_stats(source_id: str, batch_id: str):
         for cat in ("text", "formula", "table"):
             lance_path = manifests_dir / f"{cat}.lance"
             if lance_path.exists():
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lance_path))
-                    n = ds.count_rows()
-                    cols = ds.schema.names
-                    no_img = 0
-                    if "image_data" in cols:
-                        try:
-                            no_img = ds.count_rows("image_data IS NULL")
-                        except Exception:
-                            pass
+                ds = lance.dataset(str(lance_path))
+                n = ds.count_rows()
+                cols = ds.schema.names
+                no_img = 0
+                if "image_data" in cols:
+                    try:
+                        no_img = ds.count_rows("image_data IS NULL")
+                    except Exception:
+                        pass
                 stats[cat] = {"count": n, "columns": cols, "no_image": no_img}
             else:
                 stats[cat] = {"count": 0, "columns": [], "no_image": 0}
 
         return {"source_id": source_id, "batch_id": batch_id, "categories": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/category-stats-batch")
+async def get_category_stats_batch(request: Request):
+    """批量获取多个批次的 category-stats，一次请求返回所有结果。"""
+    try:
+        targets = await request.json()  # [{source_id, batch_id}, ...]
+        results = {}
+        for t in targets:
+            sid = t.get("source_id", "")
+            bid = t.get("batch_id", "")
+            if not sid or not bid:
+                continue
+            try:
+                source = registry.get(sid)
+                batch_dir = source.resolve_batch_dir(bid)
+                manifests_dir = batch_dir / "manifests"
+                stats = {}
+                for cat in ("text", "formula", "table"):
+                    lp = manifests_dir / f"{cat}.lance"
+                    if lp.exists():
+                        ds = lance.dataset(str(lp))
+                        n = ds.count_rows()
+                        cols = ds.schema.names
+                        no_img = 0
+                        if "image_data" in cols:
+                            try:
+                                no_img = ds.count_rows("image_data IS NULL")
+                            except Exception:
+                                pass
+                        stats[cat] = {"count": n, "columns": cols, "no_image": no_img}
+                    else:
+                        stats[cat] = {"count": 0, "columns": [], "no_image": 0}
+                results[f"{sid}/{bid}"] = {"source_id": sid, "batch_id": bid, "categories": stats}
+            except Exception as e:
+                print(f"[category-stats-batch] {sid}/{bid} error: {e}", file=sys.stderr)
+                results[f"{sid}/{bid}"] = {"source_id": sid, "batch_id": bid, "error": str(e)}
+        return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2097,6 +2136,51 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
         return result
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/bucket-samples-batch")
+async def get_bucket_samples_batch(request: Request, full: bool = False):
+    """批量获取多个批次的抽样缓存摘要，一次请求返回所有结果。
+    full=false 时只返回摘要（不含 buckets 详情），减少传输量。
+    full=true 时返回完整数据（含 buckets）。"""
+    try:
+        targets = await request.json()  # [{source_id, batch_id}, ...]
+        results = {}
+        for t in targets:
+            sid = t.get("source_id", "")
+            bid = t.get("batch_id", "")
+            if not sid or not bid:
+                continue
+            try:
+                source = registry.get(sid)
+                batch_dir = source.resolve_batch_dir(bid)
+                cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+                if cache_path.exists():
+                    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                    total = cached.get("total_sampled", 0)
+                    if total > 0:
+                        if full:
+                            # 返回完整数据
+                            results[f"{sid}/{bid}"] = cached
+                        else:
+                            # 只返回摘要
+                            results[f"{sid}/{bid}"] = {
+                                "source_id": cached.get("source_id", sid),
+                                "batch_id": cached.get("batch_id", bid),
+                                "count_per_bucket": cached.get("count_per_bucket", 0),
+                                "bucket_count": cached.get("bucket_count", 0),
+                                "bucket_sizes": cached.get("bucket_sizes", {}),
+                                "total_sampled": total,
+                                "strategy": cached.get("strategy"),
+                                "partition_tiers": cached.get("partition_tiers"),
+                                "ratios": cached.get("ratios"),
+                                "batch_info": cached.get("batch_info"),
+                            }
+            except Exception as e:
+                print(f"[bucket-samples-batch] {sid}/{bid} error: {e}", file=sys.stderr)
+        return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

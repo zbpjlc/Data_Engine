@@ -949,11 +949,17 @@
         // 直接加载 category-stats，显示拆分结果和无图统计
         function loadCategoryStatsDirectly(sourceId, batchList, signal) {
             if (!batchList || batchList.length === 0) return;
-            const statsPromises = batchList.map(b =>
-                cachedFetch(`/api/category-stats/${b.source_id}/${b.batch_id}`, signal ? {signal} : {})
-                    .catch(e => e.name === 'AbortError' ? null : null)
-            );
-            Promise.all(statsPromises).then(results => {
+            const targets = batchList.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            fetch('/api/category-stats-batch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(targets),
+                signal: signal || undefined,
+            })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+                if (!data) return;
+                const results = Object.values(data);  // 转为数组
                 let totalText = 0, totalFormula = 0, totalTable = 0;
                 results.forEach(sr => {
                     if (sr && sr.categories) {
@@ -969,21 +975,24 @@
                     document.getElementById('split-table-count').textContent = totalTable.toLocaleString();
                     updateNoImageDisplay(results);
                 }
-            });
+            })
+            .catch(e => { if (e.name !== 'AbortError') console.error('[category-stats-batch]', e); });
         }
 
         function loadAllCachedBuckets(sourceId, batchList, signal) {
             if (!batchList || batchList.length === 0) return;
 
-            const promises = batchList.map(b => {
-                let url = `/api/bucket-samples/${b.source_id}/${b.batch_id}`;
-                return cachedFetch(url, signal ? {signal} : {})
-                    .then(data => data && data.total_sampled > 0 ? data : null)
-                    .catch(() => null);
-            });
-
-            Promise.all(promises).then(results => {
-                const valid = results.filter(d => d);
+            const targets = batchList.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            fetch('/api/bucket-samples-batch?full=true', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(targets),
+                signal: signal || undefined,
+            })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+                if (!data) return;
+                const valid = Object.values(data).filter(d => d && d.total_sampled > 0);
                 if (valid.length === 0) {
                     document.getElementById('bucket-empty').textContent = '点击「重新抽样」开始抽样';
                     document.getElementById('bucket-empty').classList.remove('hidden');
@@ -1044,7 +1053,8 @@
 
                 // 恢复 pp-layout + 拆分的 category-stats 卡片
                 restoreSplitStats(merged.batch_info || []);
-            });
+            })
+            .catch(e => { if (e.name !== 'AbortError') console.error('[bucket-samples-batch]', e); });
         }
 
         selBatch.addEventListener('change', debounce(function() {
@@ -2159,17 +2169,26 @@
                 return;
             }
             container.innerHTML = '<div class="text-gray-400">加载中...</div>';
-            Promise.all(filtered.map(b =>
-                cachedFetch(`/api/bucket-samples/${b.source_id}/${b.batch_id}`)
-                    .then(data => ({...b, cached: data && data.total_sampled > 0, sampled: data ? data.total_sampled : 0}))
-                    .catch(() => ({...b, cached: false, sampled: 0}))
-            )).then(results => {
+
+            // 使用批量接口一次获取所有抽样状态
+            const targets = filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            fetch('/api/bucket-samples-batch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(targets),
+            })
+            .then(r => r.ok ? r.json() : ({}))
+            .then(cacheData => {
                 let html = '';
-                results.forEach(b => {
+                filtered.forEach(b => {
+                    const key = `${b.source_id}/${b.batch_id}`;
+                    const cached = cacheData[key];
+                    const sampled = cached ? cached.total_sampled : 0;
+                    const isCached = sampled > 0;
                     const label = sourceId ? b.batch_id : `${b.source_id}/${b.batch_id}`;
-                    const status = b.cached ? `<span class="text-green-600">已抽样 ${b.sampled} 个</span>` : '<span class="text-gray-400">未抽样</span>';
-                    html += `<label class="flex items-center gap-2 cursor-pointer hover:bg-gray-50 px-2 py-1.5 rounded ${b.cached ? '' : 'opacity-50'}">
-                        <input type="checkbox" class="ocr-batch-cb rounded" value="${b.batch_id}" data-source="${b.source_id}" ${b.cached ? 'checked' : 'disabled'}>
+                    const status = isCached ? `<span class="text-green-600">已抽样 ${sampled} 个</span>` : '<span class="text-gray-400">未抽样</span>';
+                    html += `<label class="flex items-center gap-2 cursor-pointer hover:bg-gray-50 px-2 py-1.5 rounded ${isCached ? '' : 'opacity-50'}">
+                        <input type="checkbox" class="ocr-batch-cb rounded" value="${b.batch_id}" data-source="${b.source_id}" ${isCached ? 'checked' : 'disabled'}>
                         <div class="flex-1">
                             <div class="font-medium">${label}</div>
                             <div class="text-gray-400">${b.sample_count.toLocaleString()} 样本 · ${status}</div>
@@ -2177,6 +2196,9 @@
                     </label>`;
                 });
                 container.innerHTML = html;
+            })
+            .catch(() => {
+                container.innerHTML = '<div class="text-red-400">加载失败</div>';
             });
         }
 
@@ -2486,12 +2508,16 @@
             if (!batchInfo.length) return;
             // 确保补齐无图按钮能拿到批次信息
             _splitTargets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            const statsPromises = batchInfo.map(b =>
-                fetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
-                    .then(r => r.json())
-                    .catch(() => null)
-            );
-            Promise.all(statsPromises).then(results => {
+            const targets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            fetch('/api/category-stats-batch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(targets),
+            })
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+                if (!data) return;
+                const results = Object.values(data);
                 let totalText = 0, totalFormula = 0, totalTable = 0;
                 results.forEach(sr => {
                     if (sr && sr.categories) {
@@ -2509,7 +2535,8 @@
                         `<span class="text-green-600 font-medium">上次拆分结果已恢复</span>`;
                     updateNoImageDisplay(results);
                 }
-            });
+            })
+            .catch(e => console.error('[restoreSplitStats]', e));
         }
 
         // 更新无图统计显示 + 补齐按钮
