@@ -1271,6 +1271,7 @@ async def get_progress():
                     "message": task.message,
                     "error_message": task.error_message,
                     "elapsed_time": task.elapsed_time,
+                    "elapsed_seconds": round(task.elapsed_time, 1),
                     "start_time": task.start_time
                 }
                 for task_id, task in tasks.items()
@@ -1480,7 +1481,7 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                         with _lance_write_lock:
                             ds_el = lance.dataset(str(element_path))
                             ref_cols = ["sample_id", "block_idx", "paddle_text", "glm_text",
-                                        "paddle_table_json", "glm_table_json",
+                                        "paddle_table", "glm_table",
                                         "paddle_formula", "glm_formula"]
                             ref_cols = [c for c in ref_cols if c in ds_el.schema.names]
                             ref_rows = ds_el.to_table(columns=ref_cols).to_pylist()
@@ -1518,7 +1519,7 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                                     "sample_id", "block_idx",
                                     "paddle_text", "glm_text", "self_text",
                                     "paddle_confidence", "glm_confidence", "self_confidence",
-                                    "paddle_table_json", "glm_table_json", "self_table_json",
+                                    "paddle_table", "glm_table", "self_table",
                                     "paddle_formula", "glm_formula", "self_formula",
                                     "paddle_raw_json", "glm_raw_json", "self_raw_json",
                                     "consistency_pattern", "block_diff_json",
@@ -1585,7 +1586,7 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
 
                     progress_tracker.update_progress(
                         task_id=task_id, current=skipped + idx + 1,
-                        message=f"{model}: {skipped + idx + 1}/{total}",
+                        message=f"{model}"
                     )
 
                     if len(all_rows) >= save_interval:
@@ -3461,7 +3462,11 @@ async def get_element_clusters(source_id: str, batch_id: str):
                 return {
                     "status": status,
                     "message": task_info.message,
-                    "progress": {"current": task_info.current, "total": task_info.total},
+                    "progress": {
+                        "current": task_info.current,
+                        "total": task_info.total,
+                        "elapsed_seconds": round(task_info.elapsed_time, 1),
+                    },
                 }
             if status == "failed":
                 return {
@@ -3480,7 +3485,10 @@ async def get_element_clusters(source_id: str, batch_id: str):
             return {"status": "not_started", "result": None}
         
         result = json.loads(out_path.read_text(encoding="utf-8"))
-        return {"status": "completed", "result": result}
+        resp = {"status": "completed", "result": result}
+        if task_info and task_info.elapsed_time > 0:
+            resp["elapsed_seconds"] = round(task_info.elapsed_time, 1)
+        return resp
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -3534,29 +3542,33 @@ async def element_sample(source_id: str, batch_id: str, request: Request):
 
             try:
                 ds = lance.dataset(str(lance_path))
-                all_rows = ds.to_table().to_pylist()
+                # 只读 key 列，避免加载 image_data 二进制
+                key_table = ds.to_table(columns=["sample_id", "block_idx"])
+                key_rows = key_table.to_pylist()
             except Exception:
                 summary[cat] = {"clusters": len(cluster_members), "sampled": 0}
                 continue
 
-            # 构建 key -> row 映射
-            row_map: dict[str, dict] = {}
-            for row in all_rows:
+            # 构建 key 集合（只用于存在性检查）
+            key_set: set[str] = set()
+            for row in key_rows:
                 key = f"{row.get('sample_id', '')}:{row.get('block_idx', 0)}"
-                row_map[key] = row
+                key_set.add(key)
 
             # 每桶抽样
             cat_sampled = 0
             cluster_details = []
             for cid, members in sorted(cluster_members.items()):
-                available = [m for m in members if m in row_map]
+                available = [m for m in members if m in key_set]
                 n = min(per_cluster, len(available))
                 sampled_keys = random.sample(available, n) if n > 0 else []
                 for k in sampled_keys:
+                    sid, bidx = k.rsplit(":", 1)
                     all_samples.append({
                         "category": cat,
                         "cluster_id": cid,
-                        **row_map[k],
+                        "sample_id": sid,
+                        "block_idx": int(bidx),
                     })
                 cat_sampled += len(sampled_keys)
                 cluster_details.append({"cluster_id": cid, "total": len(available), "sampled": len(sampled_keys)})
@@ -3654,16 +3666,20 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 conf_col = f"{prefix}_confidence"
 
                 # 断点续跑：收集已有结果的 (sample_id, block_idx)
+                # 优化：使用 filter 下推，不读大文本列，IO 减少 90%+
                 done_keys: set[tuple[str, int]] = set()
                 for cat, lp_str in cat_paths:
                     try:
                         ds = lance.dataset(lp_str)
                         if text_col in ds.schema.names:
-                            tbl = ds.to_table(columns=["sample_id", "block_idx", text_col])
-                            for row in tbl.to_pylist():
-                                val = row.get(text_col)
-                                if val is not None and val != "":
-                                    done_keys.add((row["sample_id"], row["block_idx"]))
+                            tbl = ds.to_table(
+                                columns=["sample_id", "block_idx"],
+                                filter=f"{text_col} IS NOT NULL AND {text_col} != ''"
+                            )
+                            done_keys.update(
+                                (row["sample_id"], row["block_idx"])
+                                for row in tbl.to_pylist()
+                            )
                     except Exception as e:
                         print(f"[el-ocr] resume 读 {cat} 失败: {e}", file=sys.stderr)
 
@@ -3679,8 +3695,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 progress_tracker.start_task(
                     task_id=task_id, task_type="el_ocr",
                     source_id=source_id, batch_id=batch_id,
-                    total=remaining_blocks,
-                    message=f"{model}: {remaining_blocks} 个待处理（跳过 {len(done_keys)} 已完成）",
+                    total=total_blocks,
+                    message=f"{model}: {total_blocks} 个 block（跳过 {len(done_keys)} 已完成，待处理 {remaining_blocks}）",
                 )
 
                 from data_engine.ocr.base import LayoutBlock
@@ -3691,9 +3707,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 skipped = 0
                 save_interval = int(get_config("ocr", "save_interval", default=20))
                 pending_rows: dict[str, list[dict]] = {"text": [], "formula": [], "table": []}
-                FETCH_BATCH = 500  # 每次从 Lance 取多少行
 
-                # 阶段 2：按类别分批流式读取，每批 500 行
+                # 阶段 2：按类别流式处理，逐批读取并处理
                 for cat, lp_str in cat_paths:
                     if progress_tracker.is_stopped(task_id):
                         break
@@ -3703,7 +3718,16 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                         print(f"[el-ocr] 打开 {cat}.lance 失败: {e}", file=sys.stderr)
                         continue
 
-                    for batch in ds.to_batches(batch_size=FETCH_BATCH):
+                    progress_tracker.update_progress(
+                        task_id, current=done,
+                        message=f"{model}: 扫描 {cat} 数据..."
+                    )
+
+                    # 单次流式读取所有列（含 image_data），小批量处理
+                    # 不依赖 _rowid，避免 merge_insert 后 rowid 失效
+                    STREAM_BATCH = 100  # 每次流式读取的行数
+                    scan_done = 0
+                    for batch in ds.to_batches(batch_size=STREAM_BATCH):
                         if progress_tracker.is_stopped(task_id):
                             break
                         rows = batch.to_pylist()
@@ -3713,24 +3737,22 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
 
                             sid = row["sample_id"]
                             bidx = row["block_idx"]
-
-                            # 断点续跑：跳过已完成的 block
-                            if (sid, bidx) in done_keys:
+                            key = (sid, bidx)
+                            if key in done_keys:
                                 done += 1
-                                progress_tracker.update_progress(
-                                    task_id, current=done,
-                                    message=f"{model}: {done}/{remaining_blocks}（已完成）"
-                                )
+                                scan_done += 1
                                 continue
 
                             img_bytes = row.get("image_data")
                             if not img_bytes:
                                 skipped += 1
                                 done += 1
-                                progress_tracker.update_progress(
-                                    task_id, current=done,
-                                    message=f"{model}: {done}/{remaining_blocks}（跳过 {skipped} 无图）"
-                                )
+                                scan_done += 1
+                                if scan_done % 50 == 0:
+                                    progress_tracker.update_progress(
+                                        task_id, current=done,
+                                        message=f"{model}: 跳过 {skipped} 无图"
+                                    )
                                 continue
 
                             tmp_path = Path(tmp_dir) / f"{cat}_{sid}_{bidx}.png"
@@ -3756,7 +3778,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                     conf_col: r.confidence if r else 0.0,
                                 }
                                 if cat == "table" and r and r.table_structure:
-                                    ocr_row[f"{prefix}_table_json"] = json.dumps(r.table_structure, ensure_ascii=False)
+                                    ocr_row[f"{prefix}_table"] = json.dumps(r.table_structure, ensure_ascii=False)
                                 if cat == "formula" and r and r.formula_latex:
                                     ocr_row[f"{prefix}_formula"] = r.formula_latex
                                 pending_rows[cat].append(ocr_row)
@@ -3766,20 +3788,20 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                 tmp_path.unlink(missing_ok=True)
 
                             done += 1
+                            scan_done += 1
                             err_msg = f"（{errors} 错误）" if errors else ""
-                            progress_tracker.update_progress(task_id, current=done, message=f"{model}: {done}/{remaining_blocks}{err_msg}")
+                            progress_tracker.update_progress(task_id, current=done, message=f"{model}: {err_msg}" if err_msg else f"{model}")
 
                             if done % save_interval == 0:
                                 _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
                                 pending_rows = {"text": [], "formula": [], "table": []}
-                        # batch 处理完，image_data 自动释放
 
                 # 最终 flush
                 _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
                 if progress_tracker.is_stopped(task_id):
-                    progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{remaining_blocks}）")
+                    progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{total_blocks}）")
                 else:
                     progress_tracker.complete_task(task_id, f"{model} 完成: {done} block（跳过 {len(done_keys)} 已完成{f'，{skipped} 无图' if skipped else ''}{f'，{errors} 错误' if errors else ''}）")
             except Exception as e:
@@ -3796,6 +3818,9 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_CAT_TEXT_COL = {"text": "_text", "formula": "_formula", "table": "_table"}
+
+
 def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, conf_col: str, prefix: str):
     """将 Element OCR 结果 merge_insert 到对应的 category lance。"""
     import lance as _lance
@@ -3807,21 +3832,33 @@ def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, c
             continue
         try:
             import pyarrow as pa
-            cols = list(rows[0].keys())
+            cat_text_col = f"{prefix}{_CAT_TEXT_COL.get(cat, '_text')}"
             arrays = {}
-            for col in cols:
-                vals = [r.get(col) for r in rows]
-                if col in (text_col, f"{prefix}_table_json", f"{prefix}_formula"):
-                    arrays[col] = pa.array([v if v is not None else "" for v in vals], type=pa.large_string())
+            for r in rows:
+                # 写入时用 category 对应的列名
+                mapped = {
+                    "sample_id": r["sample_id"],
+                    "block_idx": r["block_idx"],
+                    cat_text_col: r.get(text_col, ""),
+                    conf_col: r.get(conf_col, 0.0),
+                }
+                for k, v in mapped.items():
+                    if k not in arrays:
+                        arrays[k] = []
+                    arrays[k].append(v)
+            pa_arrays = {}
+            for col, vals in arrays.items():
+                if col in (cat_text_col,):
+                    pa_arrays[col] = pa.array([v if v is not None else "" for v in vals], type=pa.large_string())
                 elif col == conf_col:
-                    arrays[col] = pa.array([float(v or 0) for v in vals], type=pa.float64())
-                elif col in ("sample_id",):
-                    arrays[col] = pa.array(vals, type=pa.large_string())
+                    pa_arrays[col] = pa.array([float(v or 0) for v in vals], type=pa.float32())
+                elif col == "sample_id":
+                    pa_arrays[col] = pa.array(vals, type=pa.large_string())
                 elif col == "block_idx":
-                    arrays[col] = pa.array([int(v or 0) for v in vals], type=pa.int64())
+                    pa_arrays[col] = pa.array([int(v or 0) for v in vals], type=pa.int32())
                 else:
-                    arrays[col] = pa.array(vals)
-            table = pa.table(arrays)
+                    pa_arrays[col] = pa.array(vals)
+            table = pa.table(pa_arrays)
             with _lance_write_lock:
                 ds = _lance.dataset(str(lp))
                 ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)

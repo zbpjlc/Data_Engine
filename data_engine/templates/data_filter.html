@@ -363,8 +363,8 @@
                             <div class="animate-spin h-5 w-5 border-2 border-purple-600 border-t-transparent rounded-full"></div>
                             <span id="ec-progress-msg" class="text-sm text-gray-600 flex-1">...</span>
                         </div>
-                        <div class="w-full bg-gray-200 rounded-full h-1.5">
-                            <div id="ec-progress-bar" class="bg-purple-500 h-1.5 rounded-full transition-all duration-300" style="width:0%"></div>
+                        <div class="w-full bg-gray-200 rounded-full h-2">
+                            <div id="ec-progress-bar" class="bg-purple-500 h-2 rounded-full transition-all duration-300" style="width:0%"></div>
                         </div>
                     </div>
                     <!-- 结果展示 -->
@@ -783,7 +783,11 @@
             // 请求去重：同一 URL 正在请求中，复用 Promise（无 signal 时）
             if (!options?.signal && _inflightRequests.has(url)) return _inflightRequests.get(url);
             const promise = fetch(url, options)
-                .then(r => r.ok ? r.json() : null)
+                .then(r => {
+                    if (r.ok) return r.json();
+                    console.warn(`[cachedFetch] ${r.status} for ${url}`);
+                    return null;
+                })
                 .then(data => {
                     if (data) _fetchCache.set(url, {data, ts: Date.now()});
                     _inflightRequests.delete(url);
@@ -1077,6 +1081,15 @@
             document.getElementById('diff-empty').classList.remove('hidden');
             document.getElementById('split-results').classList.add('hidden');
             document.getElementById('repair-section').classList.add('hidden');
+            // 清空 Element-Type 聚类显示
+            document.getElementById('ec-results').classList.add('hidden');
+            document.getElementById('ec-empty').classList.remove('hidden');
+            document.getElementById('ec-empty').textContent = '加载中...';
+            ['text', 'formula', 'table'].forEach(c => {
+                document.getElementById(`ec-${c}-count`).textContent = '-';
+                document.getElementById(`ec-${c}-stats`).textContent = '';
+                document.getElementById(`ec-${c}-clusters`).innerHTML = '';
+            });
 
             if (batchId && sourceId) {
                 document.getElementById('source-info').textContent = `${sourceId}/${batchId}`;
@@ -1201,8 +1214,8 @@
             document.getElementById('index-progress-msg').textContent = '正在启动...';
             document.getElementById('index-progress-ts').textContent = '';
 
-            let url = `/api/index/${sourceId}?num_partitions=${partitions}&num_sub_vectors=${subvectors}`;
-            if (batchId) url += `&batch_id=${batchId}`;
+            let url = `/api/index/${encodeURIComponent(sourceId)}?num_partitions=${partitions}&num_sub_vectors=${subvectors}`;
+            if (batchId) url += `&batch_id=${encodeURIComponent(batchId)}`;
 
             fetch(url, { method: 'POST' })
                 .then(r => r.json())
@@ -1264,8 +1277,9 @@
             document.getElementById('index-stats').classList.add('hidden');
             if (indexChart) { indexChart.destroy(); indexChart = null; }
 
-            cachedFetch(`/api/index/${sourceId}/${batchId}/stats`)
+            cachedFetch(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/stats`)
                 .then(data => {
+                    if (!data) { document.getElementById('index-stats-empty').textContent = '加载统计失败: 服务器返回错误'; return; }
                     console.log('[loadIndexStats] response:', data.has_index, 'partitions:', data.total_partitions);
                     if (!data.has_index) {
                         document.getElementById('index-stats-empty').classList.remove('hidden');
@@ -1324,7 +1338,7 @@
             document.getElementById('partition-modal-pagination').innerHTML = '';
             modal.classList.remove('hidden');
 
-            fetch(`/api/index/${sourceId}/${batchId}/partition/${partitionId}?page=${page}&page_size=20`)
+            fetch(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/partition/${partitionId}?page=${page}&page_size=20`)
                 .then(r => r.json())
                 .then(data => {
                     if (!data.samples || data.samples.length === 0) { body.innerHTML = '<div class="text-gray-400 text-center">该分区无数据</div>'; return; }
@@ -1364,7 +1378,7 @@
             document.getElementById('image-modal-title').textContent = `图片 - ${sampleId}`;
             img.src = ''; img.alt = '加载中...';
             modal.classList.remove('hidden');
-            fetch(`/api/index/${sourceId}/${batchId}/sample/${sampleId}/image`)
+            fetch(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/sample/${encodeURIComponent(sampleId)}/image`)
                 .then(r => r.json()).then(data => { img.src = `data:image/png;base64,${data.image_base64}`; img.alt = sampleId; })
                 .catch(err => { img.alt = `加载失败: ${err.message}`; });
         }
@@ -1374,8 +1388,8 @@
 
         // ── 难度桶抽样 ──────────────────────────────────────────────────────
         function loadCachedBucketSamples(sourceId, batchId) {
-            let url = `/api/bucket-samples/${sourceId}`;
-            if (batchId) url += `/${batchId}`;
+            let url = `/api/bucket-samples/${encodeURIComponent(sourceId)}`;
+            if (batchId) url += `/${encodeURIComponent(batchId)}`;
             console.log('[loadCachedBucketSamples]', url);
             fetch(url)
                 .then(r => { if (!r.ok) { console.warn('[loadCachedBucketSamples] HTTP', r.status); return null; } return r.json(); })
@@ -1449,7 +1463,7 @@
             // 逐批抽样
             let done = 0;
             const promises = targets.map(b => {
-                let url = `/api/bucket-samples/${b.source_id}/${b.batch_id}?count=${count}&force=true`;
+                let url = `/api/bucket-samples/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}?count=${count}&force=true`;
                 return fetch(url)
                     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
                     .then(data => {
@@ -1547,7 +1561,7 @@
             const diffBatchInfo = [];  // 记录成功的批次信息
 
             const promises = targets.map(b => {
-                let url = `/api/bucket-samples-difficulty/${b.source_id}/${b.batch_id}`;
+                let url = `/api/bucket-samples-difficulty/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`;
                 url += `?base_count=${baseCount}&easy_ratio=${easyRatio}&medium_ratio=${mediumRatio}&hard_ratio=${hardRatio}&force=true`;
                 return fetch(url)
                     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
@@ -2022,7 +2036,7 @@
 
             // 并发查询所有批次的 layout 结果
             const promises = queryTargets.map(t =>
-                fetch(`/api/layout-batch/${t.source_id}/${t.batch_id}/results`)
+                fetch(`/api/layout-batch/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}/results`)
                     .then(r => r.json())
                     .catch(() => ({results: []}))
             );
@@ -2223,7 +2237,7 @@
                 let started = 0;
                 const testMode = (model === 'self_ocr' && document.getElementById('self-ocr-test-mode')?.checked) ? '&test_mode=true' : '';
                 selectedBatches.forEach(b => {
-                    fetch(`/api/ocr/${b.source_id}?model=${model}&batch_id=${b.batch_id}&resume=true${testMode}`, {
+                    fetch(`/api/ocr/${encodeURIComponent(b.source_id)}?model=${model}&batch_id=${encodeURIComponent(b.batch_id)}&resume=true${testMode}`, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                     })
@@ -2318,12 +2332,25 @@
             const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
             const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
             const batchLabel = taskId.split('_').slice(2).join('_');
-            taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5">
-                <span>${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
-                <span class="text-gray-400">${task.current}/${task.total}</span>
+
+            // 计算剩余时间/耗时
+            let timeStr = '';
+            const elapsed = task.elapsed_seconds || 0;
+            if (task.status === 'completed' && elapsed > 0) {
+                timeStr = `耗时 ${fmtTime(elapsed)}`;
+            } else if (task.status === 'running' && task.current > 0 && task.total > 0 && elapsed > 2) {
+                const remaining = elapsed * (task.total - task.current) / task.current;
+                timeStr = `剩余 ${fmtTime(remaining)}`;
+            } else if (task.status === 'running' && elapsed > 0) {
+                timeStr = `已运行 ${fmtTime(elapsed)}`;
+            }
+
+            taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5 overflow-hidden">
+                <span class="truncate min-w-0">${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
+                <span class="text-gray-400 flex-shrink-0 ml-2 whitespace-nowrap">${task.current}/${task.total} <span class="font-medium text-gray-700">${pct}%</span> <span class="text-gray-500">${timeStr}</span></span>
             </div>
-            <div class="w-full bg-gray-200 rounded-full h-1.5">
-                <div class="${barColor} h-1.5 rounded-full transition-all" style="width:${pct}%"></div>
+            <div class="w-full bg-gray-200 rounded-full h-2">
+                <div class="${barColor} h-2 rounded-full transition-all duration-300" style="width:${pct}%"></div>
             </div>`;
 
             // 显示/隐藏停止按钮
@@ -2362,7 +2389,7 @@
                 sourceId = batches[0].source_id;
                 batchId = batches[0].batch_id;
             }
-            fetch(`/api/cmcv/${sourceId}/${batchId}/results`)
+            fetch(`/api/cmcv/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/results`)
                 .then(r => r.json())
                 .then(data => {
                     const pages = data.pages || [];
@@ -2844,7 +2871,7 @@
                                 const tRemain = t.elapsed_seconds * (t.total - t.current) / t.current;
                                 taskEta = fmtTime(tRemain);
                             }
-                            const timeStr = t.status === 'completed' ? `耗时 ${taskElapsed}` : (isRunning && taskElapsed ? `已运行 ${taskElapsed}${taskEta ? ' · 剩余 ' + taskEta : ''}` : '');
+                            const timeStr = t.status === 'completed' ? `耗时 ${taskElapsed}` : (isRunning && taskEta ? `剩余 ${taskEta}` : '');
                             const stopBtn = isRunning
                                 ? `<button onclick="stopLayoutTask('${t.source_id}','${t.batch_id}')" class="px-2 py-0.5 text-xs rounded bg-red-100 text-red-700 hover:bg-red-200 font-medium whitespace-nowrap">⏸ 停止</button>`
                                 : `<span class="w-[60px] inline-block"></span>`;
@@ -2853,7 +2880,7 @@
                                 <span class="text-gray-800 font-medium truncate">${label}</span>
                                 <div class="bg-gray-200 rounded-full h-3 relative overflow-hidden">
                                     <div class="bg-${c}-500 h-3 rounded-full" style="width:${pct}%"></div>
-                                    <span class="absolute inset-0 flex items-center justify-center text-[10px] font-bold ${pct > 50 ? 'text-white' : 'text-gray-600'}">${pct}%</span>
+                                    <span class="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-gray-700 drop-shadow-sm">${pct}%</span>
                                 </div>
                                 <span class="text-gray-600 truncate">${msg}</span>
                                 <span class="text-gray-400 text-xs whitespace-nowrap">${timeStr}</span>
@@ -2998,7 +3025,7 @@
 
             // 获取每个批次的 category-stats 汇总
             const statsPromises = filtered.map(b =>
-                cachedFetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
+                cachedFetch(`/api/category-stats/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`)
                     .catch(() => null)
             );
             Promise.all(statsPromises).then(results => {
@@ -3083,7 +3110,7 @@
                 // 没有选中具体批次 → 尝试加载第一个有结果的批次
                 const filtered = batchData.filter(b => b.source_id === src);
                 for (const b of filtered) {
-                    cachedFetch(`/api/element-clusters/${b.source_id}/${b.batch_id}`)
+                    cachedFetch(`/api/element-clusters/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`)
                         .then(data => {
                             if (data && data.status === 'completed' && data.result) {
                                 loadEcResults(b.source_id, b.batch_id);
@@ -3125,13 +3152,14 @@
                         document.getElementById('ec-empty').innerHTML =
                             `<span class="text-red-600">${_ecErrors.join('<br>')}</span>`;
                     }
+                    invalidateCache('/api/element-clusters/');
                     loadEcResults(batches[0].source_id, batches[0].batch_id);
                     return;
                 }
                 const b = batches[idx];
                 progressMsg.innerHTML = `<b>聚类 ${b.batch_id}</b> (${idx+1}/${total}) — 启动中...`;
                 
-                fetch(`/api/element-clusters/${b.source_id}/${b.batch_id}`, {
+                fetch(`/api/element-clusters/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({max_k: maxK})
@@ -3154,9 +3182,13 @@
                 _ecPollCancelled = false;
                 const check = () => {
                     if (_ecPollCancelled) { onDone('cancelled'); return; }
-                    fetch(`/api/element-clusters/${src}/${bid}`).then(r => r.json()).then(data => {
+                    fetch(`/api/element-clusters/${encodeURIComponent(src)}/${encodeURIComponent(bid)}`).then(r => r.json()).then(data => {
                         if (data.status === 'completed') {
-                            progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — <span class="text-green-600">完成</span>`;
+                            const elapsed = data.elapsed_seconds || 0;
+                            const elapsedStr = elapsed > 0 ? ` <span class="text-gray-500">(耗时 ${fmtTime(elapsed)})</span>` : '';
+                            progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — <span class="text-green-600">完成</span>${elapsedStr}`;
+                            const ecBar = document.getElementById('ec-progress-bar');
+                            if (ecBar) ecBar.style.width = '100%';
                             onDone(null);
                         } else if (data.status === 'failed') {
                             progressMsg.innerHTML = `<b>${bid}</b> — <span class="text-red-600">失败: ${data.message || '未知错误'}</span>`;
@@ -3168,7 +3200,16 @@
                             // running / pending — show detailed progress
                             const prog = data.progress || {};
                             const pct = prog.total > 0 ? ((prog.current / prog.total * 100).toFixed(0)) : 0;
-                            progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — ${data.message || '处理中'} <span class="text-gray-400">${pct}%</span>`;
+                            // 计算剩余时间
+                            let timeStr = '';
+                            const elapsed = prog.elapsed_seconds || 0;
+                            if (prog.current > 0 && prog.total > 0 && elapsed > 2) {
+                                const remaining = elapsed * (prog.total - prog.current) / prog.current;
+                                timeStr = `<span class="text-gray-500 ml-1">剩余 ${fmtTime(remaining)}</span>`;
+                            } else if (elapsed > 0) {
+                                timeStr = `<span class="text-gray-500 ml-1">已运行 ${fmtTime(elapsed)}</span>`;
+                            }
+                            progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — ${data.message || '处理中'} <span class="text-gray-400">${pct}%</span>${timeStr}`;
                             const ecBar = document.getElementById('ec-progress-bar');
                             if (ecBar) ecBar.style.width = pct + '%';
                             setTimeout(check, 2000);
@@ -3182,7 +3223,7 @@
         });
 
         function loadEcResults(src, bid) {
-            cachedFetch(`/api/element-clusters/${src}/${bid}`).then(data => {
+            cachedFetch(`/api/element-clusters/${encodeURIComponent(src)}/${encodeURIComponent(bid)}`).then(data => {
                 if (!data) return;
                 if (data.status === 'failed') {
                     document.getElementById('ec-empty').classList.remove('hidden');
@@ -3317,18 +3358,28 @@
                 timeStr = `耗时 ${fmtTime(elapsed)}`;
             } else if (task.status === 'running' && task.current > 0 && task.total > 0 && elapsed > 2) {
                 const remaining = elapsed * (task.total - task.current) / task.current;
-                timeStr = `剩余 ${fmtTime(remaining)} · 已运行 ${fmtTime(elapsed)}`;
+                timeStr = `剩余 ${fmtTime(remaining)}`;
             } else if (task.status === 'running' && elapsed > 0) {
                 timeStr = `已运行 ${fmtTime(elapsed)}`;
             }
 
-            taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5">
-                <span>${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
-                <span class="text-gray-400">${task.current}/${task.total} <span class="text-gray-500 ml-2">${timeStr}</span></span>
+            taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5 overflow-hidden">
+                <span class="truncate min-w-0">${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
+                <span class="text-gray-400 flex-shrink-0 ml-2 whitespace-nowrap">${task.current}/${task.total} <span class="font-medium text-gray-700">${pct}%</span> <span class="text-gray-500">${timeStr}</span></span>
             </div>
-            <div class="w-full bg-gray-200 rounded-full h-1">
-                <div class="${barColor} h-1 rounded-full transition-all duration-300" style="width: ${pct}%"></div>
+            <div class="w-full bg-gray-200 rounded-full h-2">
+                <div class="${barColor} h-2 rounded-full transition-all duration-300" style="width: ${pct}%"></div>
             </div>`;
+
+            // 显示/隐藏停止按钮
+            const stopBtn = document.querySelector(`.btn-eo-stop[data-model="${model}"]`);
+            if (stopBtn) {
+                if (task.status === 'running') {
+                    stopBtn.classList.remove('hidden');
+                } else {
+                    stopBtn.classList.add('hidden');
+                }
+            }
         }
 
         function pollElementOcrModel(model, taskId) {
@@ -3360,16 +3411,19 @@
 
         // 获取 Element OCR 目标批次列表
         function getEoTargets() {
-            // 优先用 EC 面板选中的批次
+            const src = getSourceId();
+            const bid = getBatchId();
+            // 选了具体批次 → 只跑那一个
+            if (src && bid) return [{source_id: src, batch_id: bid}];
+            // "全部批次" 或无选择 → 跑所有批次（跨数据源）
+            if (batchData.length > 0) {
+                return batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            }
+            // batchData 为空 → 用 _ecsBatch（聚类后的特定批次）
             if (_ecsBatch?.source_id && _ecsBatch?.batch_id) {
                 return [{source_id: _ecsBatch.source_id, batch_id: _ecsBatch.batch_id}];
             }
-            const src = getSourceId();
-            const bid = getBatchId();
-            if (src && bid) return [{source_id: src, batch_id: bid}];
-            if (src) return batchData.filter(b => b.source_id === src).map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            // 未选数据源 → 所有批次
-            return batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            return [];
         }
 
         document.querySelectorAll('.btn-eo-run').forEach(btn => {
@@ -3385,7 +3439,7 @@
 
                 let started = 0;
                 targets.forEach(t => {
-                    fetch(`/api/element-ocr/${t.source_id}/${t.batch_id}?${params}`, {
+                    fetch(`/api/element-ocr/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?${params}`, {
                         method: 'POST',
                     })
                     .then(r => {
