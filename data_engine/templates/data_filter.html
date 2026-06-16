@@ -6,6 +6,26 @@
     <title>Data Engine - 数据筛选</title>
     <script src="/static/tailwind.js"></script>
     <script src="/static/chart.js"></script>
+    <style>
+        /* Tab 面板切换过渡 */
+        .panel-content { transition: opacity 0.15s ease-in; }
+        /* 禁用按钮一致性 */
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        /* 动态 Tailwind 类安全网（保证 CDN 模式下动态类名可用） */
+        .bg-green-500, .bg-red-500, .bg-teal-500, .bg-yellow-500, .bg-orange-500, .bg-gray-500,
+        .text-green-800, .text-red-800, .text-teal-800, .text-yellow-800, .text-orange-800, .text-gray-800,
+        .bg-green-100, .bg-red-100, .bg-teal-100, .bg-yellow-100, .bg-orange-100, .bg-gray-100,
+        .bg-blue-500, .bg-purple-500, .bg-rose-500 { display: initial; }
+        /* Element-Level Accordion 折叠面板 */
+        .section-body { overflow: hidden; transition: max-height 0.3s ease, padding 0.2s ease; }
+        .section-body.collapsed { max-height: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; }
+        .section-arrow { transition: transform 0.2s ease; }
+        .section-arrow.collapsed { transform: rotate(-90deg); }
+        .section-header:hover { background-color: #f9fafb; }
+        /* Toast 通知 */
+        @keyframes slideInRight { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .toast-animate { animation: slideInRight 0.3s ease; }
+    </style>
 </head>
 <body class="bg-gray-50">
     <div class="min-h-screen">
@@ -53,10 +73,14 @@
 
                 <!-- Tab 按钮 -->
                 <div class="flex space-x-1 mb-6">
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" data-panel="index">Page_index</button>
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="bucket">Page-Level Clusters</button>
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="ocr">Page_OCR</button>
-                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="diffsample">Page_CMCV</button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-indigo-600 text-indigo-700 bg-indigo-50" data-panel="index">Page_index<span class="tab-badge ml-1 text-xs hidden"></span></button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="bucket">Page-Level Clusters<span class="tab-badge ml-1 text-xs hidden"></span></button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="ocr">Page_OCR<span class="tab-badge ml-1 text-xs hidden"></span></button>
+                    <button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="diffsample">Page_CMCV<span class="tab-badge ml-1 text-xs hidden"></span></button>
+<button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="el-cluster">Element_Cluster<span class="tab-badge ml-1 text-xs hidden"></span></button>
+<button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="el-ocr">Element_OCR<span class="tab-badge ml-1 text-xs hidden"></span></button>
+<button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="el-sample">Element_Sample<span class="tab-badge ml-1 text-xs hidden"></span></button>
+<button class="panel-tab px-4 py-2 text-sm rounded-t-md font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" data-panel="el-cmcv">Element_CMCV<span class="tab-badge ml-1 text-xs hidden"></span></button>
                 </div>
 
                 <!-- ====== Panel: Page_index ====== -->
@@ -80,10 +104,13 @@
                         <div id="index-progress" class="hidden">
                             <div class="flex items-center justify-between text-sm mb-1">
                                 <span id="index-progress-msg" class="text-gray-600">准备中...</span>
-                                <span id="index-progress-ts" class="text-xs text-gray-400"></span>
+                                <span class="flex items-center gap-2">
+                                    <span id="index-progress-pct" class="text-xs font-medium text-indigo-600">0%</span>
+                                    <span id="index-progress-ts" class="text-xs text-gray-400"></span>
+                                </span>
                             </div>
                             <div class="w-full bg-gray-200 rounded-full h-2">
-                                <div id="index-progress-bar" class="bg-indigo-600 h-2 rounded-full transition-all" style="width:0%"></div>
+                                <div id="index-progress-bar" class="bg-indigo-600 h-2 rounded-full transition-all duration-300" style="width:0%"></div>
                     </div>
                 </div>
                 </div>
@@ -308,19 +335,14 @@
                 </div>
             </div>
 
-            <!-- ====== Element-Level 独立卡片 ====== -->
-            <div class="bg-white rounded-lg shadow p-6 mb-8">
-                <h2 class="text-lg font-semibold text-gray-800 mb-4">Element-Level</h2>
+            <!-- ====== Element_Cluster ====== -->
+            <div id="panel-el-cluster" class="panel-content hidden bg-white rounded-lg shadow p-6 mb-8">
+                <h2 class="text-lg font-semibold text-gray-800 mb-2">Element-Type Clusters</h2>
                 <div class="text-sm text-gray-500 mb-4 pb-4 border-b">
-                    数据源：<b>text.lance / formula.lance / table.lance</b>（由上方「pp-layout + 拆分到 Lance」生成）。
-                    先聚类，再按每桶抽样。
+                    数据源：<b>text.lance / formula.lance / table.lance</b>（由「pp-layout + 拆分到 Lance」生成）
                     <span id="el-source-info" class="ml-2 text-gray-400"></span>
                 </div>
-
-                <!-- Section: Element-Type Clusters -->
-                <div class="border rounded-lg p-4 mb-6">
-                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">Element-Type Clusters</h3>
-                    <div class="mb-4 pb-4 border-b">
+                <div class="mb-4 pb-4 border-b">
                         <div class="flex flex-wrap items-center gap-4">
                             <div class="flex-1 min-w-[200px]">
                                 <label class="text-xs text-gray-500 mb-1.5 block">选择数据批次</label>
@@ -337,9 +359,12 @@
                     </div>
                     <!-- 进度 -->
                     <div id="ec-progress" class="hidden mb-4">
-                        <div class="flex items-center gap-3">
+                        <div class="flex items-center gap-3 mb-1">
                             <div class="animate-spin h-5 w-5 border-2 border-purple-600 border-t-transparent rounded-full"></div>
-                            <span id="ec-progress-msg" class="text-sm text-gray-600">...</span>
+                            <span id="ec-progress-msg" class="text-sm text-gray-600 flex-1">...</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-1.5">
+                            <div id="ec-progress-bar" class="bg-purple-500 h-1.5 rounded-full transition-all duration-300" style="width:0%"></div>
                         </div>
                     </div>
                     <!-- 结果展示 -->
@@ -377,9 +402,9 @@
                     </div>
                 </div>
 
-                <!-- Section: 每桶抽样（Per-Cluster Sampling） -->
-                <div class="border rounded-lg p-4 mb-6">
-                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">每桶抽样 (Per-Cluster Sampling)</h3>
+                <!-- ====== Element_Sample ====== -->
+                <div id="panel-el-sample" class="panel-content hidden bg-white rounded-lg shadow p-6 mb-8">
+                    <h2 class="text-lg font-semibold text-gray-800 mb-2">Per-Cluster Sampling</h2>
                     <div class="text-xs text-gray-500 mb-4">基于 Element-Type 聚类结果，从每个 cluster 中抽取指定数量的样本。</div>
                     <div class="flex flex-wrap items-center gap-4 mb-4">
                         <div class="flex items-center gap-2">
@@ -419,81 +444,55 @@
                     </div>
                 </div>
 
-                <!-- Section: Element OCR -->
-                <div class="border rounded-lg p-4 mb-6">
-                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">Element OCR (多模型识别)</h3>
-                    <div class="text-xs text-gray-500 mb-4">对抽样的 block 运行三个 OCR 模型，结果写回 text/formula/table.lance。</div>
-                    <div class="flex flex-wrap items-center gap-4 mb-4">
-                        <div class="flex items-center gap-2">
-                            <label class="text-xs text-gray-500">模型</label>
-                            <select id="eo-model" class="px-2 py-1 border border-gray-300 rounded text-sm">
-                                <option value="paddleocr">PaddleOCR</option>
-                                <option value="glm_ocr">GLM-OCR</option>
-                                <option value="self_ocr">Self-OCR</option>
-                            </select>
-                        </div>
+                <!-- ====== Element_OCR ====== -->
+                <div id="panel-el-ocr" class="panel-content hidden bg-white rounded-lg shadow p-6 mb-8">
+                    <h2 class="text-lg font-semibold text-gray-800 mb-2">Element OCR</h2>
+                    <div class="text-xs text-gray-500 mb-4">对 text/formula/table.lance 中的 block 图像运行三个 OCR 模型，结果写回对应 lance。</div>
+                    <div class="flex items-center gap-2 mb-4">
                         <label class="flex items-center gap-1 text-xs text-gray-500">
                             <input type="checkbox" id="eo-test-mode"> Test Mode
                         </label>
-                        <button id="btn-run-eo" class="px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 font-medium text-sm hidden">运行 OCR</button>
-                        <button id="btn-run-eo-all" class="px-4 py-2 bg-teal-800 text-white rounded-md hover:bg-teal-900 font-medium text-sm hidden">运行全部三模型</button>
                     </div>
-                    <div id="eo-progress" class="hidden mb-4 space-y-2">
-                        <div id="eo-prog-paddleocr" class="hidden">
-                            <div class="flex items-center gap-2 mb-0.5">
-                                <div class="animate-spin h-4 w-4 border-2 border-blue-500 border-t-transparent rounded-full eo-spinner"></div>
-                                <span class="text-xs font-medium text-blue-700">PaddleOCR</span>
-                                <span class="text-xs text-gray-500 eo-msg">...</span>
+                    <div class="grid grid-cols-1 gap-3 mb-4">
+                        <div class="flex items-center gap-4 border rounded-lg p-3">
+                            <div class="w-28 flex-shrink-0">
+                                <span class="font-medium text-blue-700">PaddleOCR VL</span>
                             </div>
-                            <div class="w-full bg-gray-200 rounded-full h-1.5">
-                                <div class="bg-blue-500 h-1.5 rounded-full transition-all duration-300 eo-bar" style="width: 0%"></div>
-                            </div>
-                        </div>
-                        <div id="eo-prog-glm_ocr" class="hidden">
-                            <div class="flex items-center gap-2 mb-0.5">
-                                <div class="animate-spin h-4 w-4 border-2 border-purple-500 border-t-transparent rounded-full eo-spinner"></div>
-                                <span class="text-xs font-medium text-purple-700">GLM OCR</span>
-                                <span class="text-xs text-gray-500 eo-msg">...</span>
-                            </div>
-                            <div class="w-full bg-gray-200 rounded-full h-1.5">
-                                <div class="bg-purple-500 h-1.5 rounded-full transition-all duration-300 eo-bar" style="width: 0%"></div>
+                            <div id="eo-paddleocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div class="flex gap-1 flex-shrink-0">
+                                <button class="btn-eo-run px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" data-model="paddleocr">运行</button>
+                                <button class="btn-eo-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="paddleocr">停止</button>
                             </div>
                         </div>
-                        <div id="eo-prog-self_ocr" class="hidden">
-                            <div class="flex items-center gap-2 mb-0.5">
-                                <div class="animate-spin h-4 w-4 border-2 border-green-500 border-t-transparent rounded-full eo-spinner"></div>
-                                <span class="text-xs font-medium text-green-700">Self OCR</span>
-                                <span class="text-xs text-gray-500 eo-msg">...</span>
+                        <div class="flex items-center gap-4 border rounded-lg p-3">
+                            <div class="w-28 flex-shrink-0">
+                                <span class="font-medium text-green-700">GLM OCR</span>
                             </div>
-                            <div class="w-full bg-gray-200 rounded-full h-1.5">
-                                <div class="bg-green-500 h-1.5 rounded-full transition-all duration-300 eo-bar" style="width: 0%"></div>
+                            <div id="eo-glm_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div class="flex gap-1 flex-shrink-0">
+                                <button class="btn-eo-run px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700" data-model="glm_ocr">运行</button>
+                                <button class="btn-eo-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="glm_ocr">停止</button>
                             </div>
                         </div>
-                    </div>
-                    <div id="eo-status" class="hidden mb-3">
-                        <div class="grid grid-cols-3 gap-2">
-                            <div class="bg-teal-50 border rounded p-2 text-center text-xs">
-                                <span class="text-teal-600">PaddleOCR</span>
-                                <span id="eo-paddle-status" class="ml-1">-</span>
+                        <div class="flex items-center gap-4 border rounded-lg p-3">
+                            <div class="w-28 flex-shrink-0">
+                                <span class="font-medium text-purple-700">自研 OCR</span>
                             </div>
-                            <div class="bg-teal-50 border rounded p-2 text-center text-xs">
-                                <span class="text-teal-600">GLM-OCR</span>
-                                <span id="eo-glm-status" class="ml-1">-</span>
-                            </div>
-                            <div class="bg-teal-50 border rounded p-2 text-center text-xs">
-                                <span class="text-teal-600">Self-OCR</span>
-                                <span id="eo-self-status" class="ml-1">-</span>
+                            <div id="eo-self_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div class="flex gap-1 flex-shrink-0">
+                                <button class="btn-eo-run px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700" data-model="self_ocr">运行</button>
+                                <button class="btn-eo-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="self_ocr">停止</button>
                             </div>
                         </div>
                     </div>
                     <div id="eo-empty" class="flex items-center justify-center h-16 text-gray-400 text-sm">
-                        请先完成每桶抽样
+                        请先完成 Layout 拆分（pp-layout）
                     </div>
                 </div>
 
-                <!-- Section: Element CMCV -->
-                <div class="border rounded-lg p-4 mb-6">
-                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">Element CMCV (一致性校验)</h3>
+                <!-- ====== Element_CMCV ====== -->
+                <div id="panel-el-cmcv" class="panel-content hidden bg-white rounded-lg shadow p-6 mb-8">
+                    <h2 class="text-lg font-semibold text-gray-800 mb-2">Element CMCV</h2>
                     <div class="text-xs text-gray-500 mb-4">对三模型 OCR 结果做 Cross-Model Consistency Verification，生成 easy/medium/hard 难度。</div>
                     <div class="flex items-center gap-4 mb-4">
                         <button id="btn-run-ecmcv" class="px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium text-sm hidden">运行 CMCV</button>
@@ -527,11 +526,9 @@
                     <div id="ecmcv-empty" class="flex items-center justify-center h-16 text-gray-400 text-sm">
                         请先完成三模型 OCR
                     </div>
-                </div>
-
-                <!-- Section: Element Difficulty Sampling -->
-                <div class="border rounded-lg p-4 mb-6">
-                    <h3 class="text-base font-semibold text-gray-700 mb-4 pb-2 border-b">Element 难度感知抽样</h3>
+                    <!-- Element Difficulty Sampling -->
+                    <div class="mt-6 pt-6 border-t">
+                        <h3 class="text-base font-semibold text-gray-700 mb-3">Element Difficulty Sampling</h3>
                     <div class="text-xs text-gray-500 mb-4">基于 CMCV 难度分层抽样，输出最终训练集。</div>
                     <div class="flex flex-wrap items-center gap-4 mb-4">
                         <div class="flex items-center gap-1">
@@ -554,8 +551,8 @@
                     <div id="eds-empty" class="flex items-center justify-center h-16 text-gray-400 text-sm">
                         请先完成 Element CMCV
                     </div>
+                    </div>
                 </div>
-            </div>
 
             <!-- Layout 结果弹窗 -->
             <div id="layout-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 z-50 flex items-center justify-center p-4">
@@ -687,6 +684,214 @@
     </div>
 
     <script>
+        // ── Accordion 折叠面板 ─────────────────────────────────────────────
+        function toggleSection(headerEl) {
+            const body = headerEl.nextElementSibling;
+            const arrow = headerEl.querySelector('.section-arrow');
+            if (!body || !arrow) return;
+            const isCollapsed = body.classList.contains('collapsed');
+            if (isCollapsed) {
+                body.classList.remove('collapsed');
+                arrow.classList.remove('collapsed');
+            } else {
+                body.classList.add('collapsed');
+                arrow.classList.add('collapsed');
+            }
+        }
+
+        // ── Toast 通知（替代 alert）────────────────────────────────────────
+        function showToast(msg, type = 'info') {
+            const styles = {
+                info:    'border-blue-500',
+                success: 'border-green-500',
+                error:   'border-red-500',
+                warning: 'border-amber-500',
+            };
+            const icons = {info: 'ℹ️', success: '✅', error: '❌', warning: '⚠️'};
+            const container = document.getElementById('toast-container');
+            if (!container) { alert(msg); return; }
+            const toast = document.createElement('div');
+            toast.className = `bg-white ${styles[type] || styles.info} border-l-4 text-gray-700 px-4 py-3 rounded-r-lg shadow-xl text-sm max-w-md flex items-start gap-2`;
+            toast.style.animation = 'slideInRight 0.25s ease';
+            toast.innerHTML = `<span class="mt-0.5">${icons[type] || ''}</span><span class="flex-1 leading-snug">${msg}</span><button onclick="this.parentElement.remove()" class="ml-2 text-gray-400 hover:text-gray-600 text-lg leading-none">&times;</button>`;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(20px)';
+                toast.style.transition = 'opacity 0.3s, transform 0.3s';
+                setTimeout(() => toast.remove(), 300);
+            }, 4000);
+        }
+
+        // ── Tab 状态徽标 ─────────────────────────────────────────────────
+        function setTabBadge(panelName, icon) {
+            const tab = document.querySelector(`.panel-tab[data-panel="${panelName}"] .tab-badge`);
+            if (tab) { tab.textContent = icon; tab.classList.remove('hidden'); }
+        }
+
+        // ── 全局定时器生命周期管理（防止泄漏）──────────────────────────────────
+        const _activeTimers = new Set();  // {id, type} — 所有活跃轮询定时器
+
+        // 页面隐藏时暂停所有轮询，防止后台持续发送 /api/progress 请求
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                for (const t of _activeTimers) {
+                    if (t.type === 'interval') clearInterval(t.id);
+                    else clearTimeout(t.id);
+                }
+                _activeTimers.clear();
+            }
+        });
+
+        // 页面关闭时清理所有定时器
+        window.addEventListener('beforeunload', () => {
+            for (const t of _activeTimers) {
+                if (t.type === 'interval') clearInterval(t.id);
+                else clearTimeout(t.id);
+            }
+            _activeTimers.clear();
+        });
+
+        // 注册定时器（各模块调用，便于统一清理）
+        function _registerTimer(id, type) {
+            _activeTimers.add({id, type});
+            return id;
+        }
+        function _unregisterTimer(id, type) {
+            if (type === 'interval') clearInterval(id);
+            else clearTimeout(id);
+            _activeTimers.delete([..._activeTimers].find(t => t.id === id && t.type === type));
+        }
+
+        // ── 轻量级 Fetch 缓存层（可一键禁用）──────────────────────────────
+        const CACHE_ENABLED = true;
+        const CACHE_TTL_MS = 30_000;  // 30秒默认 TTL
+        const _fetchCache = new Map();
+        const _inflightRequests = new Map(); // 请求去重：同一 URL 并发请求只发一次
+
+        async function cachedFetch(url, options, ttl) {
+            if (!CACHE_ENABLED || (options && options.method && options.method !== 'GET')) {
+                return fetch(url, options);
+            }
+            ttl = ttl || CACHE_TTL_MS;
+            const now = Date.now();
+            // 检查内存缓存（即使有 signal，缓存命中时直接返回，无需 fetch）
+            const cached = _fetchCache.get(url);
+            if (cached && (now - cached.ts) < ttl) {
+                return Promise.resolve(cached.data);
+            }
+            // 请求去重：同一 URL 正在请求中，复用 Promise（无 signal 时）
+            if (!options?.signal && _inflightRequests.has(url)) return _inflightRequests.get(url);
+            const promise = fetch(url, options)
+                .then(r => r.ok ? r.json() : null)
+                .then(data => {
+                    if (data) _fetchCache.set(url, {data, ts: Date.now()});
+                    _inflightRequests.delete(url);
+                    return data;
+                })
+                .catch(err => { _inflightRequests.delete(url); throw err; });
+            _inflightRequests.set(url, promise);
+            return promise;
+        }
+
+        function invalidateCache(pattern) {
+            if (pattern) {
+                for (const key of _fetchCache.keys()) {
+                    if (key.includes(pattern)) _fetchCache.delete(key);
+                }
+            } else {
+                _fetchCache.clear();
+            }
+        }
+
+        // 定期清理过期缓存（每 60秒）
+        setInterval(() => {
+            const now = Date.now();
+            for (const [url, entry] of _fetchCache) {
+                if (now - entry.ts > CACHE_TTL_MS * 2) _fetchCache.delete(url);
+            }
+        }, 60_000);
+
+        // ── 统一轮询管理器（合并多个 /api/progress 轮询为单次 fetch）────
+        const PollManager = {
+            _subs: new Map(),   // taskId → {onProgress, onComplete, onFail}
+            _timer: null,
+            _interval: 1500,
+
+            // 订阅某个任务的进度更新
+            subscribe(taskId, cbs) {
+                this._subs.set(taskId, cbs);
+                if (!this._timer) this._start();
+                return taskId;
+            },
+
+            unsubscribe(taskId) {
+                this._subs.delete(taskId);
+                if (this._subs.size === 0) this._stop();
+            },
+
+            _start() {
+                this._timer = setInterval(() => this._tick(), this._interval);
+                _registerTimer(this._timer, 'interval');
+            },
+
+            _stop() {
+                if (this._timer) { _unregisterTimer(this._timer, 'interval'); this._timer = null; }
+            },
+
+            async _tick() {
+                if (this._subs.size === 0) return;
+                try {
+                    const data = await fetch('/api/progress').then(r => r.json());
+                    const tasks = data.tasks || {};
+                    for (const [taskId, cbs] of [...this._subs]) {
+                        const task = tasks[taskId];
+                        if (!task) continue;
+                        const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                        if (cbs.onProgress) cbs.onProgress({...task, pct});
+                        if (task.status === 'completed') {
+                            if (cbs.onComplete) cbs.onComplete(task);
+                            this.unsubscribe(taskId);
+                        } else if (['failed', 'stopped'].includes(task.status)) {
+                            if (cbs.onFail) cbs.onFail(task);
+                            this.unsubscribe(taskId);
+                        }
+                    }
+                } catch {}
+            }
+        };
+
+        // 单独任务轮询器（用于非 /api/progress 端点，如 /api/tasks/{id}）
+        class TaskPoller {
+            constructor(endpoint, cbs, interval = 2000) {
+                this.endpoint = endpoint;
+                this.cbs = cbs;
+                this.interval = interval;
+                this._timer = null;
+            }
+            start() {
+                if (this._timer) return;
+                this._timer = setInterval(() => this._poll(), this.interval);
+                _registerTimer(this._timer, 'interval');
+            }
+            stop() {
+                if (this._timer) { _unregisterTimer(this._timer, 'interval'); this._timer = null; }
+            }
+            async _poll() {
+                try {
+                    const d = await fetch(this.endpoint).then(r => r.json());
+                    const prog = d.progress || {};
+                    const pct = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
+                    if (this.cbs.onProgress) this.cbs.onProgress({...d, pct});
+                    if (['completed', 'failed', 'stopped'].includes(d.status)) {
+                        this.stop();
+                        if (d.status === 'completed' && this.cbs.onComplete) this.cbs.onComplete(d);
+                        else if (this.cbs.onFail) this.cbs.onFail(d);
+                    }
+                } catch {}
+            }
+        }
+
         const batchData = {{ batches_json | tojson }};
         let indexChart = null;
 
@@ -695,8 +900,17 @@
         const selBatch = document.getElementById('sel-batch');
         let bucketSampleData = null;
         let ecSelectedBatches = new Set();  // EC panel selected batches
+        const _cmcvIntervals = new Map();  // taskId → intervalId (B3 fix)
+        const _eoIntervals = {};              // taskId → active flag
+        let _ecPollCancelled = false;      // B5 fix: pollEcStatus cancellation token
+        let _sourceAbortController = null; // B8 fix: abort stale fetches on source/batch change
 
         function filterBatches() {
+            // B8 fix: cancel any in-flight fetches from the previous source/batch selection
+            if (_sourceAbortController) _sourceAbortController.abort();
+            _sourceAbortController = new AbortController();
+            const signal = _sourceAbortController.signal;
+            invalidateCache(); // 数据源变化时清除所有缓存
             const sourceId = selSource.value;
             selBatch.innerHTML = '<option value="">全部批次</option>';
             const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
@@ -726,19 +940,18 @@
             updateOcrBatchSelect();
 
             // 直接加载 category-stats（显示无图统计，不依赖抽样缓存）
-            loadCategoryStatsDirectly(sourceId, filtered);
+            loadCategoryStatsDirectly(sourceId, filtered, signal);
 
             // 加载缓存数据（逐批加载后合并）
-            loadAllCachedBuckets(sourceId, filtered);
+            loadAllCachedBuckets(sourceId, filtered, signal);
         }
 
         // 直接加载 category-stats，显示拆分结果和无图统计
-        function loadCategoryStatsDirectly(sourceId, batchList) {
+        function loadCategoryStatsDirectly(sourceId, batchList, signal) {
             if (!batchList || batchList.length === 0) return;
             const statsPromises = batchList.map(b =>
-                fetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
-                    .then(r => r.json())
-                    .catch(() => null)
+                cachedFetch(`/api/category-stats/${b.source_id}/${b.batch_id}`, signal ? {signal} : {})
+                    .catch(e => e.name === 'AbortError' ? null : null)
             );
             Promise.all(statsPromises).then(results => {
                 let totalText = 0, totalFormula = 0, totalTable = 0;
@@ -759,13 +972,12 @@
             });
         }
 
-        function loadAllCachedBuckets(sourceId, batchList) {
+        function loadAllCachedBuckets(sourceId, batchList, signal) {
             if (!batchList || batchList.length === 0) return;
 
             const promises = batchList.map(b => {
                 let url = `/api/bucket-samples/${b.source_id}/${b.batch_id}`;
-                return fetch(url)
-                    .then(r => r.ok ? r.json() : null)
+                return cachedFetch(url, signal ? {signal} : {})
                     .then(data => data && data.total_sampled > 0 ? data : null)
                     .catch(() => null);
             });
@@ -835,7 +1047,12 @@
             });
         }
 
-        selBatch.addEventListener('change', function() {
+        selBatch.addEventListener('change', debounce(function() {
+            // B8 fix: abort stale fetches from previous selection
+            if (_sourceAbortController) _sourceAbortController.abort();
+            _sourceAbortController = new AbortController();
+            const signal = _sourceAbortController.signal;
+            invalidateCache(); // 批次变化时清除所有缓存
             const batchId = this.value;
             const opt = this.options[this.selectedIndex];
             const sourceId = opt.dataset.source || selSource.value;
@@ -856,7 +1073,7 @@
                 loadIndexStats(sourceId, batchId);
                 loadCachedBucketSamples(sourceId, batchId);
                 // 直接加载 category-stats（显示无图统计）
-                loadCategoryStatsDirectly(sourceId, [{source_id: sourceId, batch_id: batchId}]);
+                loadCategoryStatsDirectly(sourceId, [{source_id: sourceId, batch_id: batchId}], signal);
                 // 加载 Element-Type 聚类结果
                 loadEcResults(sourceId, batchId);
             } else {
@@ -865,9 +1082,9 @@
                 loadCachedBucketSamples(sourceId, '');
             }
             updateOcrBatchSelect();
-        });
+        }, 300));
 
-        selSource.addEventListener('change', filterBatches);
+        selSource.addEventListener('change', debounce(filterBatches, 300));
 
         // 默认不选具体源，显示全部
         filterBatches();
@@ -895,6 +1112,15 @@
                 checkAllOcrDone();
             }).catch(() => {});
         }, 1000);
+
+        // ── 防抖工具函数 ─────────────────────────────────────────────────
+        function debounce(fn, delay) {
+            let timer;
+            return function(...args) {
+                clearTimeout(timer);
+                timer = setTimeout(() => fn.apply(this, args), delay);
+            };
+        }
 
         function getSourceId() {
             const src = selSource.value;
@@ -927,8 +1153,8 @@
                 if (this.dataset.panel === 'ocr') {
                     updateOcrBatchSelect();
                 }
-                // 切换到 Element-Level Tab 时自动加载聚类结果
-                if (this.dataset.panel === 'element-level') {
+                // 切换到 Element 相关 Tab 时自动加载聚类数据
+                if (this.dataset.panel.startsWith('el-')) {
                     renderEcBatchSelect();
                     const src = getSourceId();
                     const bid = getBatchId();
@@ -947,7 +1173,7 @@
         // ── Page_index ──────────────────────────────────────────────────────────
         document.getElementById('btn-index').addEventListener('click', function() {
             const sourceId = getSourceId();
-            if (!sourceId) { alert('请选择数据源'); return; }
+            if (!sourceId) { showToast('请选择数据源', 'warning'); return; }
             const batchId = getBatchId();
             const partitions = document.getElementById('index-partitions').value;
             const subvectors = document.getElementById('index-subvectors').value;
@@ -974,44 +1200,39 @@
                     console.log('[index] POST response:', data);
                     pollIndex(sourceId, batchId);
                 })
-                .catch(err => { console.error('[index] POST error:', err); alert('索引构建启动失败: ' + err.message); resetIndexBtn(); });
+                .catch(err => { console.error('[index] POST error:', err); showToast('索引构建启动失败: ' + err.message, 'error'); resetIndexBtn(); });
         });
 
         function pollIndex(sourceId, batchId) {
-            console.log('[pollIndex] started', sourceId, batchId);
-            const interval = setInterval(() => {
-                fetch('/api/progress').then(r => r.json()).then(data => {
-                    let tasks = Object.values(data.tasks || {}).filter(t => t.task_type === 'index');
-                    if (sourceId && sourceId !== '__all__') tasks = tasks.filter(t => t.source_id === sourceId);
-                    if (batchId) tasks = tasks.filter(t => t.batch_id === batchId);
-                    if (tasks.length === 0) {
-                        console.log('[pollIndex] no matching tasks');
-                        return;
-                    }
-
-                    const task = tasks[tasks.length - 1];
+            // 使用 PollManager 替代独立 setInterval（二期优化 T1）
+            const expectedTaskId = batchId ? `index_${sourceId}_${batchId}` : `index_${sourceId}`;
+            console.log('[pollIndex] subscribing to', expectedTaskId);
+            PollManager.subscribe(expectedTaskId, {
+                onProgress(task) {
                     console.log('[pollIndex]', task.status, task.message);
-
                     document.getElementById('index-progress-msg').textContent = task.message || '构建中...';
+                    document.getElementById('index-progress-pct').textContent = task.pct + '%';
+                    document.getElementById('index-progress-bar').style.width = task.pct + '%';
                     document.getElementById('index-progress-ts').textContent = new Date().toLocaleTimeString();
-
-                    if (task.status === 'completed') {
-                        console.log('[pollIndex] COMPLETED, calling loadIndexStats');
-                        clearInterval(interval);
-                        document.getElementById('index-progress-bar').classList.remove('animate-pulse', 'bg-indigo-600');
-                        document.getElementById('index-progress-bar').classList.add('bg-green-500');
-                        document.getElementById('index-progress-msg').textContent = '索引构建完成';
-                        loadIndexStats(sourceId, batchId);
-                        resetIndexBtn();
-                    } else if (task.status === 'failed' || task.status === 'stopped') {
-                        clearInterval(interval);
-                        document.getElementById('index-progress-bar').classList.remove('animate-pulse', 'bg-indigo-600');
-                        document.getElementById('index-progress-bar').classList.add('bg-red-500');
-                        document.getElementById('index-progress-msg').textContent = '失败: ' + (task.error_message || task.message);
-                        resetIndexBtn();
-                    }
-                }).catch(err => console.error('[pollIndex] fetch error:', err));
-            }, 1000);
+                },
+                onComplete(task) {
+                    console.log('[pollIndex] COMPLETED');
+                    const bar = document.getElementById('index-progress-bar');
+                    bar.classList.remove('animate-pulse', 'bg-indigo-600');
+                    bar.classList.add('bg-green-500');
+                    document.getElementById('index-progress-msg').textContent = '索引构建完成';
+                    loadIndexStats(sourceId, batchId);
+                    resetIndexBtn();
+                    setTabBadge('index', '✅');
+                },
+                onFail(task) {
+                    const bar = document.getElementById('index-progress-bar');
+                    bar.classList.remove('animate-pulse', 'bg-indigo-600');
+                    bar.classList.add('bg-red-500');
+                    document.getElementById('index-progress-msg').textContent = '失败: ' + (task.error_message || task.message || '');
+                    resetIndexBtn();
+                }
+            });
         }
 
         function resetIndexBtn() {
@@ -1033,8 +1254,7 @@
             document.getElementById('index-stats').classList.add('hidden');
             if (indexChart) { indexChart.destroy(); indexChart = null; }
 
-            fetch(`/api/index/${sourceId}/${batchId}/stats`)
-                .then(r => r.json())
+            cachedFetch(`/api/index/${sourceId}/${batchId}/stats`)
                 .then(data => {
                     console.log('[loadIndexStats] response:', data.has_index, 'partitions:', data.total_partitions);
                     if (!data.has_index) {
@@ -1076,6 +1296,7 @@
                             scales: { y: { beginAtZero: true, title: { display: true, text: '样本数' } }, x: { title: { display: true, text: '分区' } } }
                         }
                     });
+                    setTabBadge('index', '✅');
                 })
                 .catch(err => { console.error('[loadIndexStats] error:', err); document.getElementById('index-stats-empty').textContent = '加载统计失败: ' + err.message; });
         }
@@ -1209,7 +1430,7 @@
             } else {
                 targets = [...batchData];
             }
-            if (targets.length === 0) { alert('无可用批次'); return; }
+            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
 
             const btn = this;
             btn.disabled = true;
@@ -1300,7 +1521,7 @@
                 // 全部数据源全部批次
                 targets = [...batchData];
             }
-            if (targets.length === 0) { alert('无可用批次'); return; }
+            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
 
             const btn = this;
             btn.disabled = true;
@@ -1635,6 +1856,7 @@
                 document.getElementById('bucket-tab-content').innerHTML = '<div id="bucket-detail"></div>';
             }
             showPartition();
+            setTabBadge('bucket', '✅');
         }
 
         function renderBucketTabContent(data, tier) {
@@ -1689,7 +1911,7 @@
         // ── 运行 pp-layout ──────────────────────────────────────────────────
         document.getElementById('btn-run-layout').addEventListener('click', function() {
             console.log('[layout] btn clicked, bucketSampleData:', bucketSampleData ? `total=${bucketSampleData.total_sampled}, batch_info=${bucketSampleData.batch_info?.length}` : 'null');
-            if (!bucketSampleData) { alert('请先抽样'); return; }
+            if (!bucketSampleData) { showToast('请先抽样', 'warning'); return; }
 
             // 确定要处理的批次
             const batchInfo = bucketSampleData.batch_info || [];
@@ -1738,6 +1960,7 @@
         });
 
         function pollLayoutBatch(taskId, total, btn) {
+            // 使用 PollManager 替代独立 setInterval（二期优化 T2）
             const listDiv = document.getElementById('layout-task-list');
             document.getElementById('layout-progress').classList.remove('hidden');
 
@@ -1750,11 +1973,9 @@
                 listDiv.appendChild(taskEl);
             }
 
-            const interval = setInterval(() => {
-                fetch('/api/progress').then(r => r.json()).then(data => {
-                    const task = (data.tasks || {})[taskId];
-                    if (!task) return;
-                    const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+            PollManager.subscribe(taskId, {
+                onProgress(task) {
+                    const pct = task.pct;
                     const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
                     const batchLabel = taskId.replace('layout_batch_', '');
                     const barColor = task.status === 'completed' ? 'bg-green-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-orange-500';
@@ -1766,18 +1987,14 @@
                     <div class="w-full bg-gray-200 rounded-full h-1.5">
                         <div class="${barColor} h-1.5 rounded-full transition-all" style="width:${pct}%"></div>
                     </div>`;
-
-                    if (task.status === 'completed') {
-                        clearInterval(interval);
-                        // 布局完成后重新加载结果
-                        const sid = bucketSampleData?.source_id;
-                        const bid = bucketSampleData?.batch_id;
-                        if (sid) loadLayoutResults(sid, bid);
-                    } else if (task.status === 'failed' || task.status === 'stopped') {
-                        clearInterval(interval);
-                    }
-                }).catch(() => {});
-            }, 1000);
+                },
+                onComplete(task) {
+                    const sid = bucketSampleData?.source_id;
+                    const bid = bucketSampleData?.batch_id;
+                    if (sid) loadLayoutResults(sid, bid);
+                    setTabBadge('bucket', '✅');
+                }
+            });
         }
 
         function loadLayoutResults(sourceId, batchId) {
@@ -1914,10 +2131,10 @@
             for (const model of OCR_MODELS) {
                 const tasksDiv = document.getElementById(`${model}-tasks`);
                 if (tasksDiv) tasksDiv.innerHTML = '';
-                // 清除所有相关 interval
-                for (const [tid, interval] of Object.entries(ocrIntervals)) {
+                // 清除所有相关 PollManager 订阅
+                for (const [tid, active] of Object.entries(ocrIntervals)) {
                     if (tid.includes(sourceId) || tid.includes(batchId)) {
-                        clearInterval(interval);
+                        PollManager.unsubscribe(tid);
                         delete ocrIntervals[tid];
                     }
                 }
@@ -1943,8 +2160,7 @@
             }
             container.innerHTML = '<div class="text-gray-400">加载中...</div>';
             Promise.all(filtered.map(b =>
-                fetch(`/api/bucket-samples/${b.source_id}/${b.batch_id}`)
-                    .then(r => r.ok ? r.json() : null)
+                cachedFetch(`/api/bucket-samples/${b.source_id}/${b.batch_id}`)
                     .then(data => ({...b, cached: data && data.total_sampled > 0, sampled: data ? data.total_sampled : 0}))
                     .catch(() => ({...b, cached: false, sampled: 0}))
             )).then(results => {
@@ -1976,7 +2192,7 @@
             btn.addEventListener('click', function() {
                 const model = this.dataset.model;
                 const selectedBatches = getSelectedOcrBatches();
-                if (selectedBatches.length === 0) { alert('请勾选已抽样的批次'); return; }
+                if (selectedBatches.length === 0) { showToast('请勾选已抽样的批次', 'warning'); return; }
 
                 // 立即显示启动状态，不等 fetch
                 this.textContent = '启动中...';
@@ -2019,8 +2235,10 @@
         });
 
         function pollOcrModel(model, taskId, btn) {
+            // 使用 PollManager 替代独立 setInterval（二期优化 T3）
             const tasksDiv = document.getElementById(`${model}-tasks`);
-            if (ocrIntervals[taskId]) clearInterval(ocrIntervals[taskId]);
+            // 清除旧的轮询（如果存在）
+            if (ocrIntervals[taskId]) { PollManager.unsubscribe(taskId); delete ocrIntervals[taskId]; }
 
             const barColor = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500';
 
@@ -2035,33 +2253,34 @@
                     return;
                 }
 
-                // running 状态，启动轮询
-                ocrIntervals[taskId] = setInterval(() => {
-                    fetch('/api/progress').then(r => r.json()).then(data => {
-                        const task = (data.tasks || {})[taskId];
-                        if (!task) return;
+                // running 状态，订阅 PollManager
+                ocrIntervals[taskId] = true;  // 标记为活跃
+                PollManager.subscribe(taskId, {
+                    onProgress(task) {
                         renderTaskBar(model, taskId, task, barColor);
-
-                        if (task.status === 'completed') {
-                            clearInterval(ocrIntervals[taskId]);
-                            loadOcrResults();
-                checkAllOcrDone();
-                // 加载已有的 CMCV 结果
-                for (const [tid, task] of Object.entries(tasks)) {
-                    if (tid.startsWith('cmcv_') && task.status === 'completed') {
-                        const parts = tid.split('_');
-                        // cmcv_{source_id}_{batch_id}
-                        const src = parts.slice(1, -1).join('_');
-                        const bid = parts[parts.length - 1];
-                        loadOcrResults(src, bid);
-                        break;
-                    }
-                }
-                        } else if (task.status === 'failed' || task.status === 'stopped') {
-                            clearInterval(ocrIntervals[taskId]);
+                    },
+                    onComplete(task) {
+                        delete ocrIntervals[taskId];
+                        loadOcrResults();
+                        checkAllOcrDone();
+                        setTabBadge('ocr', '✅');
+                        // 加载已有的 CMCV 结果
+                        const allTasks = task._rawTasks || {};
+                        for (const [tid, t] of Object.entries(allTasks)) {
+                            if (tid.startsWith('cmcv_') && t.status === 'completed') {
+                                const parts = tid.split('_');
+                                const src = parts.slice(1, -1).join('_');
+                                const bid = parts[parts.length - 1];
+                                loadOcrResults(src, bid);
+                                break;
+                            }
                         }
-                    }).catch(() => {});
-                }, 1000);
+                    },
+                    onFail(task) {
+                        delete ocrIntervals[taskId];
+                        renderTaskBar(model, taskId, task, barColor);
+                    }
+                });
             }).catch(() => {});
         }
 
@@ -2107,7 +2326,10 @@
                         }
                     }
                 }
-                if (anyDone) document.getElementById('btn-run-cmcv').classList.remove('hidden');
+                if (anyDone) {
+                    document.getElementById('btn-run-cmcv').classList.remove('hidden');
+                    setTabBadge('ocr', '✅');
+                }
             }).catch(() => {});
         }
 
@@ -2166,7 +2388,7 @@
         // CMCV
         document.getElementById('btn-run-cmcv').addEventListener('click', function() {
             const batches = getSelectedOcrBatches();
-            if (batches.length === 0) { alert('请勾选已 OCR 的批次'); return; }
+            if (batches.length === 0) { showToast('请勾选已 OCR 的批次', 'warning'); return; }
             const btn = this;
             btn.disabled = true;
             btn.textContent = '一致性比较中...';
@@ -2191,16 +2413,19 @@
 
                                 if (task.status === 'completed') {
                                     clearInterval(interval);
+                                    _cmcvIntervals.delete(taskId);
                                     btn.textContent = 'CMCV 完成';
                                     btn.disabled = false;
                                     loadOcrResults();
                                 } else if (task.status === 'failed' || task.status === 'stopped') {
                                     clearInterval(interval);
+                                    _cmcvIntervals.delete(taskId);
                                     btn.textContent = 'CMCV 失败';
                                     btn.disabled = false;
                                 }
                             }).catch(() => {});
                         }, 1000);
+                        _cmcvIntervals.set(taskId, interval);
                     })
                     .catch(err => {
                         done++;
@@ -2223,6 +2448,8 @@
             _splitTargets.forEach(t => {
                 fetch(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`, {method:'POST'}).catch(()=>{});
             });
+            // B6 fix: also clear the split poll timer so UI stops immediately
+            if (_splitPollTimer) { clearInterval(_splitPollTimer); _splitPollTimer = null; }
         };
         // 停止单个任务
         window.stopLayoutTask = function(sourceId, batchId) {
@@ -2257,6 +2484,8 @@
         // 页面加载时恢复 pp-layout + 拆分的 category-stats 卡片
         function restoreSplitStats(batchInfo) {
             if (!batchInfo.length) return;
+            // 确保补齐无图按钮能拿到批次信息
+            _splitTargets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
             const statsPromises = batchInfo.map(b =>
                 fetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
                     .then(r => r.json())
@@ -2319,18 +2548,20 @@
 
         // 补齐无图按钮
         let _repairPollTimer = null;
+        let _repairStopFlag  = false;
         document.getElementById('btn-repair-images').addEventListener('click', function() {
             const btn = this;
             const progressDiv = document.getElementById('repair-progress');
             const progressMsg = document.getElementById('repair-progress-msg');
-            const summaryEl = document.getElementById('repair-summary');
+            const summaryEl   = document.getElementById('repair-summary');
 
             // 如果正在运行 → 停止
             if (btn.dataset.running === 'true') {
-                const sourceId = selSource.value;
-                const batchId = selBatch.value;
-                if (sourceId && batchId) {
-                    fetch(`/api/stop/${sourceId}?batch_id=${batchId}`, {
+                _repairStopFlag = true;
+                const stopSource = selSource.value || (_splitTargets?.[0]?.source_id);
+                const stopBatch  = selBatch.value  || (_splitTargets?.[0]?.batch_id);
+                if (stopSource && stopBatch) {
+                    fetch(`/api/stop/${stopSource}?batch_id=${stopBatch}`, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({task_types: ['repair']})
@@ -2345,78 +2576,121 @@
                 return;
             }
 
-            const sourceId = selSource.value;
-            const batchId = selBatch.value;
-            if (!sourceId || !batchId) { alert('请先选择数据源和批次'); return; }
+            // 构建待修复批次列表
+            let targets;
+            if (selSource.value && selBatch.value) {
+                // 明确选择了具体批次
+                targets = [{source_id: selSource.value, batch_id: selBatch.value}];
+            } else if (selSource.value && selSource.value !== 'all') {
+                // 选择了具体数据源但未选批次 → 用当前源的所有批次
+                targets = batchData
+                    .filter(b => b.source_id === selSource.value)
+                    .map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+                if (targets.length === 0) {
+                    showToast('该数据源无可用批次', 'warning'); return;
+                }
+            } else {
+                // 未选数据源 → 修复所有源的所有批次
+                targets = batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+                if (targets.length === 0) {
+                    showToast('无可用批次数据', 'warning'); return;
+                }
+            }
 
             btn.textContent = '停止';
             btn.classList.remove('bg-amber-600','hover:bg-amber-700');
             btn.classList.add('bg-red-500','hover:bg-red-600');
             btn.dataset.running = 'true';
+            _repairStopFlag = false;
             progressDiv.classList.remove('hidden');
-            progressMsg.textContent = '启动中...';
 
-            fetch(`/api/repair-images/${sourceId}/${batchId}`, { method: 'POST' })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.no_image === 0) {
-                        progressMsg.textContent = '所有 block 均已有图片';
-                        btn.textContent = '补齐无图';
-                        btn.classList.remove('bg-red-500','hover:bg-red-600');
-                        btn.classList.add('bg-amber-600','hover:bg-amber-700');
-                        btn.dataset.running = 'false';
-                        return;
-                    }
-                    const taskId = data.task_id;
-                    progressMsg.textContent = data.message || '已启动';
+            // 顺序处理每个批次
+            function repairNext(idx) {
+                if (_repairStopFlag || idx >= targets.length) {
+                    finishRepair(idx >= targets.length);
+                    return;
+                }
+                const t = targets[idx];
+                progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} 启动中...`;
 
-                    // 轮询进度
-                    _repairPollTimer = setInterval(() => {
-                        fetch('/api/progress').then(r => r.json()).then(pd => {
-                            const task = (pd.tasks || {})[taskId];
-                            if (!task) return;
-                            const st = task.status;
-                            const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
-                            progressMsg.textContent = `${task.message || st} (${pct}%)`;
-                            if (st === 'completed' || st === 'failed' || st === 'stopped') {
-                                clearInterval(_repairPollTimer);
-                                _repairPollTimer = null;
-                                btn.textContent = '补齐无图';
-                                btn.classList.remove('bg-red-500','hover:bg-red-600');
-                                btn.classList.add('bg-amber-600','hover:bg-amber-700');
-                                btn.dataset.running = 'false';
-                                progressDiv.classList.add('hidden');
-                                if (st === 'completed') {
-                                    summaryEl.innerHTML = `<span class="text-green-600">${task.message}</span>`;
-                                } else if (st === 'failed') {
-                                    summaryEl.innerHTML = `<span class="text-red-600">${task.error_message || '失败'}</span>`;
+                fetch(`/api/repair-images/${t.source_id}/${t.batch_id}`, { method: 'POST' })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.no_image === 0) {
+                            // 该批次无需修复，直接下一个
+                            repairNext(idx + 1);
+                            return;
+                        }
+                        if (!data.task_id) {
+                            // 没有 task_id 也没有 no_image=0，异常
+                            repairNext(idx + 1);
+                            return;
+                        }
+                        const taskId = data.task_id;
+                        progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} ${data.message || '已启动'}`;
+
+                        _repairPollTimer = setInterval(() => {
+                            fetch('/api/progress').then(r => r.json()).then(pd => {
+                                const task = (pd.tasks || {})[taskId];
+                                if (!task) return;
+                                const st  = task.status;
+                                const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                                progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} ${task.message || st} (${pct}%)`;
+                                if (st === 'completed' || st === 'failed' || st === 'stopped') {
+                                    clearInterval(_repairPollTimer);
+                                    _repairPollTimer = null;
+                                    if (st === 'failed' || st === 'stopped') {
+                                        finishRepair(false, task.error_message || '已停止');
+                                    } else {
+                                        repairNext(idx + 1);
+                                    }
                                 }
-                                // 刷新 category-stats
-                                fetch(`/api/category-stats/${sourceId}/${batchId}`)
-                                    .then(r => r.json())
-                                    .then(sr => {
-                                        if (sr && sr.categories) {
-                                            ['text','formula','table'].forEach(cat => {
-                                                document.getElementById(`split-${cat}-count`).textContent = (sr.categories[cat]?.count || 0).toLocaleString();
-                                            });
-                                            updateNoImageDisplay([sr]);
-                                        }
-                                    });
-                            }
-                        }).catch(() => {});
-                    }, 2000);
-                })
-                .catch(e => {
-                    progressMsg.textContent = `启动失败: ${e.message}`;
-                    btn.textContent = '补齐无图';
-                    btn.classList.remove('bg-red-500','hover:bg-red-600');
-                    btn.classList.add('bg-amber-600','hover:bg-amber-700');
-                    btn.dataset.running = 'false';
+                            }).catch(() => {});
+                        }, 2000);
+                    })
+                    .catch(e => {
+                        progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} 启动失败: ${e.message}`;
+                        repairNext(idx + 1);
+                    });
+            }
+
+            function finishRepair(allDone, errMsg) {
+                btn.textContent = '补齐无图';
+                btn.classList.remove('bg-red-500','hover:bg-red-600');
+                btn.classList.add('bg-amber-600','hover:bg-amber-700');
+                btn.dataset.running = 'false';
+                progressDiv.classList.add('hidden');
+                if (errMsg) {
+                    summaryEl.innerHTML = `<span class="text-red-600">${errMsg}</span>`;
+                } else if (allDone) {
+                    summaryEl.innerHTML = `<span class="text-green-600">所有批次补齐完成</span>`;
+                }
+                // 刷新所有批次的 category-stats（多批次聚合）
+                Promise.all(targets.map(t =>
+                    fetch(`/api/category-stats/${t.source_id}/${t.batch_id}`)
+                        .then(r => r.json())
+                        .catch(() => null)
+                )).then(allStats => {
+                    const validStats = allStats.filter(s => s && s.categories);
+                    if (validStats.length === 0) return;
+                    let totalText = 0, totalFormula = 0, totalTable = 0;
+                    validStats.forEach(sr => {
+                        totalText    += sr.categories.text?.count    || 0;
+                        totalFormula += sr.categories.formula?.count || 0;
+                        totalTable   += sr.categories.table?.count   || 0;
+                    });
+                    document.getElementById('split-text-count').textContent    = totalText.toLocaleString();
+                    document.getElementById('split-formula-count').textContent = totalFormula.toLocaleString();
+                    document.getElementById('split-table-count').textContent   = totalTable.toLocaleString();
+                    updateNoImageDisplay(validStats);
                 });
+            }
+
+            repairNext(0);
         });
 
         document.getElementById('btn-split-categories').addEventListener('click', function() {
-            if (!bucketSampleData) { alert('请先完成抽样（常规抽样或按难度抽样）'); return; }
+            if (!bucketSampleData) { showToast('请先完成抽样（常规抽样或按难度抽样）', 'warning'); return; }
             const btn = this;
             const status = document.getElementById('split-status');
 
@@ -2434,7 +2708,7 @@
             } else if (bucketSampleData.source_id && bucketSampleData.source_id !== 'all') {
                 targets = [{source_id: bucketSampleData.source_id, batch_id: bucketSampleData.batch_id}];
             }
-            if (targets.length === 0) { alert('无可用批次数据'); return; }
+            if (targets.length === 0) { showToast('无可用批次数据', 'warning'); return; }
 
             btn.dataset.running = 'true';
             btn.innerHTML = '<span class="inline-block w-3 h-3 bg-white rounded-full mr-2 animate-pulse"></span>停止所有任务';
@@ -2590,6 +2864,7 @@
                             btn.innerHTML = '▶ pp-layout + 拆分到 Lance';
                             btn.classList.remove('bg-red-500','hover:bg-red-600');
                             btn.classList.add('bg-teal-600','hover:bg-teal-700');
+                            setTabBadge('diffsample', '✅');
 
                             const hasFail = layoutTasks.some(t => t.status === 'failed');
                             const hasStopped = layoutTasks.some(t => t.status === 'stopped');
@@ -2617,18 +2892,18 @@
             const sources = Array.from(document.querySelectorAll('.source-checkbox:checked')).map(cb => cb.value);
             const batches = Array.from(document.querySelectorAll('.batch-checkbox:checked')).map(cb => cb.value);
             const statuses = Array.from(document.querySelectorAll('.status-checkbox:checked')).map(cb => cb.value);
-            if (sources.length === 0 && batches.length === 0 && statuses.length === 0) { alert('请至少选择一个筛选条件'); return; }
+            if (sources.length === 0 && batches.length === 0 && statuses.length === 0) { showToast('请至少选择一个筛选条件', 'warning'); return; }
             const params = new URLSearchParams();
             if (sources.length) params.set('sources', sources.join(','));
             if (batches.length) params.set('batches', batches.join(','));
             if (statuses.length) params.set('statuses', statuses.join(','));
             params.set('page', '1'); params.set('page_size', '10');
-            fetch(`/api/filter-data?${params}`).then(r => r.json()).then(data => displayResults(data)).catch(() => alert('筛选失败'));
+            fetch(`/api/filter-data?${params}`).then(r => r.json()).then(data => displayResults(data)).catch(() => showToast('筛选失败', 'error'));
         });
 
         document.getElementById('export-data').addEventListener('click', function() {
             const rows = document.querySelectorAll('#results-body tr');
-            if (!rows.length || rows[0].querySelector('td[colspan]')) { alert('没有数据可导出'); return; }
+            if (!rows.length || rows[0].querySelector('td[colspan]')) { showToast('没有数据可导出', 'warning'); return; }
             let csv = 'Sample ID,Source ID,Batch ID,Type,Difficulty\n';
             rows.forEach(r => csv += Array.from(r.querySelectorAll('td')).map(c => c.textContent.trim()).join(',') + '\n');
             const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([csv], {type:'text/csv'})), download: 'filtered_data.csv' });
@@ -2641,16 +2916,19 @@
             document.getElementById('filter-summary').innerHTML = `找到 <strong>${data.total}</strong> 个样本，显示第 <strong>${data.page}</strong> 页，共 <strong>${data.total_pages}</strong> 页`;
             const tbody = document.getElementById('results-body');
             tbody.innerHTML = '';
+            const frag = document.createDocumentFragment();
             data.samples.forEach(s => {
-                tbody.innerHTML += `<tr>
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
                     <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${s.sample_id}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.source_id}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.batch_id}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.input_type}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.difficulty || 'N/A'}</td>
-                    <td class="px-6 py-4 whitespace-nowrap"><button onclick="alert('${s.sample_id}')" class="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700">查看</button></td>
-                </tr>`;
+                    <td class="px-6 py-4 whitespace-nowrap"><button onclick="showToast('${s.sample_id}', 'info')" class="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700">查看</button></td>`;
+                frag.appendChild(tr);
             });
+            tbody.appendChild(frag);
             addPagination(data);
         }
 
@@ -2693,8 +2971,7 @@
 
             // 获取每个批次的 category-stats 汇总
             const statsPromises = filtered.map(b =>
-                fetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
-                    .then(r => r.json())
+                cachedFetch(`/api/category-stats/${b.source_id}/${b.batch_id}`)
                     .catch(() => null)
             );
             Promise.all(statsPromises).then(results => {
@@ -2751,6 +3028,10 @@
 
         // 数据源变化时重置 EC 选择
         selSource.addEventListener('change', () => {
+            _ecPollCancelled = true;  // B5 fix: cancel any running EC poll
+            // B3 fix: clear all running CMCV intervals
+            for (const [tid, iv] of _cmcvIntervals) { clearInterval(iv); }
+            _cmcvIntervals.clear();
             ecSelectedBatches.clear();
             renderEcBatchSelect();
             updateEcButtonVisibility();
@@ -2775,10 +3056,9 @@
                 // 没有选中具体批次 → 尝试加载第一个有结果的批次
                 const filtered = batchData.filter(b => b.source_id === src);
                 for (const b of filtered) {
-                    fetch(`/api/element-clusters/${b.source_id}/${b.batch_id}`)
-                        .then(r => r.json())
+                    cachedFetch(`/api/element-clusters/${b.source_id}/${b.batch_id}`)
                         .then(data => {
-                            if (data.status === 'completed' && data.result) {
+                            if (data && data.status === 'completed' && data.result) {
                                 loadEcResults(b.source_id, b.batch_id);
                             }
                         })
@@ -2789,7 +3069,7 @@
         })();
 
         document.getElementById('btn-run-ec').addEventListener('click', function() {
-            if (ecSelectedBatches.size === 0) { alert('请选择批次'); return; }
+            if (ecSelectedBatches.size === 0) { showToast('请选择批次', 'warning'); return; }
             const btn = this;
             const maxK = parseInt(document.getElementById('ec-max-k').value) || 10;
             const batches = [...ecSelectedBatches].map(key => {
@@ -2844,7 +3124,9 @@
             }
 
             function pollEcStatus(src, bid, batchIdx, batchTotal, onDone) {
+                _ecPollCancelled = false;
                 const check = () => {
+                    if (_ecPollCancelled) { onDone('cancelled'); return; }
                     fetch(`/api/element-clusters/${src}/${bid}`).then(r => r.json()).then(data => {
                         if (data.status === 'completed') {
                             progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — <span class="text-green-600">完成</span>`;
@@ -2860,6 +3142,8 @@
                             const prog = data.progress || {};
                             const pct = prog.total > 0 ? ((prog.current / prog.total * 100).toFixed(0)) : 0;
                             progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — ${data.message || '处理中'} <span class="text-gray-400">${pct}%</span>`;
+                            const ecBar = document.getElementById('ec-progress-bar');
+                            if (ecBar) ecBar.style.width = pct + '%';
                             setTimeout(check, 2000);
                         }
                     }).catch(() => setTimeout(check, 3000));
@@ -2871,7 +3155,8 @@
         });
 
         function loadEcResults(src, bid) {
-            fetch(`/api/element-clusters/${src}/${bid}`).then(r => r.json()).then(data => {
+            cachedFetch(`/api/element-clusters/${src}/${bid}`).then(data => {
+                if (!data) return;
                 if (data.status === 'failed') {
                     document.getElementById('ec-empty').classList.remove('hidden');
                     document.getElementById('ec-empty').innerHTML = `<span class="text-red-600">聚类失败: ${data.message || '未知错误'}</span>`;
@@ -2922,7 +3207,7 @@
         let _ecsBatch = null;  // {source_id, batch_id} 由聚类完成后设置
 
         document.getElementById('btn-run-ecs').addEventListener('click', function() {
-            if (!_ecsBatch) { alert('请先完成 Element-Type 聚类'); return; }
+            if (!_ecsBatch) { showToast('请先完成 Element-Type 聚类', 'warning'); return; }
             const btn = this;
             const perCluster = parseInt(document.getElementById('ecs-per-cluster').value) || 5;
             const progress = document.getElementById('ecs-progress');
@@ -2983,147 +3268,96 @@
         renderEcBatchSelect();
 
         // === Element OCR ===
-        const eoProgress = document.getElementById('eo-progress');
-        const eoProgressMsg = document.getElementById('eo-progress-msg');
-        const eoBtn = document.getElementById('btn-run-eo');
-        const eoBtnAll = document.getElementById('btn-run-eo-all');
-        const eoStatus = document.getElementById('eo-status');
-        const eoEmpty = document.getElementById('eo-empty');
 
-        function showElemOcrButtons(show) {
-            eoBtn.classList.toggle('hidden', !show);
-            eoBtnAll.classList.toggle('hidden', !show);
-            eoEmpty.classList.toggle('hidden', show);
-            if (show) eoStatus.classList.remove('hidden');
+        function renderEoTaskBar(model, taskId, task, barColor) {
+            const tasksDiv = document.getElementById(`eo-${model}-tasks`);
+            if (!tasksDiv) return;
+            let taskEl = document.getElementById(`eo-task-${taskId}`);
+            if (!taskEl) {
+                taskEl = document.createElement('div');
+                taskEl.id = `eo-task-${taskId}`;
+                taskEl.className = 'text-xs';
+                tasksDiv.appendChild(taskEl);
+            }
+            const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+            const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
+            const batchLabel = taskId.split('_').slice(3).join('_');
+            taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5">
+                <span>${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
+                <span class="text-gray-400">${task.current}/${task.total}</span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-1">
+                <div class="${barColor} h-1 rounded-full transition-all duration-300" style="width: ${pct}%"></div>
+            </div>`;
         }
 
-        // === Element OCR polling helpers ===
+        function pollElementOcrModel(model, taskId) {
+            const tasksDiv = document.getElementById(`eo-${model}-tasks`);
+            if (_eoIntervals[taskId]) { PollManager.unsubscribe(taskId); delete _eoIntervals[taskId]; }
+            const barColor = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500';
 
-        // Per-model progress helpers
-        function _showModelProgress(model) {
-            const row = document.getElementById(`eo-prog-${model}`);
-            if (row) { row.classList.remove('hidden'); }
-            eoProgress.classList.remove('hidden');
-        }
-        function _hideAllModelProgress() {
-            ['paddleocr', 'glm_ocr', 'self_ocr'].forEach(m => {
-                const row = document.getElementById(`eo-prog-${m}`);
-                if (row) {
-                    row.classList.add('hidden');
-                    row.querySelector('.eo-msg').textContent = '...';
-                    row.querySelector('.eo-bar').style.width = '0%';
+            fetch('/api/progress').then(r => r.json()).then(data => {
+                const task = (data.tasks || {})[taskId];
+                if (task) renderEoTaskBar(model, taskId, task, barColor);
+            }).catch(() => {});
+
+            _eoIntervals[taskId] = true;
+            PollManager.subscribe(taskId, {
+                onProgress(task) {
+                    renderEoTaskBar(model, taskId, task, barColor);
+                },
+                onComplete(task) {
+                    delete _eoIntervals[taskId];
+                    renderEoTaskBar(model, taskId, task, barColor);
+                    setTabBadge('el-ocr', '✅');
+                },
+                onFail(task) {
+                    delete _eoIntervals[taskId];
+                    renderEoTaskBar(model, taskId, task, barColor);
                 }
             });
         }
-        function _updateModelProgress(model, msg, pctVal) {
-            const row = document.getElementById(`eo-prog-${model}`);
-            if (!row) return;
-            row.querySelector('.eo-msg').textContent = `${msg} (${pctVal}%)`;
-            row.querySelector('.eo-bar').style.width = `${pctVal}%`;
-        }
-        function _stopModelSpinner(model) {
-            const row = document.getElementById(`eo-prog-${model}`);
-            if (!row) return;
-            const spinner = row.querySelector('.eo-spinner');
-            if (spinner) spinner.classList.add('hidden');
-        }
-        function _checkAllDone() {
-            const anyVisible = ['paddleocr', 'glm_ocr', 'self_ocr'].some(m => {
-                const row = document.getElementById(`eo-prog-${m}`);
-                return row && !row.classList.contains('hidden');
-            });
-            // hide only when user manually clicks again; leave visible for status reference
-        }
 
-        function pollElementOcr(taskId, model, onDone) {
-            const iv = setInterval(async () => {
-                try {
-                    const r = await fetch(`/api/tasks/${taskId}`);
-                    const d = await r.json();
-                    const prog = d.progress || {};
-                    const pctVal = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
-                    _updateModelProgress(model, d.message || '...', pctVal);
-                    if (d.status === 'completed' || d.status === 'failed' || d.status === 'stopped') {
-                        clearInterval(iv);
-                        _stopModelSpinner(model);
-                        const prefix = model === 'paddleocr' ? 'paddle' : model === 'glm_ocr' ? 'glm' : 'self';
-                        const statusEl = document.getElementById(`eo-${prefix}-status`);
-                        if (statusEl) statusEl.textContent = d.status === 'completed' ? '✅' : '❌';
-                        if (onDone) onDone();
-                    }
-                } catch { clearInterval(iv); }
-            }, 2000);
-        }
+        document.querySelectorAll('.btn-eo-run').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const model = this.dataset.model;
+                const src = _ecsBatch?.source_id || getSourceId();
+                const bid = _ecsBatch?.batch_id || getBatchId();
+                if (!src || !bid) { showToast('请先完成 Layout 拆分', 'warning'); return; }
 
-        async function runElementOcr(model) {
-            const src = _ecsBatch?.source_id || getSourceId();
-            const bid = _ecsBatch?.batch_id || getBatchId();
-            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
-            eoBtn.disabled = true; eoBtnAll.disabled = true;
-            _showModelProgress(model);
-
-            const testMode = document.getElementById('eo-test-mode').checked;
-            try {
-                const resp = await fetch(`/api/element-ocr/${src}/${bid}`, {
+                this.textContent = '启动中...';
+                const testMode = (model === 'self_ocr' && document.getElementById('eo-test-mode')?.checked);
+                const params = new URLSearchParams({model});
+                if (testMode) params.set('test_mode', 'true');
+                fetch(`/api/element-ocr/${src}/${bid}?${params}`, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({model, test_mode: testMode}),
+                })
+                .then(r => {
+                    if (!r.ok) return r.text().then(t => { throw new Error(`HTTP ${r.status}: ${t.slice(0, 200)}`); });
+                    return r.json();
+                })
+                .then(data => {
+                    this.textContent = '运行';
+                    if (data.task_id) pollElementOcrModel(model, data.task_id);
+                    if (data.status === 'already_running') showToast(`${model} 已在运行`, 'info');
+                })
+                .catch(err => {
+                    this.textContent = '运行';
+                    showToast(`启动失败: ${err.message}`, 'error');
                 });
-                const data = await resp.json();
-                if (data.status === 'already_running') {
-                    _updateModelProgress(model, '任务已在运行', 0);
-                    return;
-                }
-                pollElementOcr(data.task_id, model, () => {
-                    eoBtn.disabled = false; eoBtnAll.disabled = false;
-                });
-            } catch (e) {
-                _hideAllModelProgress();
-                eoBtn.disabled = false; eoBtnAll.disabled = false;
-                alert(`启动失败: ${e.message}`);
-            }
-        }
+            });
+        });
 
-        eoBtn.addEventListener('click', () => runElementOcr(document.getElementById('eo-model').value));
-        eoBtnAll.addEventListener('click', async () => {
-            const src = _ecsBatch?.source_id || getSourceId();
-            const bid = _ecsBatch?.batch_id || getBatchId();
-            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
-            eoBtnAll.disabled = true; eoBtn.disabled = true;
-            _hideAllModelProgress();
-
-            const models = ['paddleocr', 'glm_ocr', 'self_ocr'];
-            const testMode = document.getElementById('eo-test-mode').checked;
-            let doneCount = 0;
-
-            // Start all models, show progress rows for each
-            for (const m of models) {
-                _showModelProgress(m);
-                _updateModelProgress(m, '启动中...', 0);
-                try {
-                    const resp = await fetch(`/api/element-ocr/${src}/${bid}`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({model: m, test_mode: testMode}),
-                    });
-                    const data = await resp.json();
-                    if (data.task_id) {
-                        pollElementOcr(data.task_id, m, () => {
-                            doneCount++;
-                            if (doneCount >= models.length) {
-                                eoBtn.disabled = false; eoBtnAll.disabled = false;
-                            }
-                        });
-                    }
-                } catch (e) {
-                    _updateModelProgress(m, `启动失败: ${e.message}`, 0);
-                    _stopModelSpinner(m);
-                    doneCount++;
-                    if (doneCount >= models.length) {
-                        eoBtn.disabled = false; eoBtnAll.disabled = false;
-                    }
-                }
-            }
+        document.querySelectorAll('.btn-eo-stop').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const model = this.dataset.model;
+                const src = _ecsBatch?.source_id || getSourceId();
+                const bid = _ecsBatch?.batch_id || getBatchId();
+                fetch('/api/stop', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({task_id: `el_ocr_${model}_${src}_${bid}`}),
+                }).catch(() => {});
+            });
         });
 
         // === Element CMCV ===
@@ -3141,7 +3375,7 @@
         ecmcvBtn.addEventListener('click', async () => {
             const src = _ecsBatch?.source_id || getSourceId();
             const bid = _ecsBatch?.batch_id || getBatchId();
-            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
+            if (!src || !bid) showToast('请先完成 Element-Type 聚类，或选择数据源和批次', 'warning'); return;
             ecmcvBtn.disabled = true;
             ecmcvProgress.classList.remove('hidden');
             ecmcvProgressMsg.textContent = '启动 CMCV...';
@@ -3150,28 +3384,31 @@
                 const data = await resp.json();
                 if (data.task_id) {
                     const ecmcvBar = document.getElementById('ecmcv-progress-bar');
-                    const iv = setInterval(async () => {
-                        try {
-                            const r = await fetch(`/api/tasks/${data.task_id}`);
-                            const d = await r.json();
+                    // 使用 TaskPoller 替代手动 setInterval
+                    new TaskPoller(`/api/tasks/${data.task_id}`, {
+                        onProgress: (d) => {
                             const prog = d.progress || {};
                             const pctVal = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
                             ecmcvProgressMsg.textContent = `${d.message || '...'} (${pctVal}%)`;
                             ecmcvBar.style.width = `${pctVal}%`;
-                            if (['completed','failed','stopped'].includes(d.status)) {
-                                clearInterval(iv);
-                                ecmcvProgress.classList.add('hidden');
-                                ecmcvBar.style.width = '0%';
-                                ecmcvBtn.disabled = false;
-                                if (d.status === 'completed') loadElemCmcvResults();
-                            }
-                        } catch { clearInterval(iv); }
-                    }, 2000);
+                        },
+                        onComplete: () => {
+                            ecmcvProgress.classList.add('hidden');
+                            ecmcvBar.style.width = '0%';
+                            ecmcvBtn.disabled = false;
+                            loadElemCmcvResults();
+                        },
+                        onFail: () => {
+                            ecmcvProgress.classList.add('hidden');
+                            ecmcvBar.style.width = '0%';
+                            ecmcvBtn.disabled = false;
+                        }
+                    }, 2000).start();
                 }
             } catch (e) {
                 ecmcvProgress.classList.add('hidden');
                 ecmcvBtn.disabled = false;
-                alert(`CMCV 启动失败: ${e.message}`);
+                showToast(`CMCV 启动失败: ${e.message}`, 'error');
             }
         });
 
@@ -3207,7 +3444,7 @@
         edsBtn.addEventListener('click', async () => {
             const src = _ecsBatch?.source_id || getSourceId();
             const bid = _ecsBatch?.batch_id || getBatchId();
-            if (!src || !bid) return alert('请先完成 Element-Type 聚类，或选择数据源和批次');
+            if (!src || !bid) showToast('请先完成 Element-Type 聚类，或选择数据源和批次', 'warning'); return;
             edsBtn.disabled = true;
             edsBtn.textContent = '抽样中...';
             const easy = document.getElementById('eds-easy').value;
@@ -3233,7 +3470,7 @@
                 edsResults.classList.remove('hidden');
                 edsEmpty.classList.add('hidden');
             } catch (e) {
-                alert(`抽样失败: ${e.message}`);
+                showToast(`抽样失败: ${e.message}`, 'error');
             } finally {
                 edsBtn.disabled = false;
                 edsBtn.textContent = '按难度抽样';
@@ -3246,7 +3483,7 @@
             const obs = new MutationObserver(() => {
                 const ecsRes = document.getElementById('ecs-results');
                 if (ecsRes && !ecsRes.classList.contains('hidden')) {
-                    showElemOcrButtons(true);
+                    document.getElementById('eo-empty')?.classList.add('hidden');
                     showElemCmcvButton(true);
                     // 尝试加载已有 CMCV 结果
                     const ecsSrc = getSourceId();
@@ -3258,5 +3495,7 @@
             if (ecsResEl) obs.observe(ecsResEl, {attributes: true, attributeFilter: ['class']});
         }
     </script>
+    <!-- Toast 通知容器 -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
 </body>
 </html>
