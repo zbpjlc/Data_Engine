@@ -26,13 +26,13 @@ def results_to_element_rows(
                 r = results[idx]
                 row[f"{prefix}_text"] = r.text_content or None
                 row[f"{prefix}_confidence"] = r.confidence or None
-                row[f"{prefix}_table_json"] = r.table_structure
+                row[f"{prefix}_table"] = r.table_structure
                 row[f"{prefix}_formula"] = r.formula_latex or None
                 row[f"{prefix}_raw_json"] = r.raw_output or None
             else:
                 row[f"{prefix}_text"] = None
                 row[f"{prefix}_confidence"] = None
-                row[f"{prefix}_table_json"] = None
+                row[f"{prefix}_table"] = None
                 row[f"{prefix}_formula"] = None
                 row[f"{prefix}_raw_json"] = None
         rows.append(row)

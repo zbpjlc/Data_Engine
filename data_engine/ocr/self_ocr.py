@@ -170,7 +170,7 @@ class SelfOCREngine(BaseOCREngine):
             ref_formula = None
             if ref:
                 ref_text = ref.get("paddle_text") or ref.get("glm_text")
-                ref_table = ref.get("paddle_table_json") or ref.get("glm_table_json")
+                ref_table = ref.get("paddle_table") or ref.get("glm_table")
                 ref_formula = ref.get("paddle_formula") or ref.get("glm_formula")
 
             roll = random.random()

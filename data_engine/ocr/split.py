@@ -76,7 +76,7 @@ def _element_row_to_category_row(row: dict, category: str, image_data: bytes | N
 
     elif category == "table":
         for model in ("paddle", "glm", "self"):
-            tbl = row.get(f"{model}_table_json")
+            tbl = row.get(f"{model}_table")
             if tbl:
                 if isinstance(tbl, str):
                     try:

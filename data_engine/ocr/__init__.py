@@ -11,19 +11,19 @@ ELEMENT_SCHEMA = pa.schema([
 
     pa.field("paddle_text", pa.large_string(), nullable=True),
     pa.field("paddle_confidence", pa.float32(), nullable=True),
-    pa.field("paddle_table_json", pa.large_string(), nullable=True),
+    pa.field("paddle_table", pa.large_string(), nullable=True),
     pa.field("paddle_formula", pa.large_string(), nullable=True),
     pa.field("paddle_raw_json", pa.large_string(), nullable=True),
 
     pa.field("glm_text", pa.large_string(), nullable=True),
     pa.field("glm_confidence", pa.float32(), nullable=True),
-    pa.field("glm_table_json", pa.large_string(), nullable=True),
+    pa.field("glm_table", pa.large_string(), nullable=True),
     pa.field("glm_formula", pa.large_string(), nullable=True),
     pa.field("glm_raw_json", pa.large_string(), nullable=True),
 
     pa.field("self_text", pa.large_string(), nullable=True),
     pa.field("self_confidence", pa.float32(), nullable=True),
-    pa.field("self_table_json", pa.large_string(), nullable=True),
+    pa.field("self_table", pa.large_string(), nullable=True),
     pa.field("self_formula", pa.large_string(), nullable=True),
     pa.field("self_raw_json", pa.large_string(), nullable=True),
 
@@ -35,9 +35,9 @@ ELEMENT_SCHEMA = pa.schema([
 ])
 
 ELEMENT_JSON_FIELDS = {
-    "bbox_json", "paddle_table_json", "paddle_raw_json",
-    "glm_table_json", "glm_raw_json",
-    "self_table_json", "self_raw_json",
+    "bbox_json", "paddle_table", "paddle_raw_json",
+    "glm_table", "glm_raw_json",
+    "self_table", "self_raw_json",
     "block_diff_json",
 }
 
@@ -116,11 +116,11 @@ TABLE_LANCE_SCHEMA = pa.schema([
     pa.field("table_confidence", pa.float32(), nullable=True),
     pa.field("source_model", pa.large_string(), nullable=True),
     # 多模型 OCR 结果
-    pa.field("paddle_table_json", pa.large_string(), nullable=True),
+    pa.field("paddle_table", pa.large_string(), nullable=True),
     pa.field("paddle_confidence", pa.float32(), nullable=True),
-    pa.field("glm_table_json", pa.large_string(), nullable=True),
+    pa.field("glm_table", pa.large_string(), nullable=True),
     pa.field("glm_confidence", pa.float32(), nullable=True),
-    pa.field("self_table_json", pa.large_string(), nullable=True),
+    pa.field("self_table", pa.large_string(), nullable=True),
     pa.field("self_confidence", pa.float32(), nullable=True),
     # CMCV 结果
     pa.field("consistency_pattern", pa.large_string(), nullable=True),
