@@ -3309,9 +3309,22 @@
             const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
             const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
             const batchLabel = taskId.split('_').slice(3).join('_');
+
+            // 计算剩余时间/耗时
+            let timeStr = '';
+            const elapsed = task.elapsed_seconds || 0;
+            if (task.status === 'completed' && elapsed > 0) {
+                timeStr = `耗时 ${fmtTime(elapsed)}`;
+            } else if (task.status === 'running' && task.current > 0 && task.total > 0 && elapsed > 2) {
+                const remaining = elapsed * (task.total - task.current) / task.current;
+                timeStr = `剩余 ${fmtTime(remaining)} · 已运行 ${fmtTime(elapsed)}`;
+            } else if (task.status === 'running' && elapsed > 0) {
+                timeStr = `已运行 ${fmtTime(elapsed)}`;
+            }
+
             taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5">
                 <span>${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
-                <span class="text-gray-400">${task.current}/${task.total}</span>
+                <span class="text-gray-400">${task.current}/${task.total} <span class="text-gray-500 ml-2">${timeStr}</span></span>
             </div>
             <div class="w-full bg-gray-200 rounded-full h-1">
                 <div class="${barColor} h-1 rounded-full transition-all duration-300" style="width: ${pct}%"></div>
@@ -3345,32 +3358,50 @@
             });
         }
 
+        // 获取 Element OCR 目标批次列表
+        function getEoTargets() {
+            // 优先用 EC 面板选中的批次
+            if (_ecsBatch?.source_id && _ecsBatch?.batch_id) {
+                return [{source_id: _ecsBatch.source_id, batch_id: _ecsBatch.batch_id}];
+            }
+            const src = getSourceId();
+            const bid = getBatchId();
+            if (src && bid) return [{source_id: src, batch_id: bid}];
+            if (src) return batchData.filter(b => b.source_id === src).map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            // 未选数据源 → 所有批次
+            return batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+        }
+
         document.querySelectorAll('.btn-eo-run').forEach(btn => {
             btn.addEventListener('click', function() {
                 const model = this.dataset.model;
-                const src = _ecsBatch?.source_id || getSourceId();
-                const bid = _ecsBatch?.batch_id || getBatchId();
-                if (!src || !bid) { showToast('请先完成 Layout 拆分', 'warning'); return; }
+                const targets = getEoTargets();
+                if (targets.length === 0) { showToast('请先完成 Layout 拆分', 'warning'); return; }
 
                 this.textContent = '启动中...';
                 const testMode = (model === 'self_ocr' && document.getElementById('eo-test-mode')?.checked);
                 const params = new URLSearchParams({model});
                 if (testMode) params.set('test_mode', 'true');
-                fetch(`/api/element-ocr/${src}/${bid}?${params}`, {
-                    method: 'POST',
-                })
-                .then(r => {
-                    if (!r.ok) return r.text().then(t => { throw new Error(`HTTP ${r.status}: ${t.slice(0, 200)}`); });
-                    return r.json();
-                })
-                .then(data => {
-                    this.textContent = '运行';
-                    if (data.task_id) pollElementOcrModel(model, data.task_id);
-                    if (data.status === 'already_running') showToast(`${model} 已在运行`, 'info');
-                })
-                .catch(err => {
-                    this.textContent = '运行';
-                    showToast(`启动失败: ${err.message}`, 'error');
+
+                let started = 0;
+                targets.forEach(t => {
+                    fetch(`/api/element-ocr/${t.source_id}/${t.batch_id}?${params}`, {
+                        method: 'POST',
+                    })
+                    .then(r => {
+                        if (!r.ok) return r.text().then(txt => { throw new Error(`HTTP ${r.status}: ${txt.slice(0, 200)}`); });
+                        return r.json();
+                    })
+                    .then(data => {
+                        started++;
+                        if (data.task_id) pollElementOcrModel(model, data.task_id);
+                        if (started >= targets.length) btn.textContent = '运行';
+                    })
+                    .catch(err => {
+                        started++;
+                        console.error('[el-ocr] 启动失败:', err);
+                        if (started >= targets.length) btn.textContent = '运行';
+                    });
                 });
             });
         });
@@ -3378,12 +3409,13 @@
         document.querySelectorAll('.btn-eo-stop').forEach(btn => {
             btn.addEventListener('click', function() {
                 const model = this.dataset.model;
-                const src = _ecsBatch?.source_id || getSourceId();
-                const bid = _ecsBatch?.batch_id || getBatchId();
-                fetch('/api/stop', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({task_id: `el_ocr_${model}_${src}_${bid}`}),
-                }).catch(() => {});
+                const targets = getEoTargets();
+                targets.forEach(t => {
+                    fetch('/api/stop', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({task_id: `el_ocr_${model}_${t.source_id}_${t.batch_id}`}),
+                    }).catch(() => {});
+                });
             });
         });
 

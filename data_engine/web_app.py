@@ -3619,23 +3619,24 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 batch_dir = source.resolve_batch_dir(batch_id)
                 manifests_dir = batch_dir / "manifests"
 
-                # 直接从 text/formula/table.lance 读取 block 数据
-                all_blocks: list[tuple[str, dict]] = []  # (category, row)
+                # 阶段 1：仅读元数据统计总数（不加载 image_data）
+                cat_paths: list[tuple[str, str]] = []  # (category, lance_path)
+                total_blocks = 0
                 for cat in ("text", "formula", "table"):
                     lp = manifests_dir / f"{cat}.lance"
                     if not lp.exists():
                         continue
                     try:
                         ds = lance.dataset(str(lp))
-                        rows = ds.to_table().to_pylist()
-                        for row in rows:
-                            if row.get("image_data"):
-                                all_blocks.append((cat, row))
+                        if "image_data" not in ds.schema.names:
+                            continue
+                        total_blocks += ds.count_rows()
+                        cat_paths.append((cat, str(lp)))
                     except Exception as e:
                         print(f"[el-ocr] 读 {cat}.lance 失败: {e}", file=sys.stderr)
 
-                if not all_blocks:
-                    progress_tracker.fail_task(task_id, "三个 category lance 中无带 image_data 的 block")
+                if not cat_paths or total_blocks == 0:
+                    progress_tracker.fail_task(task_id, "三个 category lance 中无可用 block")
                     return
 
                 # 初始化 OCR 引擎
@@ -3649,79 +3650,138 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     from data_engine.ocr.self_ocr import SelfOCREngine
                     engine = SelfOCREngine(test_mode=use_test_mode)
 
+                text_col = f"{prefix}_text"
+                conf_col = f"{prefix}_confidence"
+
+                # 断点续跑：收集已有结果的 (sample_id, block_idx)
+                done_keys: set[tuple[str, int]] = set()
+                for cat, lp_str in cat_paths:
+                    try:
+                        ds = lance.dataset(lp_str)
+                        if text_col in ds.schema.names:
+                            tbl = ds.to_table(columns=["sample_id", "block_idx", text_col])
+                            for row in tbl.to_pylist():
+                                val = row.get(text_col)
+                                if val is not None and val != "":
+                                    done_keys.add((row["sample_id"], row["block_idx"]))
+                    except Exception as e:
+                        print(f"[el-ocr] resume 读 {cat} 失败: {e}", file=sys.stderr)
+
+                if done_keys:
+                    print(f"[el-ocr] resume: {model} 已有 {len(done_keys)} 个 block 完成，跳过", file=sys.stderr)
+
+                # 重新计算待处理总数
+                remaining_blocks = total_blocks - len(done_keys)
+                if remaining_blocks <= 0:
+                    progress_tracker.complete_task(task_id, f"{model} 所有 block 已完成（{len(done_keys)} 个），无需重跑")
+                    return
+
                 progress_tracker.start_task(
                     task_id=task_id, task_type="el_ocr",
                     source_id=source_id, batch_id=batch_id,
-                    total=len(all_blocks),
-                    message=f"{model}: {len(all_blocks)} 个 block",
+                    total=remaining_blocks,
+                    message=f"{model}: {remaining_blocks} 个待处理（跳过 {len(done_keys)} 已完成）",
                 )
 
                 from data_engine.ocr.base import LayoutBlock
                 tmp_dir = tempfile.mkdtemp(prefix="el_ocr_")
-                text_col = f"{prefix}_text"
-                conf_col = f"{prefix}_confidence"
 
                 done = 0
                 errors = 0
+                skipped = 0
                 save_interval = int(get_config("ocr", "save_interval", default=20))
                 pending_rows: dict[str, list[dict]] = {"text": [], "formula": [], "table": []}
+                FETCH_BATCH = 500  # 每次从 Lance 取多少行
 
-                for i, (cat, block) in enumerate(all_blocks):
+                # 阶段 2：按类别分批流式读取，每批 500 行
+                for cat, lp_str in cat_paths:
                     if progress_tracker.is_stopped(task_id):
                         break
-                    img_bytes = block.get("image_data")
-                    if not img_bytes:
-                        done += 1
+                    try:
+                        ds = lance.dataset(lp_str)
+                    except Exception as e:
+                        print(f"[el-ocr] 打开 {cat}.lance 失败: {e}", file=sys.stderr)
                         continue
 
-                    tmp_path = Path(tmp_dir) / f"{i}.png"
-                    if isinstance(img_bytes, bytes):
-                        tmp_path.write_bytes(img_bytes)
-                    elif isinstance(img_bytes, str):
-                        tmp_path.write_bytes(img_bytes.encode("latin-1"))
-                    else:
-                        tmp_path.write_bytes(bytes(img_bytes))
+                    for batch in ds.to_batches(batch_size=FETCH_BATCH):
+                        if progress_tracker.is_stopped(task_id):
+                            break
+                        rows = batch.to_pylist()
+                        for row in rows:
+                            if progress_tracker.is_stopped(task_id):
+                                break
 
-                    region = LayoutBlock(
-                        block_type=block.get("block_type", cat),
-                        bbox=[0, 0, 100, 100],
-                        confidence=block.get("layout_confidence", 1.0),
-                    )
-                    try:
-                        results = engine.recognize_regions(tmp_path, [region])
-                        r = results[0] if results else None
-                        row = {
-                            "sample_id": block["sample_id"],
-                            "block_idx": block["block_idx"],
-                            text_col: (r.text_content or "") if r else "",
-                            conf_col: r.confidence if r else 0.0,
-                        }
-                        if cat == "table" and r and r.table_structure:
-                            row[f"{prefix}_table_json"] = json.dumps(r.table_structure, ensure_ascii=False)
-                        if cat == "formula" and r and r.formula_latex:
-                            row[f"{prefix}_formula"] = r.formula_latex
-                        pending_rows[cat].append(row)
-                    except Exception as e:
-                        errors += 1
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
+                            sid = row["sample_id"]
+                            bidx = row["block_idx"]
 
-                    done += 1
-                    err_msg = f"（{errors} 错误）" if errors else ""
-                    progress_tracker.update_progress(task_id, current=done, message=f"{model}: {done}/{len(all_blocks)}{err_msg}")
+                            # 断点续跑：跳过已完成的 block
+                            if (sid, bidx) in done_keys:
+                                done += 1
+                                progress_tracker.update_progress(
+                                    task_id, current=done,
+                                    message=f"{model}: {done}/{remaining_blocks}（已完成）"
+                                )
+                                continue
 
-                    if done % save_interval == 0:
-                        _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
-                        pending_rows = {"text": [], "formula": [], "table": []}
+                            img_bytes = row.get("image_data")
+                            if not img_bytes:
+                                skipped += 1
+                                done += 1
+                                progress_tracker.update_progress(
+                                    task_id, current=done,
+                                    message=f"{model}: {done}/{remaining_blocks}（跳过 {skipped} 无图）"
+                                )
+                                continue
+
+                            tmp_path = Path(tmp_dir) / f"{cat}_{sid}_{bidx}.png"
+                            if isinstance(img_bytes, bytes):
+                                tmp_path.write_bytes(img_bytes)
+                            elif isinstance(img_bytes, str):
+                                tmp_path.write_bytes(img_bytes.encode("latin-1"))
+                            else:
+                                tmp_path.write_bytes(bytes(img_bytes))
+
+                            region = LayoutBlock(
+                                block_type=row.get("block_type", cat),
+                                bbox=[0, 0, 100, 100],
+                                confidence=row.get("layout_confidence", 1.0),
+                            )
+                            try:
+                                results = engine.recognize_regions(tmp_path, [region])
+                                r = results[0] if results else None
+                                ocr_row = {
+                                    "sample_id": sid,
+                                    "block_idx": bidx,
+                                    text_col: (r.text_content or "") if r else "",
+                                    conf_col: r.confidence if r else 0.0,
+                                }
+                                if cat == "table" and r and r.table_structure:
+                                    ocr_row[f"{prefix}_table_json"] = json.dumps(r.table_structure, ensure_ascii=False)
+                                if cat == "formula" and r and r.formula_latex:
+                                    ocr_row[f"{prefix}_formula"] = r.formula_latex
+                                pending_rows[cat].append(ocr_row)
+                            except Exception as e:
+                                errors += 1
+                            finally:
+                                tmp_path.unlink(missing_ok=True)
+
+                            done += 1
+                            err_msg = f"（{errors} 错误）" if errors else ""
+                            progress_tracker.update_progress(task_id, current=done, message=f"{model}: {done}/{remaining_blocks}{err_msg}")
+
+                            if done % save_interval == 0:
+                                _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
+                                pending_rows = {"text": [], "formula": [], "table": []}
+                        # batch 处理完，image_data 自动释放
 
                 # 最终 flush
                 _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
                 if progress_tracker.is_stopped(task_id):
-                    progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{len(all_blocks)}）")
+                    progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{remaining_blocks}）")
                 else:
-                    progress_tracker.complete_task(task_id, f"{model} 完成: {done} block{f'，{errors} 错误' if errors else ''}")
+                    progress_tracker.complete_task(task_id, f"{model} 完成: {done} block（跳过 {len(done_keys)} 已完成{f'，{skipped} 无图' if skipped else ''}{f'，{errors} 错误' if errors else ''}）")
             except Exception as e:
                 import traceback
                 traceback.print_exc(file=sys.stderr)
