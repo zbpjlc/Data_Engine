@@ -63,16 +63,18 @@ ingest.lance (page images + metadata)
     ↓ page-sample (per-cluster sampling → OCR → CMCV → difficulty sampling)
     ↓ web_app.py layout detection → split to text/formula/table.lance
     ↓ ocr/layout_features.py (element-level ViT clustering per type)
-    ↓ per-cluster sampling → multi-model OCR → CMCV → difficulty sampling
+    ↓ element-sample (per-cluster sampling, output → element_samples.json)
+    ↓ Element OCR: multi-model OCR on ALL blocks in text/formula/table.lance
+    ↓ Element CMCV: cross-model consistency on all OCR results
     ↓ (element-type level: text/formula/table independently)
 ```
 
+> **Note:** Element-Sample 将抽样结果写入 `artifacts/element_samples.json`，但 Element OCR **不读取该文件**，而是直接扫描 `text.lance`/`formula.lance`/`table.lance` 中的全部 block（支持断点续跑）。Element-Sample 当前主要用于统计/预览用途，不影响 OCR 处理范围。
+
 ### Two Clustering Levels
 
-Both levels follow the same sub-pipeline: **cluster → per-cluster sampling → multi-model OCR → CMCV → difficulty-aware sampling**, but at different granularity:
-
-- **Page-Level** (`clustering.py` → `cluster_records`): Clusters page images using ViT embeddings + MiniBatchKMeans. Operates on `ingest.lance`. The sampling/OCR/CMCV flow runs on **page-level** samples.
-- **Element-Level** (`ocr/layout_features.py` → `cluster_all_types`): Clusters blocks (text/formula/table) separately from `text.lance`/`formula.lance`/`table.lance`. After clustering, within each cluster bucket: **per-cluster sampling → multi-model OCR → CMCV consistency verification → difficulty-aware sampling**. All operations are scoped to the **element-type** level (text, formula, table independently).
+- **Page-Level** (`clustering.py` → `cluster_records`): Clusters page images using ViT embeddings + MiniBatchKMeans. Operates on `ingest.lance`. Sub-pipeline: **cluster → per-cluster sampling → multi-model OCR → CMCV → difficulty-aware sampling**，只对抽样的页面做 OCR。
+- **Element-Level** (`ocr/layout_features.py` → `cluster_all_types`): Clusters blocks (text/formula/table) separately from `text.lance`/`formula.lance`/`table.lance`。聚类后：**element-sample 按 cluster 抽样（仅写 element_samples.json）**，然后 **Element OCR 扫描所有 block**（不按抽样过滤），最后 **Element CMCV 对所有 OCR 结果做一致性验证**。All operations are scoped to the **element-type** level (text, formula, table independently).
 
 ### OCR Subsystem (`data_engine/ocr/`)
 
@@ -107,7 +109,7 @@ All Lance writes (`merge_insert`, `write_dataset`) must hold `_lance_write_lock`
 `web_app.py` sets `OMP_NUM_THREADS=1` etc. at import time to prevent multi-layer thread nesting crashes. Do not remove these.
 
 ### OCR Services
-OCR engines run as external HTTP services on fixed ports (configured in `config.yaml`). They must be started before running element-sample.
+OCR engines run as external HTTP services on fixed ports (configured in `config.yaml`). They must be started before running Element OCR.
 
 ## Configuration
 
