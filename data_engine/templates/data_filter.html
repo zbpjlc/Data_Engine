@@ -2345,12 +2345,17 @@
                 timeStr = `已运行 ${fmtTime(elapsed)}`;
             }
 
+            const _barInner = pct > 0
+                ? `${barColor} h-2 rounded-full transition-all duration-300`
+                : `${barColor} h-2 rounded-full animate-pulse`;
+            const _barWidth = pct > 0 ? `${pct}%` : '30%';
+
             taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5 overflow-hidden">
                 <span class="truncate min-w-0">${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
                 <span class="text-gray-400 flex-shrink-0 ml-2 whitespace-nowrap">${task.current}/${task.total} <span class="font-medium text-gray-700">${pct}%</span> <span class="text-gray-500">${timeStr}</span></span>
             </div>
-            <div class="w-full bg-gray-200 rounded-full h-2">
-                <div class="${barColor} h-2 rounded-full transition-all duration-300" style="width:${pct}%"></div>
+            <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                <div class="${_barInner}" style="width: ${_barWidth}"></div>
             </div>`;
 
             // 显示/隐藏停止按钮
@@ -3363,12 +3368,17 @@
                 timeStr = `已运行 ${fmtTime(elapsed)}`;
             }
 
+            const _barInner = pct > 0
+                ? `${barColor} h-2 rounded-full transition-all duration-300` 
+                : `${barColor} h-2 rounded-full animate-pulse`;
+            const _barWidth = pct > 0 ? `${pct}%` : '30%';
+
             taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5 overflow-hidden">
                 <span class="truncate min-w-0">${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
                 <span class="text-gray-400 flex-shrink-0 ml-2 whitespace-nowrap">${task.current}/${task.total} <span class="font-medium text-gray-700">${pct}%</span> <span class="text-gray-500">${timeStr}</span></span>
             </div>
-            <div class="w-full bg-gray-200 rounded-full h-2">
-                <div class="${barColor} h-2 rounded-full transition-all duration-300" style="width: ${pct}%"></div>
+            <div class="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                <div class="${_barInner}" style="width: ${_barWidth}"></div>
             </div>`;
 
             // 显示/隐藏停止按钮

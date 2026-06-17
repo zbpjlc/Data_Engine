@@ -3615,6 +3615,14 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
         def execute():
             try:
                 import tempfile, shutil, lance
+
+                # 立即启动任务，让前端马上看到进度
+                progress_tracker.start_task(
+                    task_id=task_id, task_type="el_ocr",
+                    source_id=source_id, batch_id=batch_id,
+                    total=1, message=f"{model}: 启动中..."
+                )
+
                 source = registry.get(source_id)
                 batch_dir = source.resolve_batch_dir(batch_id)
                 manifests_dir = batch_dir / "manifests"
@@ -3638,6 +3646,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 if not cat_paths or total_blocks == 0:
                     progress_tracker.fail_task(task_id, "三个 category lance 中无可用 block")
                     return
+
+                progress_tracker.update_progress(task_id, current=0, message=f"{model}: 扫描已完成，共 {total_blocks} blocks...")
 
                 # 初始化 OCR 引擎
                 if model == "paddleocr":
@@ -3680,10 +3690,9 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     progress_tracker.complete_task(task_id, f"{model} 所有 block 已完成（{len(done_keys)} 个），无需重跑")
                     return
 
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="el_ocr",
-                    source_id=source_id, batch_id=batch_id,
-                    total=total_blocks,
+                # 更新为实际总数和待处理信息
+                progress_tracker.update_progress(
+                    task_id, current=len(done_keys), total=total_blocks,
                     message=f"{model}: {total_blocks} 个 block（跳过 {len(done_keys)} 已完成，待处理 {remaining_blocks}）",
                 )
 
@@ -3772,6 +3781,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                 pending_rows[cat].append(ocr_row)
                             except Exception as e:
                                 errors += 1
+                                if errors <= 5:
+                                    print(f"[el-ocr] {model} error {sid}/{bidx}: {e}", file=sys.stderr)
                             finally:
                                 tmp_path.unlink(missing_ok=True)
 
