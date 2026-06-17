@@ -57,7 +57,7 @@ class CLIPEmbeddingExtractor:
         try:
             resp = requests.get(
                 f"{self.server_url}/health",
-                timeout=self.timeout
+                timeout=(2.0, 5.0)  # health check 用短超时
             )
             if resp.ok:
                 info = resp.json()
