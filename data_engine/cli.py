@@ -11,8 +11,6 @@ from data_engine.embedding import extract_embeddings_for_records
 from data_engine.ingest import run_ingest
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest,
-    read_element_manifest, write_element_manifest,
-    append_element_manifest, merge_insert_element,
 )
 from data_engine.progress_tracker import progress_tracker
 from data_engine.registry import DEFAULT_REGISTRY_PATH, SourceRegistry
@@ -51,15 +49,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="Show batch progress")
     status.add_argument("--json", action="store_true", help="Emit JSON")
-
-    element_sample = subparsers.add_parser("element-sample", help="Run layout + multi-model OCR on a batch")
-    element_sample.add_argument("--source-id", required=True)
-    element_sample.add_argument("--batch", required=True)
-    element_sample.add_argument("--models", default="paddleocr,glm_ocr,self_ocr",
-                                help="Comma-separated engine names (default: paddleocr,glm_ocr,self_ocr)")
-    element_sample.add_argument("--resume", action="store_true",
-                                help="Only process blocks with NULL results for selected models")
-    element_sample.add_argument("--json", action="store_true", help="Emit JSON summary")
 
     cmcv = subparsers.add_parser("cmcv", help="Cross-Model Consistency Verification")
     cmcv.add_argument("--source-id", required=True)
@@ -250,143 +239,50 @@ def main(argv: list[str] | None = None) -> int:
             print(format_status_report(global_status))
         return 0
 
-    if args.command == "element-sample":
-        from data_engine.ocr.base import BaseOCREngine
-        from data_engine.ocr.layout_provider import PPLayoutProvider
-        from data_engine.ocr.normalizer import results_to_element_rows, ocr_results_to_ingest_fields
-        from data_engine.manifests import iso_now
-        import lance
-
-        source = registry.get(args.source_id)
-        batch_dir = source.resolve_batch_dir(args.batch)
-        manifests_dir = batch_dir / "manifests"
-        ingest_path = find_stage_manifest(manifests_dir, "ingest")
-        element_path = manifests_dir / "element.lance"
-
-        if not ingest_path or not ingest_path.exists():
-            print("错误: ingest manifest 不存在", file=sys.stderr)
-            return 1
-
-        model_names = [m.strip() for m in args.models.split(",") if m.strip()]
-        engines: dict[str, BaseOCREngine] = {}
-        for name in model_names:
-            if name == "paddleocr":
-                from data_engine.ocr.paddle_ocr import PaddleOCREngine
-                engines["paddle"] = PaddleOCREngine()
-            elif name == "glm_ocr":
-                from data_engine.ocr.glm_ocr import GLMOCREngine
-                engines["glm"] = GLMOCREngine()
-            elif name == "self_ocr":
-                from data_engine.ocr.self_ocr import SelfOCREngine
-                engines["self"] = SelfOCREngine()
-            else:
-                print(f"未知模型: {name}", file=sys.stderr)
-                return 1
-
-        layout = PPLayoutProvider()
-        task_id = f"element_sample_{args.source_id}_{args.batch}"
-        records = read_manifest(ingest_path)
-        now_str = iso_now()
-
-        progress_tracker.start_task(
-            task_id=task_id,
-            task_type="element_sample",
-            source_id=args.source_id,
-            batch_id=args.batch,
-            total=len(records),
-            message=f"开始对 {len(records)} 个页面做版面分析 + OCR",
-        )
-
-        try:
-            all_element_rows: list[dict] = []
-            for page_idx, record in enumerate(records):
-                if progress_tracker.is_stopped(task_id):
-                    progress_tracker.stop_task(task_id, f"用户停止，已处理 {page_idx}/{len(records)}")
-                    break
-
-                sample_id = record["sample_id"]
-                image_path = batch_dir / record.get("page_image", "")
-                if not image_path.exists():
-                    print(f"跳过 {sample_id}: 图片不存在 {image_path}", file=sys.stderr)
-                    continue
-
-                blocks = layout.detect_layout(image_path)
-                engine_results: dict[str, list] = {}
-                for prefix, engine in engines.items():
-                    try:
-                        engine_results[prefix] = engine.recognize_regions(image_path, blocks)
-                    except Exception as exc:
-                        print(f"[{prefix}] 失败 sample={sample_id}: {exc}", file=sys.stderr)
-                        engine_results[prefix] = []
-
-                element_rows = results_to_element_rows(
-                    sample_id=sample_id,
-                    blocks=blocks,
-                    engine_results=engine_results,
-                    created_at=now_str,
-                )
-                all_element_rows.extend(element_rows)
-
-                paddle_results = engine_results.get("paddle", [])
-                if paddle_results:
-                    ingest_fields = ocr_results_to_ingest_fields(paddle_results)
-                    for key, val in ingest_fields.items():
-                        record[key] = val
-
-                progress_tracker.update_progress(
-                    task_id=task_id,
-                    current=page_idx + 1,
-                    message=f"已处理 {page_idx + 1}/{len(records)}",
-                )
-
-            if all_element_rows:
-                if args.resume and element_path.exists():
-                    merge_insert_element(element_path, all_element_rows)
-                else:
-                    if element_path.exists() and args.resume:
-                        merge_insert_element(element_path, all_element_rows)
-                    else:
-                        write_element_manifest(element_path, all_element_rows)
-                write_manifest(ingest_path, records)
-
-            progress_tracker.complete_task(
-                task_id=task_id,
-                message=f"完成: {len(all_element_rows)} 个 block",
-            )
-            payload = {
-                "pages_processed": len(records),
-                "blocks_written": len(all_element_rows),
-                "models": model_names,
-            }
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                print(f"处理完成: {len(records)} 个页面, {len(all_element_rows)} 个 block")
-            return 0
-
-        except Exception as e:
-            progress_tracker.fail_task(task_id=task_id, error_message=str(e))
-            traceback.print_exc()
-            return 1
-
     if args.command == "cmcv":
         from data_engine.ocr.cmcv import CMCVEngine
-        from data_engine.manifests import iso_now, _lance_write_lock
+        from data_engine.manifests import _lance_write_lock
         import lance as _lance
         import pyarrow as pa
 
         source = registry.get(args.source_id)
         batch_dir = source.resolve_batch_dir(args.batch)
         manifests_dir = batch_dir / "manifests"
-        element_path = manifests_dir / "element.lance"
         ingest_path = find_stage_manifest(manifests_dir, "ingest")
 
-        if not element_path.exists():
-            print("错误: element.lance 不存在，请先运行 element-sample", file=sys.stderr)
+        element_rows = []
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = _lance.dataset(str(lp))
+                    all_cols = ds.schema.names
+                    read_cols = ["sample_id", "block_idx", "block_type"]
+                    for prefix in ("paddle", "glm", "self"):
+                        for suffix in ("_text", "_confidence", "_table", "_formula"):
+                            col = f"{prefix}{suffix}"
+                            if col in all_cols:
+                                read_cols.append(col)
+                    rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
+                for row in rows:
+                    for key in ("paddle_table", "glm_table", "self_table",
+                                "paddle_formula", "glm_formula", "self_formula"):
+                        if key in row and isinstance(row[key], str) and row[key]:
+                            try:
+                                row[key] = json.loads(row[key])
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                    element_rows.append(row)
+            except Exception as e:
+                print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+
+        if not element_rows:
+            print("错误: text/formula/table.lance 中无可用 block", file=sys.stderr)
             return 1
 
         task_id = f"cmcv_{args.source_id}_{args.batch}"
-        element_rows = read_element_manifest(element_path)
         progress_tracker.start_task(
             task_id=task_id,
             task_type="cmcv",
@@ -399,7 +295,48 @@ def main(argv: list[str] | None = None) -> int:
         try:
             cmcv = CMCVEngine()
             updated_rows, page_tiers = cmcv.process_element_batch(element_rows)
-            merge_insert_element(element_path, updated_rows)
+
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+                try:
+                    with _lance_write_lock:
+                        ds = _lance.dataset(str(lp))
+                        col_names = set(ds.schema.names)
+                        if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
+                            continue
+                    update_map: dict[str, dict] = {}
+                    for r in updated_rows:
+                        key = (r["sample_id"], r["block_idx"])
+                        if r.get("consistency_pattern"):
+                            update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
+                        if r.get("block_diff_json"):
+                            update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
+                    if not update_map:
+                        continue
+                    with _lance_write_lock:
+                        ds = _lance.dataset(str(lp))
+                        t = ds.to_table()
+                        patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
+                        diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
+                        sids = t.column("sample_id").to_pylist()
+                        bidxs = t.column("block_idx").to_pylist()
+                        pat_map = update_map.get("consistency_pattern", {})
+                        diff_map = update_map.get("block_diff_json", {})
+                        new_patterns = []
+                        new_diffs = []
+                        for i in range(len(t)):
+                            key = (sids[i], bidxs[i])
+                            new_patterns.append(pat_map.get(key, patterns[i]))
+                            new_diffs.append(diff_map.get(key, diffs[i]))
+                        update_table = pa.table({
+                            "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
+                            "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
+                        })
+                        ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
+                except Exception as e:
+                    print(f"[CMCV] 写回 {cat}.lance 失败: {e}", file=sys.stderr)
 
             if ingest_path and ingest_path.exists() and page_tiers:
                 sample_ids = list(page_tiers.keys())
