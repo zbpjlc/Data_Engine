@@ -89,19 +89,22 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
         except Exception:
             pass
 
-    element_path = manifests_dir / "element.lance"
-    element_exists = element_path.exists()
     element_count = 0
     element_models: list[str] = []
-    if element_exists:
+    element_exists = False
+    for cat in ("text", "formula", "table"):
+        cat_path = manifests_dir / f"{cat}.lance"
+        if not cat_path.exists():
+            continue
+        element_exists = True
         try:
             with _lance_write_lock:
-                ds = lance.dataset(str(element_path))
-                element_count = ds.count_rows()
+                ds = lance.dataset(str(cat_path))
+                element_count += ds.count_rows()
                 col_names = set(ds.schema.names)
                 for prefix in ("paddle", "glm", "self"):
                     col = f"{prefix}_text"
-                    if col in col_names:
+                    if col in col_names and prefix not in element_models:
                         try:
                             non_null = ds.count_rows(filter=f"{col} IS NOT NULL")
                             if non_null > 0:
@@ -131,18 +134,21 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
 def _detect_stage_status(manifests_dir: Path) -> str:
     ingest_manifest = find_stage_manifest(manifests_dir, "ingest")
 
-    element_manifest = find_stage_manifest(manifests_dir, "element")
-    if element_manifest and element_manifest.exists():
-        try:
-            with _lance_write_lock:
-                ds = lance.dataset(str(element_manifest))
-                sample = ds.to_table(limit=5, columns=["consistency_pattern"]).to_pylist()
-            has_cmcv = any(r.get("consistency_pattern") for r in sample) if sample else False
-            if has_cmcv:
-                return "bucketed"
-            return "inferred"
-        except Exception:
-            pass
+    for cat in ("text", "formula", "table"):
+        cat_path = manifests_dir / f"{cat}.lance"
+        if cat_path.exists():
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(cat_path))
+                    if "consistency_pattern" in ds.schema.names:
+                        sample = ds.to_table(limit=5, columns=["consistency_pattern"]).to_pylist()
+                        has_cmcv = any(r.get("consistency_pattern") for r in sample) if sample else False
+                        if has_cmcv:
+                            return "bucketed"
+                return "inferred"
+            except Exception:
+                pass
+            break
 
     if ingest_manifest:
         if ingest_manifest.suffix == ".lance":
