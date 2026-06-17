@@ -21,17 +21,11 @@ ingest:
 
 embedding:
   model_name: google/siglip2-base-patch16-224
-  local_path: ~/.cache/modelscope/hub/models/google/siglip2-base-patch16-224
   embedding_dim: 768
-  gpu_id: 0  # 使用的GPU编号
+  server_url: "http://127.0.0.1:8099"  # 外部 embedding server 地址
+  batch_size: 32                  # 每次 HTTP 请求发送的图片数
+  save_interval: 10000             # 每生成 N 条 embedding 写回一次 lance
   batch_update_interval: 10000    # 每N条记录保存一次（降低以减少内存占用）
-  progress_update_interval: 100  # 每N条记录更新一次进度到progress_state.json
-  gc_interval: 1000              # 每N条记录做一次 gc.collect()
-  server:
-    host: "127.0.0.1"
-    port: 8090
-    gpu_id: 1                    # embedding 服务使用 GPU 1
-    batch_size: 32               # 批量推理批大小
 
 index:
   num_partitions: 64            # IVF_PQ 聚类分区数

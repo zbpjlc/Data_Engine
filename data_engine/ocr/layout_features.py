@@ -103,7 +103,7 @@ def cluster_by_type(
     if not lance_path.exists():
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": 0, "clusters": {}, "labels": {}}
 
-    # 创建本地 extractor（batch_size=1 避免 cuBLAS LT 在线程中崩溃）
+    # 创建本地 extractor
     _local_extractor = CLIPEmbeddingExtractor()
 
     # 第一次读取：只读轻量列（不含 image_data），避免内存爆炸
@@ -127,6 +127,9 @@ def cluster_by_type(
     bbox_info: list[dict] = []
     need_generate: list[int] = []
 
+    # SigLIP2 base 的 embedding 维度
+    EXPECTED_EMB_DIM = 768
+
     for idx, row in enumerate(rows):
         sid = row.get("sample_id", "")
         bidx = row.get("block_idx", 0)
@@ -134,7 +137,8 @@ def cluster_by_type(
         bbox_info.append(_bbox_stats(row))
 
         existing_emb = row.get("embedding") if has_embedding_col else None
-        if existing_emb and len(existing_emb) > 0:
+        # 检查维度是否正确，不正确的重新生成
+        if existing_emb and len(existing_emb) == EXPECTED_EMB_DIM:
             embeddings.append(list(existing_emb))
         else:
             embeddings.append(None)
@@ -145,6 +149,9 @@ def cluster_by_type(
 
     # 2. 为缺失 embedding 的 block 生成（分批从 lance 读取 image_data）
     generated_count = 0
+    unsaved_count = 0  # 自上次保存以来新生成的数量
+    save_interval = get_config("embedding", "save_interval", default=10000)
+
     if need_generate:
         logger.info("[layout_features] %s: %d/%d blocks need embedding generation", cat, len(need_generate), total)
 
@@ -191,16 +198,18 @@ def cluster_by_type(
             except Exception as e:
                 logger.warning("[layout_features] %s: failed to load image_data chunk: %s", cat, e)
 
-            # 批量 ViT 推理（batch_size=1 避免 cuBLAS LT 在线程中崩溃）
+            # 批量 ViT 推理（通过 HTTP server，无本地 CUDA 问题）
             if chunk_images:
                 image_list = list(chunk_images.values())
                 row_idx_list = list(chunk_images.keys())
-                emb_results = _local_extractor.extract_embeddings_from_bytes_batch(image_list, batch_size=1)
+                emb_batch_size = get_config("embedding", "batch_size", default=32)
+                emb_results = _local_extractor.extract_embeddings_from_bytes_batch(image_list, batch_size=emb_batch_size)
 
                 for row_idx, emb in zip(row_idx_list, emb_results):
                     if emb is not None:
                         embeddings[row_idx] = emb
                         generated_count += 1
+                        unsaved_count += 1
 
             processed_count += len(chunk_indices)
             if progress_callback:
@@ -211,20 +220,29 @@ def cluster_by_type(
                     f"{cat} embedding {generated_count}/{len(need_generate)}{skip_hint}"
                 )
 
+            # 增量保存：每生成 save_interval 条就写回 lance
+            if unsaved_count >= save_interval:
+                _write_embeddings_back(lance_path, rows, keys, embeddings)
+                logger.info("[layout_features] %s: incremental save %d embeddings", cat, generated_count)
+                unsaved_count = 0
+
             # 清理本批内存
             del chunk_images
 
-        # 3. 写回 lance（更新 embedding 列）
-        if generated_count > 0:
+        # 3. 写回剩余未保存的 embedding
+        if unsaved_count > 0:
             _write_embeddings_back(lance_path, rows, keys, embeddings)
-            logger.info("[layout_features] %s: wrote %d embeddings back to lance", cat, generated_count)
+            logger.info("[layout_features] %s: final save, total %d embeddings", cat, generated_count)
     else:
         logger.info("[layout_features] %s: all %d embeddings cached, skip generation", cat, total)
         if progress_callback:
             progress_callback(total, total, f"{cat} embedding 全部已缓存 ({total})")
 
-    # 4. 过滤有效 embedding
-    valid_embeddings = [emb for emb in embeddings if emb and len(emb) > 0]
+    # 4. 过滤有效 embedding（确保维度一致）
+    valid_embeddings = [
+        emb for emb in embeddings
+        if emb and len(emb) == EXPECTED_EMB_DIM
+    ]
     if len(valid_embeddings) < 2:
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": total, "clusters": {}, "labels": {}}
 
@@ -344,8 +362,6 @@ def cluster_all_types(
     sample_ids: set[str] | None = None,
 ) -> dict:
     """对 text / formula / table 分别做 ViT embedding + MiniBatchKMeans 聚类。
-
-    每个类别创建独立的 extractor，batch_size=1 避免 cuBLAS LT 在线程中崩溃。
 
     Args:
         sample_ids: 可选，仅处理这些 sample_id 对应的 block（过滤旧数据）
