@@ -27,40 +27,28 @@ try:
     # 预初始化 CUDA/cuBLAS，避免后台线程首次初始化时崩溃
     if torch.cuda.is_available():
         try:
-            # 临时放开 OMP 线程数，让 cuBLAS 正常初始化内部线程池
             _old_omp = os.environ.get("OMP_NUM_THREADS", "1")
             os.environ["OMP_NUM_THREADS"] = "4"
             _dummy = torch.zeros(1, device="cuda")
-            _dummy = _dummy @ _dummy.unsqueeze(0)  # 触发 cuBLAS 初始化
+            _dummy = _dummy @ _dummy.unsqueeze(0)
             del _dummy
             torch.cuda.synchronize()
             os.environ["OMP_NUM_THREADS"] = _old_omp
             print("[CUDA] cuBLAS 预初始化成功", file=sys.stderr)
         except Exception as _e:
             print(f"[CUDA] cuBLAS 预初始化失败 (非致命): {_e}", file=sys.stderr)
-        # 预加载 SigLIP2 模型，确保 cuBLAS LT 在主线程中初始化
-        try:
-            from data_engine.embedding import CLIPEmbeddingExtractor
-            _shared_extractor = CLIPEmbeddingExtractor()
-            # 在主线程做一次批量推理预热，触发 cuBLAS LT 初始化
-            from PIL import Image as _PILImage
-            import io as _io
-            _warmup_imgs = []
-            for _ in range(4):
-                _img = _PILImage.new('RGB', (224, 224), color='gray')
-                _buf = _io.BytesIO()
-                _img.save(_buf, format='PNG')
-                _warmup_imgs.append(_buf.getvalue())
-            _warmup_result = _shared_extractor.extract_embeddings_from_bytes_batch(_warmup_imgs, batch_size=4)
-            del _warmup_imgs, _warmup_result, _PILImage, _io
-            print(f"[CUDA] SigLIP2 模型预加载 + 批量预热成功: {_shared_extractor.device}", file=sys.stderr)
-        except Exception as _e:
-            print(f"[CUDA] SigLIP2 预加载失败 (非致命): {_e}", file=sys.stderr)
-            _shared_extractor = None
 except ImportError:
     HAS_TORCH = False
     torch = None
-    _shared_extractor = None
+
+# 预连接 embedding server（HTTP 模式，无本地 CUDA 依赖）
+try:
+    from data_engine.embedding import CLIPEmbeddingExtractor
+    _embedding_client = CLIPEmbeddingExtractor()
+    print(f"[Embedding] 客户端已初始化: {_embedding_client.server_url}", file=sys.stderr)
+except Exception as _e:
+    print(f"[Embedding] 客户端初始化失败 (非致命): {_e}", file=sys.stderr)
+    _embedding_client = None
 
 # 设置 Lance 内存限制（必须在 import lance 之前）
 from data_engine.config import get_config
