@@ -14,6 +14,9 @@ from data_engine.embedding import CLIPEmbeddingExtractor, _coerce_image_bytes
 
 logger = logging.getLogger(__name__)
 
+# SigLIP2 base 的 embedding 维度（与 schema 中 pa.list_(pa.float32(), EMB_DIM) 保持一致）
+EMB_DIM = 768
+
 # ─── 特征名称（用于 bbox 补充统计） ───────────────────────────────────────────
 
 _BASE_FEATURE_NAMES = ["x1", "y1", "width", "height", "area", "aspect_ratio", "confidence"]
@@ -121,8 +124,9 @@ def cluster_by_type(
 
     total = len(rows)
 
-    # SigLIP2 base 的 embedding 维度
-    EXPECTED_EMB_DIM = 768
+    # 立即发送进度，避免前端长时间显示"启动中..."
+    if progress_callback:
+        progress_callback(0, total, f"{cat} 扫描 {total} blocks...")
 
     # 1. 用 Lance filter 快速定位缺失 embedding 的行（不加载 embedding 数据本身）
     keys: list[str] = []
@@ -163,6 +167,11 @@ def cluster_by_type(
 
         if progress_callback and (idx + 1) % 5000 == 0:
             progress_callback(idx + 1, total, f"{cat} 扫描 {idx + 1}/{total}")
+
+    if progress_callback:
+        n_gen = len(need_generate)
+        hint = f"，{n_gen} 条需生成 embedding" if n_gen > 0 else "，embedding 已全部就绪"
+        progress_callback(total, total, f"{cat} 扫描完成 ({total} blocks){hint}")
 
     logger.info("[layout_features] %s: scan done, %d/%d need embedding", cat, len(need_generate), total)
 
@@ -263,6 +272,8 @@ def cluster_by_type(
             progress_callback(total, total, f"{cat} embedding 全部已缓存 ({total})")
 
     # 4. 从 Lance 加载所有有效 embedding（生成后已全部写回）
+    if progress_callback:
+        progress_callback(total, total, f"{cat} 加载 embedding 向量...")
     embeddings: list[list[float] | None] = [None] * total
     try:
         import lance as _lance_read
@@ -277,7 +288,7 @@ def cluster_by_type(
         # 构建 key -> embedding 映射
         emb_lookup = {}
         for s, b, e in zip(emb_sids, emb_bidxs, emb_data):
-            if e and len(e) == EXPECTED_EMB_DIM:
+            if e and len(e) == EMB_DIM:
                 emb_lookup[f"{s}:{b}"] = e
         # 按行顺序填充
         for i, key in enumerate(keys):
@@ -290,12 +301,14 @@ def cluster_by_type(
     # 过滤有效 embedding（确保维度一致）
     valid_embeddings = [
         emb for emb in embeddings
-        if emb and len(emb) == EXPECTED_EMB_DIM
+        if emb and len(emb) == EMB_DIM
     ]
     if len(valid_embeddings) < 2:
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": total, "clusters": {}, "labels": {}}
 
     # 5. MiniBatchKMeans 聚类（与 Page-Level 相同：find_optimal_clusters + KMeansClusterer）
+    if progress_callback:
+        progress_callback(total, total, f"{cat} 开始聚类 ({len(valid_embeddings)} 有效向量)...")
     def _cluster_cb(cur, tot, msg):
         if progress_callback:
             progress_callback(total, total, f"{cat} {msg}")
@@ -348,8 +361,12 @@ def cluster_by_type(
 
 
 def _merge_embeddings_back(lance_path: Path, emb_dict: dict[str, list[float]]):
-    """用 merge 方式将新 embedding 写回 lance（只更新受影响的行，不全量重写）。
-    
+    """将新 embedding 写回 lance。
+
+    优先用 merge_insert（增量更新）。若数据集 embedding 列仍为 legacy
+    large_list 类型导致 merge_insert 失败（definition buffer 超限），
+    则自动降级为一次性 overwrite —— 同时完成 schema 迁移和 embedding 写入。
+
     Args:
         lance_path: lance 文件路径
         emb_dict: key("sample_id:block_idx") -> embedding 映射
@@ -359,6 +376,9 @@ def _merge_embeddings_back(lance_path: Path, emb_dict: dict[str, list[float]]):
 
     if not emb_dict:
         return
+
+    # Fixed-size list type — no definition buffer, no offset array.
+    emb_type = pa.list_(pa.float32(), EMB_DIM)
 
     try:
         ds = lance.dataset(str(lance_path))
@@ -370,7 +390,6 @@ def _merge_embeddings_back(lance_path: Path, emb_dict: dict[str, list[float]]):
         for key, emb in emb_dict.items():
             sid, bidx_str = key.rsplit(":", 1)
             bidx = int(bidx_str)
-            # 安全转换
             if hasattr(emb, 'tolist'):
                 emb = emb.tolist()
             elif not isinstance(emb, list):
@@ -379,21 +398,25 @@ def _merge_embeddings_back(lance_path: Path, emb_dict: dict[str, list[float]]):
             update_bidxs.append(bidx)
             update_embs.append([float(x) for x in emb])
 
-        emb_type = pa.large_list(pa.float32())
         update_table = pa.table({
             "sample_id": pa.array(update_sids, type=pa.large_string()),
             "block_idx": pa.array(update_bidxs, type=pa.int32()),
             "embedding": pa.array(update_embs, type=emb_type),
         })
 
-        # merge_insert：只更新匹配行，不重写全量数据
+        # merge_insert（fast path — 要求 embedding 列已是 fixed-size list）
         try:
             ds.merge_insert(on=["sample_id", "block_idx"]) \
                 .when_matched_update_all() \
                 .execute(update_table)
         except Exception as merge_err:
-            logger.warning("[layout_features] merge_insert failed, fallback to overwrite: %s", merge_err)
-            # 回退：读取全量数据 + 覆盖写
+            logger.warning(
+                "[layout_features] merge_insert failed (will fallback to overwrite): %s",
+                merge_err,
+            )
+            # ── fallback：全量读取 + 合并 + overwrite ───────────────────
+            # 如果 embedding 列是 legacy large_list，此处同时完成 schema 迁移。
+            logger.info("[layout_features] fallback: reading full table from %s ...", lance_path.name)
             table = ds.to_table()
             emb_lookup = dict(zip(
                 [f"{s}:{b}" for s, b in zip(update_sids, update_bidxs)],
@@ -415,6 +438,7 @@ def _merge_embeddings_back(lance_path: Path, emb_dict: dict[str, list[float]]):
                 table = table.set_column(col_idx, "embedding", new_col)
             except (KeyError, ValueError):
                 table = table.append_column("embedding", new_col)
+            logger.info("[layout_features] fallback: writing %d rows to %s ...", table.num_rows, lance_path.name)
             lance.write_dataset(table, str(lance_path), mode="overwrite")
     except Exception as e:
         logger.warning("[layout_features] merge embeddings back failed: %s", e)
@@ -462,9 +486,9 @@ def cluster_all_types(
     if grand_total == 0:
         grand_total = 1  # avoid division by zero
 
-    # 发送初始进度（让前端立即响应）
+    # 发送初始进度（让前端立即响应，current=1 确保进度条可见）
     if progress_callback:
-        progress_callback(0, grand_total, "初始化 embedding 客户端...")
+        progress_callback(1, grand_total, "初始化 embedding 客户端...")
 
     # 创建一次 extractor，三个类型共用（避免 3 次 HTTP health check）
     _shared_extractor = CLIPEmbeddingExtractor()
@@ -489,6 +513,9 @@ def cluster_all_types(
                 else:
                     mapped = 0
                 global_cur = min(_completed + mapped, _grand)
+                # 确保初始化阶段进度条可见（至少 1）
+                if global_cur == 0 and _cat_total > 0:
+                    global_cur = 1
                 progress_callback(global_cur, _grand, f"[{cat}] {msg}")
 
         print(f"[DEBUG] cluster_all_types: processing cat={cat}, total={cat_total}", flush=True)

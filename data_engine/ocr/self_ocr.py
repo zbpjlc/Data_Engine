@@ -153,7 +153,7 @@ class SelfOCREngine(BaseOCREngine):
         raise RuntimeError(f"SelfOCR failed after {self._max_retries} retries: {last_exc}")
 
     def _recognize_test_mode(self, regions: list[LayoutBlock]) -> list[OCRResult]:
-        """Test mode: generate mock self_ocr results based on Paddle/GLM results in element.lance.
+        """Test mode: generate mock self_ocr results based on Paddle/GLM results.
 
         - 60% chance: copy one model's result exactly (all_agree)
         - 30% chance: copy with small mutation (partial_agree)

@@ -397,9 +397,13 @@ class CMCVEngine:
             page_result = self.compare_page(blocks_sorted)
 
             for block, detail in zip(blocks_sorted, page_result["details"]):
-                block["consistency_pattern"] = detail["pattern"]
-                block["block_diff_json"] = detail["diff"]
-                updated_rows.append(block)
+                # 只保留 key 列 + CMCV 结果列，避免写入磁盘 schema 中不存在的列
+                updated_rows.append({
+                    "sample_id": block["sample_id"],
+                    "block_idx": block.get("block_idx", 0),
+                    "consistency_pattern": detail["pattern"],
+                    "block_diff_json": detail["diff"],
+                })
 
             page_tiers[sample_id] = page_result["tier"]
 
