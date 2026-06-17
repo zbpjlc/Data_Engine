@@ -3760,9 +3760,30 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                             else:
                                 tmp_path.write_bytes(bytes(img_bytes))
 
+                            # image_data 已是裁剪好的 block 图，直接用原始尺寸避免黑边填充
+                            _w, _h = 0, 0
+                            try:
+                                import struct
+                                _raw = img_bytes if isinstance(img_bytes, bytes) else bytes(img_bytes)
+                                if _raw[:8] == b'\x89PNG\r\n\x1a\n' and len(_raw) > 24:
+                                    _w, _h = struct.unpack('>II', _raw[16:24])
+                                elif _raw[:2] == b'\xff\xd8':  # JPEG
+                                    _i = 2
+                                    while _i < len(_raw) - 1:
+                                        if _raw[_i] != 0xFF: break
+                                        _m = _raw[_i+1]
+                                        if _m in (0xC0, 0xC1, 0xC2):
+                                            _h, _w = struct.unpack('>HH', _raw[_i+5:_i+9])
+                                            break
+                                        _ln = struct.unpack('>H', _raw[_i+2:_i+4])[0]
+                                        _i += 2 + _ln
+                            except Exception:
+                                pass
+                            if _w == 0 or _h == 0:
+                                _w, _h = 9999, 9999  # 足够大，让 crop 返回完整图片
                             region = LayoutBlock(
                                 block_type=row.get("block_type", cat),
-                                bbox=[0, 0, 100, 100],
+                                bbox=[0, 0, _w, _h],
                                 confidence=row.get("layout_confidence", 1.0),
                             )
                             try:
