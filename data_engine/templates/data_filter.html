@@ -903,8 +903,6 @@
             document.getElementById('btn-run-layout').classList.add('hidden');
             document.getElementById('diff-summary').classList.add('hidden');
             document.getElementById('diff-empty').classList.remove('hidden');
-            document.getElementById('split-results').classList.add('hidden');
-            document.getElementById('repair-section').classList.add('hidden');
             updateOcrBatchSelect();
 
             // 直接加载 category-stats（显示无图统计，不依赖抽样缓存）
@@ -936,13 +934,7 @@
                         totalTable += sr.categories.table?.count || 0;
                     }
                 });
-                if (totalText + totalFormula + totalTable > 0) {
-                    document.getElementById('split-results').classList.remove('hidden');
-                    document.getElementById('split-text-count').textContent = totalText.toLocaleString();
-                    document.getElementById('split-formula-count').textContent = totalFormula.toLocaleString();
-                    document.getElementById('split-table-count').textContent = totalTable.toLocaleString();
-                    updateNoImageDisplay(results);
-                }
+
             })
             .catch(e => { if (e.name !== 'AbortError') console.error('[category-stats-batch]', e); });
         }
@@ -1018,9 +1010,6 @@
                 renderBucketResults(merged);
                 document.getElementById('btn-run-layout').classList.remove('hidden');
                 updateOcrBatchSelect();
-
-                // 恢复 pp-layout + 拆分的 category-stats 卡片
-                restoreSplitStats(merged.batch_info || []);
             })
             .catch(e => { if (e.name !== 'AbortError') console.error('[bucket-samples-batch]', e); });
         }
@@ -1043,8 +1032,6 @@
             document.getElementById('btn-run-layout').classList.add('hidden');
             document.getElementById('diff-summary').classList.add('hidden');
             document.getElementById('diff-empty').classList.remove('hidden');
-            document.getElementById('split-results').classList.add('hidden');
-            document.getElementById('repair-section').classList.add('hidden');
             // 清空 Element-Type 聚类显示
             document.getElementById('ec-results').classList.add('hidden');
             document.getElementById('ec-empty').classList.remove('hidden');
@@ -2503,218 +2490,11 @@
             return fmtTime(remaining / speed);
         }
 
-        // 页面加载时恢复 pp-layout + 拆分的 category-stats 卡片
-        function restoreSplitStats(batchInfo) {
-            if (!batchInfo.length) return;
-            // 确保补齐无图按钮能拿到批次信息
-            _splitTargets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            const targets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            fetch('/api/category-stats-batch', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(targets),
-            })
-            .then(r => r.ok ? r.json() : null)
-            .then(data => {
-                if (!data) return;
-                const results = Object.values(data);
-                let totalText = 0, totalFormula = 0, totalTable = 0;
-                results.forEach(sr => {
-                    if (sr && sr.categories) {
-                        totalText += sr.categories.text?.count || 0;
-                        totalFormula += sr.categories.formula?.count || 0;
-                        totalTable += sr.categories.table?.count || 0;
-                    }
-                });
-                if (totalText + totalFormula + totalTable > 0) {
-                    document.getElementById('split-results').classList.remove('hidden');
-                    document.getElementById('split-text-count').textContent = totalText.toLocaleString();
-                    document.getElementById('split-formula-count').textContent = totalFormula.toLocaleString();
-                    document.getElementById('split-table-count').textContent = totalTable.toLocaleString();
-                    document.getElementById('split-status').innerHTML =
-                        `<span class="text-green-600 font-medium">上次拆分结果已恢复</span>`;
-                    updateNoImageDisplay(results);
-                }
-            })
-            .catch(e => console.error('[restoreSplitStats]', e));
-        }
 
-        // 更新无图统计显示 + 补齐按钮
-        function updateNoImageDisplay(statsResults) {
-            let totalNoImg = 0;
-            const cats = ['text', 'formula', 'table'];
-            cats.forEach(cat => {
-                let catNoImg = 0;
-                statsResults.forEach(sr => {
-                    if (sr && sr.categories) {
-                        catNoImg += sr.categories[cat]?.no_image || 0;
-                    }
-                });
-                const el = document.getElementById(`split-${cat}-noimg`);
-                if (el) {
-                    if (catNoImg > 0) {
-                        el.textContent = `无图: ${catNoImg.toLocaleString()}`;
-                        el.classList.remove('hidden');
-                    } else {
-                        el.classList.add('hidden');
-                    }
-                }
-                totalNoImg += catNoImg;
-            });
-            const repairSection = document.getElementById('repair-section');
-            const repairSummary = document.getElementById('repair-summary');
-            if (repairSection) {
-                if (totalNoImg > 0) {
-                    repairSection.classList.remove('hidden');
-                    repairSummary.textContent = `共 ${totalNoImg.toLocaleString()} 个 block 无图`;
-                } else {
-                    repairSection.classList.add('hidden');
-                }
-            }
-        }
 
-        // 补齐无图按钮
-        let _repairPollTimer = null;
-        let _repairStopFlag  = false;
-        document.getElementById('btn-repair-images').addEventListener('click', function() {
-            const btn = this;
-            const progressDiv = document.getElementById('repair-progress');
-            const progressMsg = document.getElementById('repair-progress-msg');
-            const summaryEl   = document.getElementById('repair-summary');
 
-            // 如果正在运行 → 停止
-            if (btn.dataset.running === 'true') {
-                _repairStopFlag = true;
-                const stopSource = selSource.value || (_splitTargets?.[0]?.source_id);
-                const stopBatch  = selBatch.value  || (_splitTargets?.[0]?.batch_id);
-                if (stopSource && stopBatch) {
-                    fetch(`/api/stop/${stopSource}?batch_id=${stopBatch}`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({task_types: ['repair']})
-                    }).catch(() => {});
-                }
-                btn.textContent = '补齐无图';
-                btn.classList.remove('bg-red-500','hover:bg-red-600');
-                btn.classList.add('bg-amber-600','hover:bg-amber-700');
-                btn.dataset.running = 'false';
-                if (_repairPollTimer) { clearInterval(_repairPollTimer); _repairPollTimer = null; }
-                progressDiv.classList.add('hidden');
-                return;
-            }
 
-            // 构建待修复批次列表
-            let targets;
-            if (selSource.value && selBatch.value) {
-                // 明确选择了具体批次
-                targets = [{source_id: selSource.value, batch_id: selBatch.value}];
-            } else if (selSource.value && selSource.value !== 'all') {
-                // 选择了具体数据源但未选批次 → 用当前源的所有批次
-                targets = batchData
-                    .filter(b => b.source_id === selSource.value)
-                    .map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-                if (targets.length === 0) {
-                    showToast('该数据源无可用批次', 'warning'); return;
-                }
-            } else {
-                // 未选数据源 → 修复所有源的所有批次
-                targets = batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-                if (targets.length === 0) {
-                    showToast('无可用批次数据', 'warning'); return;
-                }
-            }
 
-            btn.textContent = '停止';
-            btn.classList.remove('bg-amber-600','hover:bg-amber-700');
-            btn.classList.add('bg-red-500','hover:bg-red-600');
-            btn.dataset.running = 'true';
-            _repairStopFlag = false;
-            progressDiv.classList.remove('hidden');
-
-            // 顺序处理每个批次
-            function repairNext(idx) {
-                if (_repairStopFlag || idx >= targets.length) {
-                    finishRepair(idx >= targets.length);
-                    return;
-                }
-                const t = targets[idx];
-                progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} 启动中...`;
-
-                fetch(`/api/repair-images/${t.source_id}/${t.batch_id}`, { method: 'POST' })
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.no_image === 0) {
-                            // 该批次无需修复，直接下一个
-                            repairNext(idx + 1);
-                            return;
-                        }
-                        if (!data.task_id) {
-                            // 没有 task_id 也没有 no_image=0，异常
-                            repairNext(idx + 1);
-                            return;
-                        }
-                        const taskId = data.task_id;
-                        progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} ${data.message || '已启动'}`;
-
-                        _repairPollTimer = setInterval(() => {
-                            fetch('/api/progress').then(r => r.json()).then(pd => {
-                                const task = (pd.tasks || {})[taskId];
-                                if (!task) return;
-                                const st  = task.status;
-                                const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
-                                progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} ${task.message || st} (${pct}%)`;
-                                if (st === 'completed' || st === 'failed' || st === 'stopped') {
-                                    clearInterval(_repairPollTimer);
-                                    _repairPollTimer = null;
-                                    if (st === 'failed' || st === 'stopped') {
-                                        finishRepair(false, task.error_message || '已停止');
-                                    } else {
-                                        repairNext(idx + 1);
-                                    }
-                                }
-                            }).catch(() => {});
-                        }, 2000);
-                    })
-                    .catch(e => {
-                        progressMsg.textContent = `[${idx+1}/${targets.length}] ${t.batch_id} 启动失败: ${e.message}`;
-                        repairNext(idx + 1);
-                    });
-            }
-
-            function finishRepair(allDone, errMsg) {
-                btn.textContent = '补齐无图';
-                btn.classList.remove('bg-red-500','hover:bg-red-600');
-                btn.classList.add('bg-amber-600','hover:bg-amber-700');
-                btn.dataset.running = 'false';
-                progressDiv.classList.add('hidden');
-                if (errMsg) {
-                    summaryEl.innerHTML = `<span class="text-red-600">${errMsg}</span>`;
-                } else if (allDone) {
-                    summaryEl.innerHTML = `<span class="text-green-600">所有批次补齐完成</span>`;
-                }
-                // 刷新所有批次的 category-stats（多批次聚合）
-                Promise.all(targets.map(t =>
-                    fetch(`/api/category-stats/${t.source_id}/${t.batch_id}`)
-                        .then(r => r.json())
-                        .catch(() => null)
-                )).then(allStats => {
-                    const validStats = allStats.filter(s => s && s.categories);
-                    if (validStats.length === 0) return;
-                    let totalText = 0, totalFormula = 0, totalTable = 0;
-                    validStats.forEach(sr => {
-                        totalText    += sr.categories.text?.count    || 0;
-                        totalFormula += sr.categories.formula?.count || 0;
-                        totalTable   += sr.categories.table?.count   || 0;
-                    });
-                    document.getElementById('split-text-count').textContent    = totalText.toLocaleString();
-                    document.getElementById('split-formula-count').textContent = totalFormula.toLocaleString();
-                    document.getElementById('split-table-count').textContent   = totalTable.toLocaleString();
-                    updateNoImageDisplay(validStats);
-                });
-            }
-
-            repairNext(0);
-        });
 
         // ── 筛选 / 导出 ──────────────────────────────────────────────────────
         document.getElementById('select-all').addEventListener('click', () => document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true));
