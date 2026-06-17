@@ -68,8 +68,6 @@ from fastapi.responses import Response
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest, manifest_count,
     _lance_write_lock, _safe_write_lance,
-    read_element_manifest, write_element_manifest, merge_insert_element,
-    append_element_manifest,
 )
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
@@ -722,7 +720,7 @@ async def stop_task(source_id: str, batch_id: str = None):
         raise HTTPException(status_code=400, detail="batch_id is required")
     
     stopped = []
-    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "split", "layout_batch", "repair"]:
+    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "layout_batch", "repair"]:
         task_id = f"{task_type}_{source_id}_{batch_id}"
         task = progress_tracker.get_task(task_id)
         if task and task.status.value in ["running", "pending"]:
@@ -960,7 +958,8 @@ async def get_partition_samples(source_id: str, batch_id: str, partition_id: int
             query_vec = pa.array(centroid, type=pa.float32())
             results = ds.to_table(
                 columns=[c for c in ds.schema.names if c != "embedding"],
-                nearest={"column": "embedding", "q": query_vec, "k": page_size * page}
+                nearest={"column": "embedding", "q": query_vec, "k": page_size * page},
+                disable_scoring_autoprojection=True,
             )
             total = min(results.num_rows, page_size * 20)  # 限制最大返回
             offset = (page - 1) * page_size
@@ -1269,6 +1268,36 @@ async def get_progress():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/tasks/{task_id}")
+async def get_task_status(task_id: str):
+    """获取单个任务进度（供 TaskPoller 轮询）"""
+    try:
+        # 自动检测死线程
+        alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
+        task = progress_tracker.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if task.status.value in ("running", "pending") and task_id not in alive_threads:
+            progress_tracker.stop_task(task_id, "线程已终止，任务异常停止")
+            task = progress_tracker.get_task(task_id)
+
+        return {
+            "task_id": task.task_id,
+            "status": task.status.value,
+            "message": task.message,
+            "error_message": task.error_message,
+            "progress": {
+                "current": task.current,
+                "total": task.total,
+            },
+            "elapsed_seconds": round(task.elapsed_time, 1),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/progress/active")
 async def get_active_progress():
     """获取活跃任务进度"""
@@ -1322,300 +1351,6 @@ async def get_batch_progress(source_id: str, batch_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/ocr/{source_id}")
-async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", batch_id: str = "", resume: bool = True, test_mode: bool = False):
-    """对指定批次的抽样样本运行 OCR，使用已有 layout 结果，支持断点续跑"""
-    try:
-        prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
-        prefix = prefix_map.get(model)
-        if not prefix:
-            raise HTTPException(status_code=400, detail=f"未知模型: {model}")
-
-        task_id = f"ocr_{model}_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-            if task_id not in alive_threads:
-                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-            else:
-                return {"message": f"任务已在运行中", "task_id": task_id, "status": "already_running"}
-
-        def execute():
-            try:
-                source = registry.get(source_id)
-                batch_dir = source.resolve_batch_dir(batch_id)
-                artifacts_dir = batch_dir / "artifacts"
-                element_path = batch_dir / "manifests" / "element.lance"
-
-                # 1. 读该批次的抽样结果
-                cache_file = artifacts_dir / "bucket_samples.json"
-                if not cache_file.exists():
-                    progress_tracker.fail_task(task_id, "无抽样数据，请先抽样")
-                    return
-
-                cached = json.loads(cache_file.read_text(encoding="utf-8"))
-                sample_ids: set[str] = set()
-                for samples in cached.get("buckets", {}).values():
-                    for s in samples:
-                        # 兼容两种格式：字符串(sample_id) 或 对象
-                        sid = s if isinstance(s, str) else s.get("sample_id", "")
-                        if sid:
-                            sample_ids.add(sid)
-
-                # 2. 读 layout 结果（从 Lance 文件重建 block 信息）
-                manifests_dir = batch_dir / "manifests"
-                layout_map: dict[str, list[dict]] = {}
-                _SKIP_BLOCK_TYPES = {"figure"}
-                for cat in ("text", "formula", "table"):
-                    lp = manifests_dir / f"{cat}.lance"
-                    if lp.exists():
-                        try:
-                            with _lance_write_lock:
-                                ds = lance.dataset(str(lp))
-                                rows = ds.to_table(
-                                    columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
-                                ).to_pylist()
-                            for row in rows:
-                                sid = row["sample_id"]
-                                bt = row["block_type"]
-                                if bt in _SKIP_BLOCK_TYPES:
-                                    continue
-                                block = {
-                                    "block_type": bt,
-                                    "bbox": json.loads(row["bbox_json"]) if row.get("bbox_json") else [],
-                                    "confidence": row.get("layout_confidence", 0),
-                                    "block_idx": row["block_idx"],
-                                }
-                                if sid not in layout_map:
-                                    layout_map[sid] = []
-                                layout_map[sid].append(block)
-                        except Exception as e:
-                            print(f"[OCR] 读 {cat}.lance 失败: {e}", file=sys.stderr)
-                # 按 block_idx 排序每个 sample 的 blocks
-                for sid in layout_map:
-                    layout_map[sid].sort(key=lambda b: b["block_idx"])
-
-                if not layout_map:
-                    progress_tracker.fail_task(task_id, "无 layout 结果，请先运行 pp-layout")
-                    return
-
-                # 3. 初始化 OCR 引擎
-                use_test_mode = test_mode and model == "self_ocr"
-                if model == "paddleocr":
-                    from data_engine.ocr.paddle_ocr import PaddleOCREngine
-                    engine = PaddleOCREngine()
-                elif model == "glm_ocr":
-                    from data_engine.ocr.glm_ocr import GLMOCREngine
-                    engine = GLMOCREngine()
-                else:
-                    from data_engine.ocr.self_ocr import SelfOCREngine
-                    engine = SelfOCREngine(test_mode=use_test_mode)
-
-                # 4. 断点续跑：跳过 element.lance 中当前模型已完成的 sample
-                done_ids: set[str] = set()
-                model_text_col = f"{prefix}_text"  # e.g. paddle_text, glm_text, self_text
-                if resume and element_path.exists():
-                    try:
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(element_path))
-                            cols_to_read = ["sample_id", "block_idx"]
-                            if model_text_col in ds.schema.names:
-                                cols_to_read.append(model_text_col)
-                                existing_rows = ds.to_table(columns=cols_to_read).to_pylist()
-                                # 只跳过当前模型已有数据的 sample（其他模型不影响）
-                                done_ids = {
-                                    r["sample_id"] for r in existing_rows
-                                    if r.get(model_text_col) is not None and r.get(model_text_col) != ""
-                                }
-                            else:
-                                existing_rows = ds.to_table(columns=cols_to_read).to_pylist()
-                                # 列不存在 = 当前模型没跑过，done_ids 保持空
-                        print(f"[{model}] resume: col={model_text_col} done_ids={len(done_ids)}", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[{model}] resume 读取 element.lance 失败: {e}", file=sys.stderr)
-                else:
-                    print(f"[{model}] resume={resume} element.exists={element_path.exists()}", file=sys.stderr)
-
-                # 5. 读图片数据
-                ids_to_load = [sid for sid in layout_map if sid in sample_ids]
-                image_map: dict[str, bytes] = {}
-                try:
-                    ipath = find_stage_manifest(batch_dir / "manifests", "ingest")
-                    if ipath:
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(ipath))
-                            ids_str = ",".join(repr(s) for s in ids_to_load)
-                            try:
-                                recs = ds.to_table(columns=["sample_id", "image_data"], filter=f"sample_id IN ({ids_str})").to_pylist()
-                            except Exception:
-                                recs = ds.to_table(columns=["sample_id", "image_data"]).to_pylist()
-                                recs = [r for r in recs if r["sample_id"] in set(ids_to_load)]
-                        for r in recs:
-                            if r.get("image_data"):
-                                image_map[r["sample_id"]] = r["image_data"]
-                except Exception as e:
-                    print(f"[OCR] 读图失败: {e}", file=sys.stderr)
-
-                # 6. 处理
-                pending = [sid for sid in layout_map if sid not in done_ids and sid in image_map]
-                total = len(layout_map)
-                skipped = total - len(pending)
-                print(f"[{model}] layout_map={len(layout_map)} image_map={len(image_map)} done_ids={len(done_ids)} pending={len(pending)} skipped={skipped}", file=sys.stderr)
-
-                # Test mode: 加载 element.lance 中已有的 Paddle/GLM 结果作为参考
-                test_ref_map: dict[tuple[str, int], dict] = {}
-                if use_test_mode and element_path.exists():
-                    try:
-                        with _lance_write_lock:
-                            ds_el = lance.dataset(str(element_path))
-                            ref_cols = ["sample_id", "block_idx", "paddle_text", "glm_text",
-                                        "paddle_table", "glm_table",
-                                        "paddle_formula", "glm_formula"]
-                            ref_cols = [c for c in ref_cols if c in ds_el.schema.names]
-                            ref_rows = ds_el.to_table(columns=ref_cols).to_pylist()
-                            for r in ref_rows:
-                                test_ref_map[(r["sample_id"], r["block_idx"])] = r
-                        print(f"[self_ocr] test_mode: loaded {len(test_ref_map)} ref rows from element.lance", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[self_ocr] test_mode: failed to load ref data: {e}", file=sys.stderr)
-
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="element_sample",
-                    source_id=source_id, batch_id=batch_id,
-                    total=total,
-                    message=f"{model}: 跳过 {skipped}，剩余 {len(pending)}",
-                )
-                if skipped > 0:
-                    progress_tracker.update_progress(task_id=task_id, current=skipped)
-
-                from data_engine.ocr.base import LayoutBlock
-                from data_engine.ocr.normalizer import results_to_element_rows
-
-                all_rows: list[dict] = []
-                fail_count = 0
-                save_interval = int(get_config("ocr", "save_interval", default=10))
-
-                def flush_rows(rows_to_save: list[dict]) -> None:
-                    """加锁：读已有 → 合并 → 写入（带事务冲突重试）"""
-                    if not rows_to_save:
-                        return
-                    import time as _time
-                    _MAX_RETRIES = 5
-                    with _lance_write_lock:
-                        if element_path.exists():
-                            try:
-                                ds_el = lance.dataset(str(element_path))
-                                existing_cols = [c for c in [
-                                    "sample_id", "block_idx",
-                                    "paddle_text", "glm_text", "self_text",
-                                    "paddle_confidence", "glm_confidence", "self_confidence",
-                                    "paddle_table", "glm_table", "self_table",
-                                    "paddle_formula", "glm_formula", "self_formula",
-                                    "paddle_raw_json", "glm_raw_json", "self_raw_json",
-                                    "consistency_pattern", "block_diff_json",
-                                ] if c in ds_el.schema.names]
-                                existing_rows = ds_el.to_table(columns=existing_cols).to_pylist()
-                                existing_map = {(r["sample_id"], r["block_idx"]): r for r in existing_rows}
-                                for row in rows_to_save:
-                                    key = (row["sample_id"], row["block_idx"])
-                                    if key in existing_map:
-                                        old = existing_map[key]
-                                        for col in old:
-                                            if col not in ("sample_id", "block_idx") and old.get(col) is not None and row.get(col) is None:
-                                                row[col] = old[col]
-                            except Exception:
-                                pass
-
-                        if element_path.exists():
-                            from data_engine.ocr import ELEMENT_SCHEMA
-                            arrow_rows = [__import__('data_engine.manifests', fromlist=['_element_record_to_arrow'])._element_record_to_arrow(r) for r in rows_to_save]
-                            import pyarrow as pa
-                            table = pa.Table.from_pylist(arrow_rows, schema=ELEMENT_SCHEMA)
-                            for _attempt in range(1, _MAX_RETRIES + 1):
-                                try:
-                                    ds_el = lance.dataset(str(element_path))
-                                    ds_el.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)
-                                    break
-                                except Exception as _we:
-                                    if _attempt < _MAX_RETRIES and ("Incompatible transaction" in str(_we) or "conflict" in str(_we).lower()):
-                                        _wait = 0.5 * (2 ** (_attempt - 1))
-                                        print(f"[cmcv] flush_rows 事务冲突 (attempt {_attempt}/{_MAX_RETRIES})，{_wait}s 后重试...", file=sys.stderr)
-                                        _time.sleep(_wait)
-                                    else:
-                                        raise
-                        else:
-                            write_element_manifest(element_path, rows_to_save)
-
-                for idx, sid in enumerate(pending):
-                    if progress_tracker.is_stopped(task_id):
-                        progress_tracker.stop_task(task_id, f"停止 {skipped + idx}/{total}")
-                        break
-
-                    if sid not in layout_map or sid not in image_map:
-                        continue
-
-                    blocks = [
-                        LayoutBlock(block_type=b["block_type"], bbox=b["bbox"], confidence=b.get("confidence", 0))
-                        for b in layout_map[sid]
-                    ]
-                    image_bytes = image_map[sid]
-
-                    try:
-                        if use_test_mode:
-                            # Test mode: 不需要图片，直接用 Paddle/GLM 参考数据生成模拟结果
-                            engine.set_test_context(sid, test_ref_map)
-                            results = engine.recognize_regions(Path("/dev/null"), blocks)
-                        else:
-                            import tempfile, os
-                            fd, tmp = tempfile.mkstemp(suffix=".png")
-                            os.write(fd, image_bytes)
-                            os.close(fd)
-                            results = engine.recognize_regions(Path(tmp), blocks)
-                            os.unlink(tmp)
-                    except Exception as exc:
-                        fail_count += 1
-                        if fail_count <= 3:
-                            print(f"[{model}] failed {sid}: {exc}", file=sys.stderr)
-                        continue
-
-                    rows = results_to_element_rows(
-                        sample_id=sid, blocks=blocks,
-                        engine_results={prefix: results},
-                    )
-                    all_rows.extend(rows)
-
-                    progress_tracker.update_progress(
-                        task_id=task_id, current=skipped + idx + 1,
-                        message=f"{model}"
-                    )
-
-                    if len(all_rows) >= save_interval:
-                        flush_rows(all_rows)
-                        all_rows = []
-
-                # 保存剩余
-                flush_rows(all_rows)
-                all_rows = []
-
-                print(f"[{model}] 完成: pending={len(pending)} skipped={skipped} failed={fail_count}", file=sys.stderr)
-                progress_tracker.complete_task(task_id=task_id, message=f"{model} 完成: skip={skipped} fail={fail_count}")
-                invalidate_status_cache()
-            except Exception as e:
-                print(f"[OCR] {model} 失败: {e}", file=sys.stderr)
-                traceback.print_exc()
-                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
-
-        thread = threading.Thread(target=execute, name=task_id)
-        thread.daemon = True
-        thread.start()
-
-        return {"message": f"已启动 {model}", "task_id": task_id, "status": "started"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/api/cmcv/{source_id}")
 async def start_cmcv(source_id: str, batch_id: str = None):
     """启动 CMCV 一致性比较任务"""
@@ -1636,14 +1371,44 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                 source = registry.get(source_id)
                 batch_dir = source.resolve_batch_dir(batch_id)
                 manifests_dir = batch_dir / "manifests"
-                element_path = manifests_dir / "element.lance"
                 ingest_path = find_stage_manifest(manifests_dir, "ingest")
 
-                if not element_path.exists():
-                    print("[CMCV] element.lance 不存在", file=sys.stderr)
+                def _read_blocks_from_category_lance() -> list[dict]:
+                    """从 text/formula/table.lance 读取所有 block，拼成 CMCV 所需格式"""
+                    all_rows = []
+                    for cat in ("text", "formula", "table"):
+                        lp = manifests_dir / f"{cat}.lance"
+                        if not lp.exists():
+                            continue
+                        try:
+                            with _lance_write_lock:
+                                ds = lance.dataset(str(lp))
+                                all_cols = ds.schema.names
+                                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                                for prefix in ("paddle", "glm", "self"):
+                                    for suffix in ("_text", "_confidence", "_table", "_formula"):
+                                        col = f"{prefix}{suffix}"
+                                        if col in all_cols:
+                                            read_cols.append(col)
+                                rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
+                            for row in rows:
+                                for key in ("paddle_table", "glm_table", "self_table",
+                                            "paddle_formula", "glm_formula", "self_formula"):
+                                    if key in row and isinstance(row[key], str) and row[key]:
+                                        try:
+                                            row[key] = json.loads(row[key])
+                                        except (json.JSONDecodeError, TypeError):
+                                            pass
+                                all_rows.append(row)
+                        except Exception as e:
+                            print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+                    return all_rows
+
+                element_rows = _read_blocks_from_category_lance()
+                if not element_rows:
+                    progress_tracker.fail_task(task_id, "text/formula/table.lance 中无可用 block")
                     return
 
-                element_rows = read_element_manifest(element_path)
                 progress_tracker.start_task(
                     task_id=task_id, task_type="cmcv",
                     source_id=source_id, batch_id=batch_id,
@@ -1652,7 +1417,50 @@ async def start_cmcv(source_id: str, batch_id: str = None):
 
                 cmcv = CMCVEngine()
                 updated_rows, page_tiers = cmcv.process_element_batch(element_rows)
-                merge_insert_element(element_path, updated_rows)
+
+                for cat in ("text", "formula", "table"):
+                    lp = manifests_dir / f"{cat}.lance"
+                    if not lp.exists():
+                        continue
+                    try:
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(lp))
+                            col_names = set(ds.schema.names)
+                            if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
+                                continue
+                        update_map: dict[str, dict] = {}
+                        for r in updated_rows:
+                            key = (r["sample_id"], r["block_idx"])
+                            if r.get("consistency_pattern"):
+                                update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
+                            if r.get("block_diff_json"):
+                                update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
+                        if not update_map:
+                            continue
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(lp))
+                            t = ds.to_table()
+                            patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
+                            diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
+                            sids = t.column("sample_id").to_pylist()
+                            bidxs = t.column("block_idx").to_pylist()
+                            pat_map = update_map.get("consistency_pattern", {})
+                            diff_map = update_map.get("block_diff_json", {})
+                            new_patterns = []
+                            new_diffs = []
+                            for i in range(len(t)):
+                                key = (sids[i], bidxs[i])
+                                new_patterns.append(pat_map.get(key, patterns[i]))
+                                new_diffs.append(diff_map.get(key, diffs[i]))
+                            import pyarrow as pa
+                            update_table = pa.table({
+                                "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
+                                "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
+                            })
+                            ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
+                        print(f"[CMCV] 已将一致性结果写回 {cat}.lance", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[CMCV] 写回 {cat}.lance 失败: {e}", file=sys.stderr)
 
                 if ingest_path and ingest_path.exists() and page_tiers:
                     import pyarrow as pa
@@ -1678,7 +1486,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
         thread.daemon = True
         thread.start()
 
-        return {"message": f"已启动 {source_id} 的 CMCV 任务", "status": "started"}
+        return {"message": f"已启动 {source_id} 的 CMCV 任务", "status": "started", "task_id": task_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1690,16 +1498,25 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
-        element_path = manifests_dir / "element.lance"
 
-        if not element_path.exists():
-            raise HTTPException(status_code=404, detail="element.lance 不存在")
-
-        rows = read_element_manifest(element_path, columns=[
-            "sample_id", "block_idx", "block_type",
-            "paddle_text", "glm_text", "self_text",
-            "consistency_pattern", "block_diff_json",
-        ])
+        rows = []
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    col_names = set(ds.schema.names)
+                    read_cols = ["sample_id", "block_idx", "block_type",
+                                 "consistency_pattern", "block_diff_json"]
+                    for prefix in ("paddle", "glm", "self"):
+                        col = f"{prefix}_text"
+                        if col in col_names:
+                            read_cols.append(col)
+                    rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
+            except Exception:
+                pass
 
         if tier:
             rows = [r for r in rows if r.get("consistency_pattern") == tier]
@@ -1716,9 +1533,20 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             elif pat == "partial_agree" and page_stats[sid]["worst_pattern"] != "all_disagree":
                 page_stats[sid]["worst_pattern"] = "partial_agree"
 
+        tier_histogram = {"easy": 0, "medium": 0, "hard": 0}
+        for ps in page_stats.values():
+            wp = ps["worst_pattern"]
+            if wp == "all_agree":
+                tier_histogram["easy"] += 1
+            elif wp == "partial_agree":
+                tier_histogram["medium"] += 1
+            else:
+                tier_histogram["hard"] += 1
+
         return {
             "total_blocks": len(rows),
             "total_pages": len(page_stats),
+            "tier_histogram": tier_histogram,
             "pages": list(page_stats.values())[:100],
         }
     except HTTPException:
@@ -1734,13 +1562,36 @@ async def get_sample_compare(source_id: str, batch_id: str, sample_id: str):
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
-        element_path = manifests_dir / "element.lance"
 
-        if not element_path.exists():
-            raise HTTPException(status_code=404, detail="element.lance 不存在")
-
-        rows = read_element_manifest(element_path)
-        sample_blocks = [r for r in rows if r.get("sample_id") == sample_id]
+        sample_blocks = []
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    col_names = set(ds.schema.names)
+                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json",
+                                 "paddle_text", "glm_text", "self_text",
+                                 "paddle_table", "glm_table", "self_table",
+                                 "paddle_formula", "glm_formula", "self_formula",
+                                 "consistency_pattern", "block_diff_json"]
+                    available = [c for c in read_cols if c in col_names]
+                    tbl = ds.to_table(columns=available)
+                    t_sample_id = tbl.column("sample_id").to_pylist()
+                    for i, sid in enumerate(t_sample_id):
+                        if sid == sample_id:
+                            row = {col: tbl.column(col)[i].as_py() for col in available}
+                            for key in ("paddle_table", "glm_table", "self_table"):
+                                if key in row and isinstance(row[key], str) and row[key]:
+                                    try:
+                                        row[key] = json.loads(row[key])
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                            sample_blocks.append(row)
+            except Exception:
+                pass
         if not sample_blocks:
             raise HTTPException(status_code=404, detail=f"样本 {sample_id} 无 block 数据")
 
@@ -1748,120 +1599,6 @@ async def get_sample_compare(source_id: str, batch_id: str, sample_id: str):
             "sample_id": sample_id,
             "blocks": sorted(sample_blocks, key=lambda r: r.get("block_idx", 0)),
         }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/split-categories/{source_id}/{batch_id}")
-async def split_categories(source_id: str, batch_id: str, with_images: bool = False):
-    """将 element.lance 中的 block 按类型分拆到 text/formula/table Lance（后台线程+进度跟踪）"""
-    try:
-        task_id = f"split_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-            if task_id not in alive_threads:
-                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-            else:
-                return {"message": f"拆分任务 {task_id} 已在运行中", "status": "already_running"}
-
-        source = registry.get(source_id)
-        batch_dir = source.resolve_batch_dir(batch_id)
-        manifests_dir = batch_dir / "manifests"
-        element_path = manifests_dir / "element.lance"
-
-        if not element_path.exists():
-            raise HTTPException(status_code=404, detail="element.lance 不存在，请先运行 OCR")
-
-        def execute_split_task():
-            try:
-                from data_engine.ocr.split import split_element_to_category_lances
-
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="split",
-                    source_id=source_id, batch_id=batch_id,
-                    total=0, message="正在读取 element.lance...",
-                )
-
-                # 构建懒加载图片加载器，避免一次性加载所有图片到内存
-                image_loader = None
-                if with_images:
-                    ingest_path = find_stage_manifest(manifests_dir, "ingest")
-                    if ingest_path and ingest_path.exists():
-                        progress_tracker.update_progress(task_id, 0, "初始化图片懒加载器...")
-                        try:
-                            with _lance_write_lock:
-                                _ingest_ds = lance.dataset(str(ingest_path))
-                                _image_ids = set(
-                                    _ingest_ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
-                                )
-
-                            def _load_image_for_sample(sample_id: str, bbox_json) -> bytes | None:
-                                """懒加载: 按需读取单张图片并裁剪"""
-                                if sample_id not in _image_ids:
-                                    return None
-                                try:
-                                    with _lance_write_lock:
-                                        ds = lance.dataset(str(ingest_path))
-                                        tbl = ds.to_table(
-                                            columns=["image_data"],
-                                            filter=f"sample_id = '{sample_id}'"
-                                        )
-                                    if tbl.num_rows == 0:
-                                        return None
-                                    img_bytes = tbl.column("image_data")[0].as_py()
-                                    if not img_bytes:
-                                        return None
-
-                                    if bbox_json:
-                                        from PIL import Image
-                                        import io
-                                        img = Image.open(io.BytesIO(img_bytes))
-                                        if isinstance(bbox_json, str):
-                                            bbox_json = json.loads(bbox_json)
-                                        if isinstance(bbox_json, list) and len(bbox_json) >= 4:
-                                            x1, y1, x2, y2 = [int(c) for c in bbox_json]
-                                            cropped = img.crop((x1, y1, x2, y2))
-                                            buf = io.BytesIO()
-                                            cropped.save(buf, format="JPEG", quality=90)
-                                            return buf.getvalue()
-                                    return img_bytes
-                                except Exception:
-                                    return None
-
-                            image_loader = _load_image_for_sample
-                        except Exception as e:
-                            print(f"[Split] 图片加载器初始化失败: {e}", file=sys.stderr)
-                            image_loader = None
-
-                def _split_progress_cb(current: int, total: int, msg: str) -> None:
-                    progress_tracker.update_progress(
-                        task_id, current, msg,
-                        total=total if total > 0 else None,
-                    )
-
-                result = split_element_to_category_lances(
-                    manifests_dir,
-                    image_loader=image_loader,
-                    progress_callback=_split_progress_cb,
-                )
-                invalidate_status_cache()
-
-                msg_parts = [f"{k}: {v}" for k, v in result.items() if v]
-                progress_tracker.complete_task(task_id=task_id, message=f"拆分完成 ({', '.join(msg_parts)})")
-
-            except Exception as e:
-                print(f"[Split] 任务失败: {e}", file=sys.stderr)
-                traceback.print_exc()
-                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
-
-        thread = threading.Thread(target=execute_split_task, name=task_id)
-        thread.daemon = True
-        thread.start()
-
-        return {"message": f"已启动 {source_id} 的拆分任务", "status": "started", "task_id": task_id}
     except HTTPException:
         raise
     except Exception as e:
@@ -2105,6 +1842,7 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
                     query_vec = pa.array(centroid, type=pa.float32())
                     scanner = ds.scanner(
                         nearest={"column": "embedding", "q": query_vec, "k": k},
+                        disable_scoring_autoprojection=True,
                     )
                     tbl = scanner.to_table()
                     cols = [c for c in ["sample_id", "difficulty", "page_image", "input_type"] if c in tbl.column_names]
@@ -2279,6 +2017,7 @@ async def get_difficulty_aware_samples(
                         scanner = ds.scanner(
                             columns=["sample_id"],
                             nearest={"column": "embedding", "q": query_vec, "k": k},
+                            disable_scoring_autoprojection=True,
                         )
                         probe_rows = scanner.to_table().to_pylist()
                     for r in probe_rows:
@@ -2346,6 +2085,7 @@ async def get_difficulty_aware_samples(
                     scanner = ds.scanner(
                         columns=["sample_id"],
                         nearest={"column": "embedding", "q": query_vec, "k": k},
+                        disable_scoring_autoprojection=True,
                     )
                     rows = scanner.to_table().to_pylist()
                 # 只存 sample_id，减小缓存体积
@@ -3605,8 +3345,11 @@ async def element_sample(source_id: str, batch_id: str, request: Request):
 
 @app.post("/api/element-ocr/{source_id}/{batch_id}")
 async def element_ocr(source_id: str, batch_id: str, request: Request,
-                      model: str = "paddleocr", test_mode: bool = False):
-    """对 Element 抽样 block 运行 OCR，结果写回 text/formula/table.lance。"""
+                      model: str = "paddleocr", test_mode: bool = False,
+                      force: bool = False):
+    """对 Element 抽样 block 运行 OCR，结果写回 text/formula/table.lance。
+    force=True 时清空该模型已有结果后全部重跑。
+    """
     try:
         prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
         prefix = prefix_map.get(model)
@@ -3674,6 +3417,26 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
 
                 text_col = f"{prefix}_text"
                 conf_col = f"{prefix}_confidence"
+
+                # force 模式：清空该模型在所有 category lance 中的结果列
+                if force:
+                    progress_tracker.update_progress(task_id, current=0, message=f"{model}: 强制重跑，清空已有结果...")
+                    # 按类别定义需要清空的列及重置值（SQL 表达式）
+                    _clear_map = {
+                        "text":    {text_col: "''", conf_col: "0.0"},
+                        "formula": {text_col: "''", conf_col: "0.0", f"{prefix}_formula": "''"},
+                        "table":   {text_col: "''", conf_col: "0.0", f"{prefix}_table": "''"},
+                    }
+                    for cat, lp_str in cat_paths:
+                        try:
+                            ds = lance.dataset(lp_str)
+                            updates = {c: v for c, v in _clear_map[cat].items() if c in ds.schema.names}
+                            if updates:
+                                with _lance_write_lock:
+                                    ds.update(updates)
+                                print(f"[el-ocr] force: 已清空 {cat}.lance 中 {list(updates.keys())}", file=sys.stderr)
+                        except Exception as e:
+                            print(f"[el-ocr] force: 清空 {cat} 失败: {e}", file=sys.stderr)
 
                 # 断点续跑：收集已有结果的 (sample_id, block_idx)
                 # 优化：使用 filter 下推，不读大文本列，IO 减少 90%+
@@ -3839,6 +3602,11 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
             except Exception as e:
                 import traceback
                 traceback.print_exc(file=sys.stderr)
+                # 异常时也尝试 flush 已积累的结果，避免数据丢失
+                try:
+                    _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
+                except Exception:
+                    pass
                 progress_tracker.fail_task(task_id, str(e))
 
         thread = threading.Thread(target=execute, name=task_id, daemon=True)
@@ -3856,6 +3624,7 @@ _CAT_TEXT_COL = {"text": "_text", "formula": "_formula", "table": "_table"}
 def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, conf_col: str, prefix: str):
     """将 Element OCR 结果 merge_insert 到对应的 category lance。
     带重试：Lance 并发事务冲突时自动重试（最多 5 次，指数退避）。
+    自动检测磁盘 schema，只写入兼容的列。
     """
     import time as _time
     import lance as _lance
@@ -3869,38 +3638,61 @@ def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, c
         try:
             import pyarrow as pa
             cat_text_col = f"{prefix}{_CAT_TEXT_COL.get(cat, '_text')}"
+
+            # 读取磁盘 schema，确保只写入兼容的列
+            with _lance_write_lock:
+                ds = _lance.dataset(str(lp))
+            disk_names = {f.name for f in ds.schema}
+
             arrays = {}
             for r in rows:
-                # 写入时用 category 对应的列名
+                # text_col (e.g. paddle_text) 存储了 OCR 文本结果
+                # cat_text_col 是目标 Lance 列名（对 text 类同，对 formula/table 不同）
                 mapped = {
                     "sample_id": r["sample_id"],
                     "block_idx": r["block_idx"],
-                    cat_text_col: r.get(text_col, ""),
-                    conf_col: r.get(conf_col, 0.0),
                 }
+                # 主文本内容：始终从 text_col 读取（OCR 引擎统一存储位置）
+                mapped[cat_text_col] = r.get(text_col, "")
+                mapped[conf_col] = r.get(conf_col, 0.0)
+                # 额外列：表格结构、公式 LaTeX（如存在且磁盘 schema 支持）
+                for extra_key in (f"{prefix}_table", f"{prefix}_formula"):
+                    if extra_key in r and extra_key in disk_names:
+                        mapped[extra_key] = r[extra_key]
+
                 for k, v in mapped.items():
                     if k not in arrays:
                         arrays[k] = []
                     arrays[k].append(v)
+
+            # 只保留磁盘 schema 中存在的列
+            arrays = {k: v for k, v in arrays.items() if k in disk_names}
+            if "sample_id" not in arrays or "block_idx" not in arrays:
+                continue  # 缺少 key 列，跳过
+
             pa_arrays = {}
             for col, vals in arrays.items():
-                if col in (cat_text_col,):
+                field = ds.schema.field(col)
+                if field.type == pa.large_string():
                     pa_arrays[col] = pa.array([v if v is not None else "" for v in vals], type=pa.large_string())
-                elif col == conf_col:
+                elif field.type == pa.float32():
                     pa_arrays[col] = pa.array([float(v or 0) for v in vals], type=pa.float32())
-                elif col == "sample_id":
-                    pa_arrays[col] = pa.array(vals, type=pa.large_string())
-                elif col == "block_idx":
+                elif field.type == pa.int32():
                     pa_arrays[col] = pa.array([int(v or 0) for v in vals], type=pa.int32())
                 else:
                     pa_arrays[col] = pa.array(vals)
             table = pa.table(pa_arrays)
+
             # 重试写入：Lance 事务冲突时指数退避
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     with _lance_write_lock:
                         ds = _lance.dataset(str(lp))
-                        ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)
+                        builder = ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all()
+                        # 只有当写入列包含磁盘 schema 所有列时才启用 insert
+                        if set(arrays.keys()) >= disk_names:
+                            builder = builder.when_not_matched_insert_all()
+                        builder.execute(table)
                     break
                 except Exception as we:
                     if attempt < MAX_RETRIES and ("Incompatible transaction" in str(we) or "conflict" in str(we).lower()):
