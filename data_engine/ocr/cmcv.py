@@ -402,7 +402,7 @@ class CMCVEngine:
                     "sample_id": block["sample_id"],
                     "block_idx": block.get("block_idx", 0),
                     "consistency_pattern": detail["pattern"],
-                    "block_diff_json": detail["diff"],
+                    "block_diff_json": json.dumps(detail["diff"], ensure_ascii=False) if detail.get("diff") else None,
                 })
 
             page_tiers[sample_id] = page_result["tier"]
