@@ -86,4 +86,4 @@ ocr:
     medium_ratio: 35      # medium 分区抽 35%
     hard_ratio: 15        # hard 分区抽 15%
 
-  save_interval: 50 # 每处理 50 个 sample 保存一次 element.lance
+  save_interval: 50 # 每处理 50 个 sample 保存一次
