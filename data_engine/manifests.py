@@ -409,12 +409,24 @@ def read_element_manifest(path: Path, columns: list[str] | None = None) -> list[
 
 
 def merge_insert_element(path: Path, records: list[dict], on_columns: list[str] | None = None) -> None:
+    import time as _time
     from data_engine.ocr import ELEMENT_SCHEMA
     if not records:
         return
     on_cols = on_columns or ["sample_id", "block_idx"]
     rows = [_element_record_to_arrow(r) for r in records]
     table = pa.Table.from_pylist(rows, schema=ELEMENT_SCHEMA)
-    with _lance_write_lock:
-        ds = lance.dataset(str(path))
-        ds.merge_insert(on_cols).when_matched_update_all().when_not_matched_insert_all().execute(table)
+    MAX_RETRIES = 5
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with _lance_write_lock:
+                ds = lance.dataset(str(path))
+                ds.merge_insert(on_cols).when_matched_update_all().when_not_matched_insert_all().execute(table)
+            break
+        except Exception as we:
+            if attempt < MAX_RETRIES and ("Incompatible transaction" in str(we) or "conflict" in str(we).lower()):
+                wait = 0.5 * (2 ** (attempt - 1))
+                print(f"[manifests] merge_insert_element 事务冲突 (attempt {attempt}/{MAX_RETRIES})，{wait}s 后重试...", file=sys.stderr)
+                _time.sleep(wait)
+            else:
+                raise

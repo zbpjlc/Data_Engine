@@ -1496,9 +1496,11 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                 save_interval = int(get_config("ocr", "save_interval", default=10))
 
                 def flush_rows(rows_to_save: list[dict]) -> None:
-                    """加锁：读已有 → 合并 → 写入"""
+                    """加锁：读已有 → 合并 → 写入（带事务冲突重试）"""
                     if not rows_to_save:
                         return
+                    import time as _time
+                    _MAX_RETRIES = 5
                     with _lance_write_lock:
                         if element_path.exists():
                             try:
@@ -1529,8 +1531,18 @@ async def start_ocr(source_id: str, request: Request, model: str = "paddleocr", 
                             arrow_rows = [__import__('data_engine.manifests', fromlist=['_element_record_to_arrow'])._element_record_to_arrow(r) for r in rows_to_save]
                             import pyarrow as pa
                             table = pa.Table.from_pylist(arrow_rows, schema=ELEMENT_SCHEMA)
-                            ds_el = lance.dataset(str(element_path))
-                            ds_el.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)
+                            for _attempt in range(1, _MAX_RETRIES + 1):
+                                try:
+                                    ds_el = lance.dataset(str(element_path))
+                                    ds_el.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)
+                                    break
+                                except Exception as _we:
+                                    if _attempt < _MAX_RETRIES and ("Incompatible transaction" in str(_we) or "conflict" in str(_we).lower()):
+                                        _wait = 0.5 * (2 ** (_attempt - 1))
+                                        print(f"[cmcv] flush_rows 事务冲突 (attempt {_attempt}/{_MAX_RETRIES})，{_wait}s 后重试...", file=sys.stderr)
+                                        _time.sleep(_wait)
+                                    else:
+                                        raise
                         else:
                             write_element_manifest(element_path, rows_to_save)
 
@@ -3842,8 +3854,12 @@ _CAT_TEXT_COL = {"text": "_text", "formula": "_formula", "table": "_table"}
 
 
 def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, conf_col: str, prefix: str):
-    """将 Element OCR 结果 merge_insert 到对应的 category lance。"""
+    """将 Element OCR 结果 merge_insert 到对应的 category lance。
+    带重试：Lance 并发事务冲突时自动重试（最多 5 次，指数退避）。
+    """
+    import time as _time
     import lance as _lance
+    MAX_RETRIES = 5
     for cat, rows in pending_rows.items():
         if not rows:
             continue
@@ -3879,9 +3895,20 @@ def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, c
                 else:
                     pa_arrays[col] = pa.array(vals)
             table = pa.table(pa_arrays)
-            with _lance_write_lock:
-                ds = _lance.dataset(str(lp))
-                ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)
+            # 重试写入：Lance 事务冲突时指数退避
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    with _lance_write_lock:
+                        ds = _lance.dataset(str(lp))
+                        ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().when_not_matched_insert_all().execute(table)
+                    break
+                except Exception as we:
+                    if attempt < MAX_RETRIES and ("Incompatible transaction" in str(we) or "conflict" in str(we).lower()):
+                        wait = 0.5 * (2 ** (attempt - 1))  # 0.5s, 1s, 2s, 4s
+                        print(f"[el-ocr] flush {cat} 事务冲突 (attempt {attempt}/{MAX_RETRIES})，{wait}s 后重试...", file=sys.stderr)
+                        _time.sleep(wait)
+                    else:
+                        raise
         except Exception as e:
             print(f"[el-ocr] flush {cat} 失败: {e}", file=sys.stderr)
 
