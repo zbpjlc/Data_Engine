@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import logging
 import random
 from pathlib import Path
@@ -42,7 +44,7 @@ _TASK_MAP = {
 }
 
 _ENDPOINTS = {
-    "text": {"url": "/ocr", "prompt": "OCR:"},
+    "text": {"url": "/gen_ocr_cord", "prompt": "OCR:"},
     "table": {"url": "/tsr", "prompt": "Table Recognition:"},
     "formula": {"url": "/formula_infer", "prompt": "Formula Recognition:"},
 }
@@ -90,7 +92,6 @@ class SelfOCREngine(BaseOCREngine):
         if self._test_mode:
             return self._recognize_test_mode(regions)
 
-        import io
         from PIL import Image
 
         img = Image.open(image_path)
@@ -105,6 +106,7 @@ class SelfOCREngine(BaseOCREngine):
 
             buf = io.BytesIO()
             cropped.save(buf, format="PNG")
+            img_bytes = buf.getvalue()
             buf.seek(0)
 
             # 选择对应的 URL
@@ -116,29 +118,92 @@ class SelfOCREngine(BaseOCREngine):
                 base_url = self._api_url
 
             url = base_url + endpoint["url"]
-            files = {"image_binary": ("image.png", buf, "image/png")}
 
             try:
-                raw_json = self._post_with_retry(url, files)
+                if task == "text":
+                    # /gen_ocr_cord: JSON with base64 image
+                    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                    raw_json = self._post_json_with_retry(url, {"image": img_b64})
+                    # 响应格式: {"shapes": [{"label": "...", "score": ...}, ...]}
+                    shapes = raw_json.get("shapes", [])
+                    text = "\n".join(s.get("label", "") for s in shapes if s.get("label"))
+                    out.append(OCRResult(
+                        block_type=region.block_type,
+                        bbox=region.bbox,
+                        text_content=text,
+                        confidence=region.confidence,
+                        table_structure=None,
+                        formula_latex="",
+                        raw_output=raw_json,
+                    ))
+                elif task == "table":
+                    # /tsr: JSON with file_id, table_regions, image_binary(base64)
+                    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                    w, h = cropped.size
+                    payload = {
+                        "file_id": f"{region.block_type}_{x1}_{y1}.png",
+                        "table_regions": [[0, 0, w, h]],
+                        "image_binary": img_b64,
+                    }
+                    raw_json = self._post_json_with_retry(url, payload)
+                    # 响应格式: {"data": {"table_results": [{"describe_html": "...", ...}]}}
+                    table_results = raw_json.get("data", {}).get("table_results", [])
+                    table_data = table_results[0] if table_results else None
+                    out.append(OCRResult(
+                        block_type=region.block_type,
+                        bbox=region.bbox,
+                        text_content="",
+                        confidence=region.confidence,
+                        table_structure=table_data,
+                        formula_latex="",
+                        raw_output=raw_json,
+                    ))
+                else:
+                    # /formula_infer: multipart with image_binary
+                    files = {"image_binary": ("image.png", buf, "image/png")}
+                    raw_json = self._post_with_retry(url, files)
+                    # 响应格式: {"data": ["\\begin{aligned} ..."]}
+                    data_list = raw_json.get("data", [])
+                    formula = data_list[0] if isinstance(data_list, list) and data_list else ""
+                    out.append(OCRResult(
+                        block_type=region.block_type,
+                        bbox=region.bbox,
+                        text_content="",
+                        confidence=region.confidence,
+                        table_structure=None,
+                        formula_latex=formula,
+                        raw_output=raw_json,
+                    ))
             except Exception as exc:
                 logger.warning("SelfOCR failed for region %s: %s", region.block_type, exc)
-                raw_json = {}
-
-            text = str(raw_json.get("text", raw_json.get("result", raw_json.get("formula", ""))))
-            table_data = raw_json.get("table") if task == "table" else None
-            formula = text if task == "formula" else ""
-
-            out.append(OCRResult(
-                block_type=region.block_type,
-                bbox=region.bbox,
-                text_content=text if task not in ("table", "formula") else "",
-                confidence=region.confidence,
-                table_structure=table_data,
-                formula_latex=formula,
-                raw_output=raw_json,
-            ))
+                out.append(OCRResult(
+                    block_type=region.block_type,
+                    bbox=region.bbox,
+                    text_content="",
+                    confidence=region.confidence,
+                    table_structure=None,
+                    formula_latex="",
+                    raw_output={"error": str(exc)},
+                ))
 
         return out
+
+    def _post_json_with_retry(self, url: str, payload: dict) -> dict:
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries):
+            try:
+                resp = requests.post(
+                    url,
+                    data=__import__("json").dumps(payload),
+                    headers={"content-type": "application/json"},
+                    timeout=self._timeout,
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("SelfOCR JSON attempt %d failed: %s", attempt + 1, exc)
+        raise RuntimeError(f"SelfOCR JSON failed after {self._max_retries} retries: {last_exc}")
 
     def _post_with_retry(self, url: str, files: dict) -> dict:
         last_exc: Exception | None = None
