@@ -3271,6 +3271,46 @@
             const ecsResEl = document.getElementById('ecs-results');
             if (ecsResEl) obs.observe(ecsResEl, {attributes: true, attributeFilter: ['class']});
         }
+
+        // ── 页面加载时初始化 Element OCR / CMCV 已有状态 ──────────────
+        (async function initElementOcrState() {
+            try {
+                const data = await fetch('/api/progress').then(r => r.json());
+                const tasks = data.tasks || {};
+                const barColors = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'};
+                for (const [taskId, task] of Object.entries(tasks)) {
+                    if (!taskId.startsWith('el_ocr_')) continue;
+                    const parts = taskId.split('_');
+                    const model = parts[2] + (parts[3] ? '_' + parts[3] : '');
+                    // el_ocr_paddleocr_source_batch → model = paddleocr
+                    // el_ocr_glm_ocr_source_batch → model = glm_ocr
+                    // el_ocr_self_ocr_source_batch → model = self_ocr
+                    const realModel = model.replace(/^el_ocr_/, '');
+                    if (task.status === 'completed' || task.status === 'running') {
+                        const barColor = barColors[realModel] || 'bg-gray-500';
+                        renderEoTaskBar(realModel, taskId, task, barColor);
+                        if (task.status === 'completed') setTabBadge('el-ocr', '✅');
+                        else pollElementOcrModel(realModel, taskId);
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        })();
+
+        (async function initElementCmcvState() {
+            const src = getSourceId();
+            const bid = getBatchId();
+            if (!src || !bid) return;
+            try {
+                const resp = await fetch(`/api/cmcv/${src}/${bid}/results`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                if (data.tier_histogram) {
+                    showElemCmcvButton(true);
+                    loadElemCmcvResults(src, bid);
+                    document.getElementById('eo-empty')?.classList.add('hidden');
+                }
+            } catch (e) { /* ignore */ }
+        })();
     </script>
     <!-- Toast 通知容器 -->
     <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
