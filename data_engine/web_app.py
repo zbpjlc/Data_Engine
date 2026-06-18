@@ -2106,26 +2106,11 @@ async def get_difficulty_aware_samples(
             return {"source_id": source_id, "batch_id": batch_id,
                     "error": "无数据", "bucket_count": 0, "total_sampled": 0, "buckets": {}}
 
-        # 根据目标占比计算每个层级的采样数
-        # 先归一化占比（确保总和=100%），没有数据的层级占比重新分配
-        raw_pcts = {t: ratio_map.get(t, 0) for t in ["easy", "medium", "hard"]}
-        active_tiers = [t for t in ["easy", "medium", "hard"] if tier_totals[t] > 0]
-        zero_tiers = [t for t in ["easy", "medium", "hard"] if tier_totals[t] == 0]
-        if zero_tiers:
-            active_raw = sum(raw_pcts[t] for t in active_tiers)
-            for t in zero_tiers:
-                raw_pcts[t] = 0
-            if active_raw > 0:
-                for t in active_tiers:
-                    raw_pcts[t] = raw_pcts[t] / active_raw * 100
-            elif active_tiers:
-                for t in active_tiers:
-                    raw_pcts[t] = 100 / len(active_tiers)
-
+        # 每个层级独立抽样：ratio 是该层级的抽样百分比
         tier_target = {}
         for tier_name in ["easy", "medium", "hard"]:
-            pct = raw_pcts.get(tier_name, 0)
-            tier_target[tier_name] = max(0, int(grand_total * pct / 100))
+            pct = ratio_map.get(tier_name, 0)
+            tier_target[tier_name] = max(0, int(tier_totals[tier_name] * pct / 100))
 
         buckets = {}
         bucket_diff_stats = {}
