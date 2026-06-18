@@ -239,6 +239,7 @@
             sortCol = null;
             sortDir = null;
             if (currentSourceId && currentBatchId) {
+                updateVersionSelector();
                 updateColumnFilter();
                 updateSearchColumns();
                 loadData();
