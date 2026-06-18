@@ -2115,40 +2115,42 @@ async def get_difficulty_aware_samples(
         buckets = {}
         bucket_diff_stats = {}
 
+        # 分批处理避免 Too many open files（Lance 每次 nearest search 会打开索引文件）
+        BATCH_SIZE = 8
         for tier_name in ["easy", "medium", "hard"]:
             target = tier_target.get(tier_name, 0)
             total_size = tier_totals.get(tier_name, 0)
             if target == 0 or total_size == 0:
                 continue
-            # 每个分区按占比分配采样数
-            for i in tier_partitions.get(tier_name, []):
-                part_size = partitions[i].get("size", 0)
-                part_key = f"P{i}"
-                if part_size == 0 or not centroids:
-                    continue
-                # 按分区大小占该层级总量的比例分配
-                k = max(1, int(target * part_size / total_size))
-                k = min(k, part_size)
-
-                try:
-                    centroid = centroids[i]
-                    query_vec = pa.array(centroid, type=pa.float32())
-                    with _lance_write_lock:
-                        scanner = ds.scanner(
-                            columns=["sample_id"],
-                            nearest={"column": "embedding", "q": query_vec, "k": k},
-                            disable_scoring_autoprojection=True,
-                        )
-                        rows = scanner.to_table().to_pylist()
-                    buckets[part_key] = [r["sample_id"] for r in rows]
-                    bucket_diff_stats[part_key] = {
-                        "tier": tier_name,
-                        "ratio": ratio_map.get(tier_name, 0),
-                        "sampled": len(rows),
-                        "total": part_size,
-                    }
-                except Exception as e:
-                    print(f"[difficulty-samples] P{i} error: {e}", file=sys.stderr)
+            tier_parts = tier_partitions.get(tier_name, [])
+            for batch_start in range(0, len(tier_parts), BATCH_SIZE):
+                batch = tier_parts[batch_start:batch_start + BATCH_SIZE]
+                for i in batch:
+                    part_size = partitions[i].get("size", 0)
+                    part_key = f"P{i}"
+                    if part_size == 0 or not centroids:
+                        continue
+                    k = max(1, int(target * part_size / total_size))
+                    k = min(k, part_size)
+                    try:
+                        centroid = centroids[i]
+                        query_vec = pa.array(centroid, type=pa.float32())
+                        with _lance_write_lock:
+                            scanner = ds.scanner(
+                                columns=["sample_id"],
+                                nearest={"column": "embedding", "q": query_vec, "k": k},
+                                disable_scoring_autoprojection=True,
+                            )
+                            rows = scanner.to_table().to_pylist()
+                        buckets[part_key] = [r["sample_id"] for r in rows]
+                        bucket_diff_stats[part_key] = {
+                            "tier": tier_name,
+                            "ratio": ratio_map.get(tier_name, 0),
+                            "sampled": len(rows),
+                            "total": part_size,
+                        }
+                    except Exception as e:
+                        print(f"[difficulty-samples] P{i} error: {e}", file=sys.stderr)
 
         total_sampled = sum(len(v) for v in buckets.values())
 
