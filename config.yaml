@@ -67,9 +67,9 @@ ocr:
       max_retries: 3
 
     self_ocr:
-      api_url: "http://10.112.64.56:8801"
-      formula_url: "http://10.112.64.56:20107"
-      table_url: "http://10.112.64.56:8801"
+      api_url: "http://10.112.64.56:8801"        # 文本 OCR: /gen_ocr_cord
+      formula_url: "http://10.112.64.56:20107"   # 公式: /formula_infer
+      table_url: "http://10.112.64.56:8801"      # 表格: /tsr
       api_key: ""
       timeout: 60
       max_retries: 3
