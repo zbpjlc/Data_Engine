@@ -1740,8 +1740,8 @@ def _merge_all_bucket_samples(registry, count: int, force: bool) -> dict:
                                 merged_sizes[f"{src_info.source_id}/{actual_bid}/{k}"] = v
                     except Exception:
                         pass
-                except Exception as e:
-                    print(f"[lancedb] read {dataset}.lance image failed: {e}", file=sys.stderr)
+        except Exception:
+            pass
 
     return {
         "source_id": "all", "batch_id": "",
