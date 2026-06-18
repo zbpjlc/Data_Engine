@@ -2088,42 +2088,80 @@ async def get_difficulty_aware_samples(
                 else:
                     partition_tiers[part_key] = "medium"
 
-        # ── 第二步：按分区难度重新抽样（ratio 是占分区大小的百分比）──────────
-        buckets = {}
-        bucket_diff_stats = {}
-
+        # ── 第二步：按难度比例抽样（ratio 是目标输出占比）──────────
+        # 先统计每个难度层级的总向量数
+        tier_totals = {"easy": 0, "medium": 0, "hard": 0}
+        tier_partitions: dict[str, list[int]] = {"easy": [], "medium": [], "hard": []}
         for i, part_info in enumerate(partitions):
             part_size = part_info.get("size", 0)
             part_key = f"P{i}"
-            if part_size == 0 or not centroids:
-                continue
-
             tier = partition_tiers.get(part_key, "medium")
-            ratio = ratio_map.get(tier, 1.0)
-            # ratio 是百分比：0.3 表示 0.3%，1.0 表示 1%
-            k = max(1, int(part_size * ratio / 100))
-            k = min(k, part_size)
+            tier_totals[tier] += part_size
+            tier_partitions[tier].append(i)
 
-            try:
-                centroid = centroids[i]
-                query_vec = pa.array(centroid, type=pa.float32())
-                with _lance_write_lock:
-                    scanner = ds.scanner(
-                        columns=["sample_id"],
-                        nearest={"column": "embedding", "q": query_vec, "k": k},
-                        disable_scoring_autoprojection=True,
-                    )
-                    rows = scanner.to_table().to_pylist()
-                # 只存 sample_id，减小缓存体积
-                buckets[part_key] = [r["sample_id"] for r in rows]
-                bucket_diff_stats[part_key] = {
-                    "tier": tier,
-                    "ratio": ratio,
-                    "sampled": len(rows),
-                    "probe_dist": diff_counts if "diff_counts" in dir() else {},
-                }
-            except Exception as e:
-                print(f"[difficulty-samples] P{i} error: {e}", file=sys.stderr)
+        grand_total = sum(tier_totals.values())
+        if grand_total == 0:
+            return {"source_id": source_id, "batch_id": batch_id,
+                    "error": "无数据", "bucket_count": 0, "total_sampled": 0, "buckets": {}}
+
+        # 根据目标占比计算每个分区的抽样数
+        # 总目标采样数 = grand_total * max_ratio / 100（保证最高比例的层级不超采）
+        # 然后按目标占比分配各层级的采样数
+        total_target = grand_total
+        tier_target = {}  # 每个层级的目标采样数
+        for tier_name in ["easy", "medium", "hard"]:
+            pct = ratio_map.get(tier_name, 0)
+            tier_target[tier_name] = max(0, int(total_target * pct / 100))
+
+        # 如果某层级没有数据但有目标，重新分配给有数据的层级
+        active_tiers = [t for t in ["easy", "medium", "hard"] if tier_totals[t] > 0]
+        zero_tiers = [t for t in ["easy", "medium", "hard"] if tier_totals[t] == 0 and tier_target[t] > 0]
+        if zero_tiers and active_tiers:
+            redistributed = sum(tier_target[t] for t in zero_tiers)
+            for t in zero_tiers:
+                tier_target[t] = 0
+            # 按现有占比分配给有数据的层级
+            active_total = sum(tier_totals[t] for t in active_tiers)
+            for t in active_tiers:
+                tier_target[t] += int(redistributed * tier_totals[t] / active_total) if active_total > 0 else 0
+
+        buckets = {}
+        bucket_diff_stats = {}
+
+        for tier_name in ["easy", "medium", "hard"]:
+            target = tier_target.get(tier_name, 0)
+            total_size = tier_totals.get(tier_name, 0)
+            if target == 0 or total_size == 0:
+                continue
+            # 每个分区按占比分配采样数
+            for i in tier_partitions.get(tier_name, []):
+                part_size = partitions[i].get("size", 0)
+                part_key = f"P{i}"
+                if part_size == 0 or not centroids:
+                    continue
+                # 按分区大小占该层级总量的比例分配
+                k = max(1, int(target * part_size / total_size))
+                k = min(k, part_size)
+
+                try:
+                    centroid = centroids[i]
+                    query_vec = pa.array(centroid, type=pa.float32())
+                    with _lance_write_lock:
+                        scanner = ds.scanner(
+                            columns=["sample_id"],
+                            nearest={"column": "embedding", "q": query_vec, "k": k},
+                            disable_scoring_autoprojection=True,
+                        )
+                        rows = scanner.to_table().to_pylist()
+                    buckets[part_key] = [r["sample_id"] for r in rows]
+                    bucket_diff_stats[part_key] = {
+                        "tier": tier_name,
+                        "ratio": ratio_map.get(tier_name, 0),
+                        "sampled": len(rows),
+                        "total": part_size,
+                    }
+                except Exception as e:
+                    print(f"[difficulty-samples] P{i} error: {e}", file=sys.stderr)
 
         total_sampled = sum(len(v) for v in buckets.values())
 

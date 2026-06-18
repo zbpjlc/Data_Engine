@@ -3225,23 +3225,23 @@
                 );
                 const data = await resp.json();
                 // 从 bucket_diff_stats 聚合出 tier 级别 summary
-                const tierAgg = {easy: {sampled: 0, total: 0, ratio: 0}, medium: {sampled: 0, total: 0, ratio: 0}, hard: {sampled: 0, total: 0, ratio: 0}};
-                const bucketSizes = data.bucket_sizes || {};
+                const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
                 for (const [partKey, stats] of Object.entries(data.bucket_diff_stats || {})) {
                     const t = stats.tier || 'medium';
                     if (!tierAgg[t]) continue;
                     tierAgg[t].sampled += stats.sampled || 0;
-                    tierAgg[t].total += bucketSizes[partKey] || 0;
-                    tierAgg[t].ratio = stats.ratio || tierAgg[t].ratio;
+                    tierAgg[t].total += stats.total || 0;
                 }
-                const summary = data.summary || tierAgg;
-                let html = `<div class="font-medium mb-2">总计抽样: <b>${data.total_sampled || 0}</b> blocks</div>`;
+                const totalSampled = data.total_sampled || 0;
+                let html = `<div class="font-medium mb-2">总计抽样: <b>${totalSampled.toLocaleString()}</b> blocks</div>`;
                 html += '<div class="grid grid-cols-3 gap-2">';
-                for (const [tier, info] of Object.entries(summary)) {
+                for (const [tier, info] of Object.entries(tierAgg)) {
                     const color = tier === 'easy' ? 'green' : tier === 'medium' ? 'yellow' : 'red';
+                    const pct = totalSampled > 0 ? (info.sampled / totalSampled * 100).toFixed(1) : 0;
                     html += `<div class="bg-${color}-50 border rounded p-2 text-center text-xs">
                         <div class="text-${color}-700 font-medium">${tier}</div>
-                        <div>${info.sampled}/${info.total} (${info.ratio}%)</div>
+                        <div>${info.sampled.toLocaleString()}/${info.total.toLocaleString()}</div>
+                        <div class="text-gray-500">占输出 ${pct}%</div>
                     </div>`;
                 }
                 html += '</div>';
