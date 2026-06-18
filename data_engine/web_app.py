@@ -1229,33 +1229,30 @@ async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, versi
                         tbl = ds.to_table(columns=cols, filter=flt)
                         if tbl.num_rows > 0 and tbl.column("image_data")[0].as_py() is not None:
                             image_bytes = tbl.column("image_data")[0].as_py()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[lancedb] read {dataset}.lance image failed: {e}", file=sys.stderr)
 
-        # fallback: 从 ingest.lance 读整页图
+        # fallback: 从 ingest.lance 读整页图（始终用最新版本，不传 category 的 version）
         if image_bytes is None:
             manifest_path = find_stage_manifest(manifests_dir, "ingest")
             if not manifest_path or manifest_path.suffix != ".lance":
                 raise HTTPException(status_code=404, detail="ingest.lance 不存在")
 
-        with _lance_write_lock:
-            if version:
-                ds = lance.dataset(str(manifest_path)).checkout_version(version)
-            else:
+            with _lance_write_lock:
                 ds = lance.dataset(str(manifest_path))
 
-            results = ds.to_table(
-                columns=["sample_id", "image_data"],
-                filter=f"sample_id = '{sample_id}'",
-            )
-            if results.num_rows == 0:
-                raise HTTPException(status_code=404, detail="Sample not found")
+                results = ds.to_table(
+                    columns=["sample_id", "image_data"],
+                    filter=f"sample_id = '{sample_id}'",
+                )
+                if results.num_rows == 0:
+                    raise HTTPException(status_code=404, detail="Sample not found")
 
-            image_bytes = results.column("image_data")[0].as_py()
-            if image_bytes is None:
-                raise HTTPException(status_code=404, detail="No image data")
+                image_bytes = results.column("image_data")[0].as_py()
+                if image_bytes is None:
+                    raise HTTPException(status_code=404, detail="No image data")
 
-            return Response(content=image_bytes, media_type="image/jpeg")
+        return Response(content=image_bytes, media_type="image/jpeg")
     except HTTPException:
         raise
     except Exception as e:
@@ -1743,8 +1740,8 @@ def _merge_all_bucket_samples(registry, count: int, force: bool) -> dict:
                                 merged_sizes[f"{src_info.source_id}/{actual_bid}/{k}"] = v
                     except Exception:
                         pass
-        except Exception:
-            pass
+                except Exception as e:
+                    print(f"[lancedb] read {dataset}.lance image failed: {e}", file=sys.stderr)
 
     return {
         "source_id": "all", "batch_id": "",
