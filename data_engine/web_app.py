@@ -2481,18 +2481,15 @@ def _write_layout_to_category_lances(
             "created_at": now,
         }
         if bt in FORMULA_BLOCK_TYPES:
-            row.update({"image_data": cropped_img, "formula_latex": None,
-                        "formula_confidence": None, "source_model": None,
+            row.update({"image_data": cropped_img,
                         "consistency_pattern": None})
             return "formula", row
         elif bt in TABLE_BLOCK_TYPES:
-            row.update({"image_data": cropped_img, "table_html": None, "table_json": None,
-                        "table_confidence": None, "source_model": None,
+            row.update({"image_data": cropped_img,
                         "consistency_pattern": None})
             return "table", row
         else:
-            row.update({"image_data": cropped_img, "text_content": None,
-                        "text_confidence": None, "source_model": None,
+            row.update({"image_data": cropped_img,
                         "consistency_pattern": None})
             return "text", row
 

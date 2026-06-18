@@ -15,10 +15,6 @@ TEXT_LANCE_SCHEMA = pa.schema([
     pa.field("layout_confidence", pa.float32(), nullable=False),
     pa.field("image_data", pa.large_binary(), nullable=True),
     pa.field("embedding", pa.list_(pa.float32(), 768), nullable=True),
-    # 单模型结果（兼容旧字段）
-    pa.field("text_content", pa.large_string(), nullable=True),
-    pa.field("text_confidence", pa.float32(), nullable=True),
-    pa.field("source_model", pa.large_string(), nullable=True),
     # 多模型 OCR 结果
     pa.field("paddle_text", pa.large_string(), nullable=True),
     pa.field("paddle_confidence", pa.float32(), nullable=True),
@@ -43,10 +39,6 @@ FORMULA_LANCE_SCHEMA = pa.schema([
     pa.field("layout_confidence", pa.float32(), nullable=False),
     pa.field("image_data", pa.large_binary(), nullable=True),
     pa.field("embedding", pa.list_(pa.float32(), 768), nullable=True),
-    # 单模型结果（兼容旧字段）
-    pa.field("formula_latex", pa.large_string(), nullable=True),
-    pa.field("formula_confidence", pa.float32(), nullable=True),
-    pa.field("source_model", pa.large_string(), nullable=True),
     # 多模型 OCR 结果
     pa.field("paddle_formula", pa.large_string(), nullable=True),
     pa.field("paddle_confidence", pa.float32(), nullable=True),
@@ -71,11 +63,6 @@ TABLE_LANCE_SCHEMA = pa.schema([
     pa.field("layout_confidence", pa.float32(), nullable=False),
     pa.field("image_data", pa.large_binary(), nullable=True),
     pa.field("embedding", pa.list_(pa.float32(), 768), nullable=True),
-    # 单模型结果（兼容旧字段）
-    pa.field("table_html", pa.large_string(), nullable=True),
-    pa.field("table_json", pa.large_string(), nullable=True),
-    pa.field("table_confidence", pa.float32(), nullable=True),
-    pa.field("source_model", pa.large_string(), nullable=True),
     # 多模型 OCR 结果
     pa.field("paddle_table", pa.large_string(), nullable=True),
     pa.field("paddle_confidence", pa.float32(), nullable=True),
