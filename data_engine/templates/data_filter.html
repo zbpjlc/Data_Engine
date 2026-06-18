@@ -3276,7 +3276,7 @@
         (function initAllElementState() {
             // 等 filterBatches() 同步完成后执行
             setTimeout(() => {
-                // 1. 加载已有 Element Clustering 结果（Per-Cluster Sampling 面板）
+                // 1. 加载已有 Element Clustering 结果
                 if (batchData.length > 0) {
                     const toFetch = batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                     loadEcResultsAggregated(toFetch);
@@ -3288,7 +3288,6 @@
                     const barColors = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'};
                     for (const [taskId, task] of Object.entries(tasks)) {
                         if (!taskId.startsWith('el_ocr_')) continue;
-                        // el_ocr_{model}_{source}_{batch} → model 可能含下划线
                         const afterPrefix = taskId.replace('el_ocr_', '');
                         const knownModels = ['paddleocr', 'glm_ocr', 'self_ocr'];
                         let realModel = '';
@@ -3305,17 +3304,33 @@
                     }
                 }).catch(() => {});
 
-                // 3. 加载已有 Element CMCV 结果
-                const src = getSourceId();
-                const bid = getBatchId();
-                if (src && bid) {
-                    fetch(`/api/cmcv/${src}/${bid}/results`).then(r => r.ok ? r.json() : null).then(data => {
-                        if (data && data.tier_histogram) {
-                            showElemCmcvButton(true);
-                            loadElemCmcvResults(src, bid);
-                            document.getElementById('eo-empty')?.classList.add('hidden');
-                        }
-                    }).catch(() => {});
+                // 3. 加载已有 Element CMCV 结果（遍历所有批次）
+                if (batchData.length > 0) {
+                    batchData.forEach(b => {
+                        fetch(`/api/cmcv/${b.source_id}/${b.batch_id}/results`)
+                            .then(r => r.ok ? r.json() : null)
+                            .then(data => {
+                                if (data && data.tier_histogram) {
+                                    showElemCmcvButton(true);
+                                    loadElemCmcvResults(b.source_id, b.batch_id);
+                                    document.getElementById('eo-empty')?.classList.add('hidden');
+                                }
+                            }).catch(() => {});
+                    });
+                }
+
+                // 4. 检查 Per-Cluster Sampling 是否已有数据
+                if (batchData.length > 0) {
+                    batchData.forEach(b => {
+                        fetch(`/api/element-samples/${b.source_id}/${b.batch_id}`)
+                            .then(r => r.ok ? r.json() : null)
+                            .then(data => {
+                                if (data && data.total_sampled > 0) {
+                                    document.getElementById('ecs-results')?.classList.remove('hidden');
+                                    document.getElementById('ecs-empty')?.classList.add('hidden');
+                                }
+                            }).catch(() => {});
+                    });
                 }
             }, 100);
         })();
