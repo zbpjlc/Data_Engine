@@ -43,11 +43,6 @@
                     <div>
                         <label class="block text-xs font-medium text-gray-500 mb-1">类型</label>
                         <select id="dataset-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[130px]">
-                            <option value="ingest">ingest</option>
-                            <option value="element">element</option>
-                            <option value="text">text</option>
-                            <option value="formula">formula</option>
-                            <option value="table">table</option>
                         </select>
                     </div>
                     <div id="version-wrapper" class="hidden">
@@ -208,6 +203,7 @@
             const [sourceId, batchId] = val.split('/');
             currentSourceId = sourceId;
             currentBatchId = batchId;
+            updateDatasetSelector();
             updateVersionSelector();
             updateColumnFilter();
             updateSearchColumns();
@@ -217,13 +213,36 @@
             loadData();
         }
 
+        function updateDatasetSelector() {
+            const batches = allSources.filter(s => s.source_id === currentSourceId && s.batch_id === currentBatchId);
+            const datasets = [...new Set(batches.map(s => s.dataset))];
+            const sel = document.getElementById('dataset-select');
+            const prev = sel.value;
+            sel.innerHTML = '';
+            datasets.forEach(ds => {
+                const opt = document.createElement('option');
+                opt.value = ds;
+                opt.textContent = ds;
+                sel.appendChild(opt);
+            });
+            if (datasets.includes(prev)) {
+                sel.value = prev;
+            } else {
+                currentDataset = datasets[0] || 'ingest';
+            }
+        }
+
         function onDatasetChange() {
             const val = document.getElementById('dataset-select').value;
             currentDataset = val;
             currentPage = 1;
             sortCol = null;
             sortDir = null;
-            if (currentSourceId && currentBatchId) loadData();
+            if (currentSourceId && currentBatchId) {
+                updateColumnFilter();
+                updateSearchColumns();
+                loadData();
+            }
         }
 
         function updateVersionSelector() {
