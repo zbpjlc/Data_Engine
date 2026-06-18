@@ -934,9 +934,7 @@
                         totalTable += sr.categories.table?.count || 0;
                     }
                 });
-                if (totalText + totalFormula + totalTable > 0) {
-                    document.getElementById('eo-empty')?.classList.add('hidden');
-                }
+
             })
             .catch(e => { if (e.name !== 'AbortError') console.error('[category-stats-batch]', e); });
         }
