@@ -24,13 +24,30 @@
         </header>
 
         <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-            <!-- Dataset Selector -->
+            <!-- Controls -->
             <div class="bg-white rounded-lg shadow mb-6 p-4">
-                <div class="flex flex-wrap items-center gap-4">
+                <!-- Row 1: Data Positioning -->
+                <div class="flex flex-wrap items-center gap-3">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 mb-1">数据源</label>
+                        <select id="source-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[160px]">
+                            <option value="">全部数据源</option>
+                        </select>
+                    </div>
                     <div>
                         <label class="block text-xs font-medium text-gray-500 mb-1">批次</label>
-                        <select id="batch-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[280px]">
+                        <select id="batch-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[240px]">
                             <option value="">选择批次...</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-500 mb-1">类型</label>
+                        <select id="dataset-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[130px]">
+                            <option value="ingest">ingest</option>
+                            <option value="element">element</option>
+                            <option value="text">text</option>
+                            <option value="formula">formula</option>
+                            <option value="table">table</option>
                         </select>
                     </div>
                     <div id="version-wrapper" class="hidden">
@@ -38,7 +55,11 @@
                         <select id="version-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[180px]">
                         </select>
                     </div>
-                    <div class="flex-1">
+                    <div id="info-badge" class="text-sm text-gray-500 self-end pb-2 hidden"></div>
+                </div>
+                <!-- Row 2: Search + Column Filter -->
+                <div class="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-gray-100">
+                    <div class="flex-1 min-w-[200px]">
                         <label class="block text-xs font-medium text-gray-500 mb-1">搜索</label>
                         <div class="flex gap-2">
                             <select id="search-column" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
@@ -46,15 +67,17 @@
                             </select>
                             <input id="search-input" type="text" placeholder="搜索关键词..."
                                 class="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm">
-                            <button onclick="loadData()" class="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700">查询</button>
+                            <button id="btn-search" class="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 disabled:opacity-50">查询</button>
                         </div>
                     </div>
-                    <div id="info-badge" class="text-sm text-gray-500 self-end pb-2 hidden"></div>
-                </div>
-                <!-- Column filter -->
-                <div id="column-filter" class="mt-3 hidden">
-                    <label class="block text-xs font-medium text-gray-500 mb-1">显示列</label>
-                    <div id="column-checkboxes" class="flex flex-wrap gap-x-4 gap-y-1"></div>
+                    <div id="column-filter" class="hidden">
+                        <label class="block text-xs font-medium text-gray-500 mb-1">显示列</label>
+                        <div class="flex items-center gap-2">
+                            <button id="btn-col-all" class="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded hover:bg-gray-200">全选</button>
+                            <button id="btn-col-invert" class="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded hover:bg-gray-200">反选</button>
+                            <div id="column-checkboxes" class="flex flex-wrap gap-x-3 gap-y-1 max-h-[60px] overflow-y-auto"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -77,13 +100,13 @@
                 <!-- Pagination -->
                 <div id="pagination" class="px-6 py-4 border-t border-gray-200 flex items-center justify-between hidden">
                     <div class="flex items-center gap-2">
-                        <button id="btn-prev" onclick="goPage(currentPage-1)" class="px-3 py-1 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50" disabled>上一页</button>
+                        <button id="btn-prev" class="px-3 py-1 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50" disabled>上一页</button>
                         <span id="page-label" class="text-sm text-gray-600"></span>
-                        <button id="btn-next" onclick="goPage(currentPage+1)" class="px-3 py-1 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50" disabled>下一页</button>
+                        <button id="btn-next" class="px-3 py-1 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50" disabled>下一页</button>
                     </div>
                     <div class="flex items-center gap-2 text-sm text-gray-500">
                         <label>每页</label>
-                        <select id="page-size" onchange="changePageSize()" class="px-2 py-1 border border-gray-300 rounded text-sm">
+                        <select id="page-size" class="px-2 py-1 border border-gray-300 rounded text-sm">
                             <option value="10">10</option>
                             <option value="20" selected>20</option>
                             <option value="50">50</option>
@@ -105,50 +128,114 @@
         let currentBatchId = '';
         let currentDataset = 'ingest';
         let currentVersion = '';
+        let lastData = null;
+        let sortCol = null;
+        let sortDir = null;
+        let isLoading = false;
 
+        // ── Init ──────────────────────────────────────────────────────
         async function init() {
             try {
                 const res = await fetch('/api/lancedb/sources');
                 const data = await res.json();
                 allSources = data.sources || [];
-                const sel = document.getElementById('batch-select');
-                sel.innerHTML = '<option value="">选择批次...</option>';
-                allSources.forEach(s => {
-                    const opt = document.createElement('option');
-                    opt.value = `${s.source_id}/${s.batch_id}/${s.dataset}`;
-                    const dsLabel = s.dataset === 'element' ? 'Element' : 'Ingest';
-                    opt.textContent = `${s.source_id} / ${s.batch_id} [${dsLabel}]  (${s.sample_count}条, ${s.stage_status})`;
-                    sel.appendChild(opt);
-                });
-                sel.addEventListener('change', onBatchChange);
+                populateSourceSelect();
+                setupEventListeners();
             } catch (e) {
                 console.error('Failed to load sources:', e);
             }
         }
 
+        function populateSourceSelect() {
+            const sel = document.getElementById('source-select');
+            sel.innerHTML = '<option value="">全部数据源</option>';
+            const sources = [...new Set(allSources.map(s => s.source_id))];
+            sources.forEach(src => {
+                const opt = document.createElement('option');
+                opt.value = src;
+                opt.textContent = src;
+                sel.appendChild(opt);
+            });
+        }
+
+        function populateBatchSelect(filtered) {
+            const sel = document.getElementById('batch-select');
+            sel.innerHTML = '<option value="">选择批次...</option>';
+            const grouped = {};
+            filtered.forEach(s => {
+                const key = `${s.source_id}/${s.batch_id}`;
+                if (!grouped[key]) grouped[key] = { source_id: s.source_id, batch_id: s.batch_id, datasets: [], stage_status: s.stage_status };
+                grouped[key].datasets.push(s.dataset);
+            });
+            Object.values(grouped).forEach(g => {
+                const opt = document.createElement('option');
+                opt.value = `${g.source_id}/${g.batch_id}`;
+                const dsLabels = g.datasets.map(d => d === 'ingest' ? 'Ingest' : d === 'element' ? 'Element' : d.toUpperCase()).join(', ');
+                opt.textContent = `${g.source_id} / ${g.batch_id} [${dsLabels}]  (${g.stage_status})`;
+                sel.appendChild(opt);
+            });
+        }
+
+        function setupEventListeners() {
+            document.getElementById('source-select').addEventListener('change', onSourceChange);
+            document.getElementById('batch-select').addEventListener('change', onBatchChange);
+            document.getElementById('dataset-select').addEventListener('change', onDatasetChange);
+            document.getElementById('version-select').addEventListener('change', () => { currentPage = 1; loadData(); });
+            document.getElementById('btn-search').addEventListener('click', () => { currentPage = 1; loadData(); });
+            document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') { currentPage = 1; loadData(); } });
+            document.getElementById('page-size').addEventListener('change', () => { currentPage = 1; loadData(); });
+            document.getElementById('btn-prev').addEventListener('click', () => goPage(currentPage - 1));
+            document.getElementById('btn-next').addEventListener('click', () => goPage(currentPage + 1));
+            document.getElementById('btn-col-all').addEventListener('click', selectAllColumns);
+            document.getElementById('btn-col-invert').addEventListener('click', invertColumns);
+            document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeImageModal(); closeVizModal(); } });
+        }
+
+        // ── Cascading Filters ─────────────────────────────────────────
+        function onSourceChange() {
+            const src = document.getElementById('source-select').value;
+            const filtered = src ? allSources.filter(s => s.source_id === src) : allSources;
+            populateBatchSelect(filtered);
+            currentPage = 1;
+            sortCol = null;
+            sortDir = null;
+            resetTable();
+        }
+
         function onBatchChange() {
             const val = document.getElementById('batch-select').value;
-            if (!val) {
-                document.getElementById('version-wrapper').classList.add('hidden');
-                document.getElementById('column-filter').classList.add('hidden');
-                document.getElementById('pagination').classList.add('hidden');
-                document.getElementById('table-head').innerHTML = '<tr><th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">请先选择批次</th></tr>';
-                document.getElementById('table-body').innerHTML = '<tr><td class="px-4 py-8 text-center text-gray-400">请选择批次加载数据</td></tr>';
-                document.getElementById('info-badge').classList.add('hidden');
-                return;
-            }
-            const [sourceId, batchId, dataset] = val.split('/');
-            const src = allSources.find(s => s.source_id === sourceId && s.batch_id === batchId && s.dataset === dataset);
-            if (!src) return;
-
+            if (!val) { resetTable(); return; }
+            const [sourceId, batchId] = val.split('/');
             currentSourceId = sourceId;
             currentBatchId = batchId;
-            currentDataset = dataset || 'ingest';
+            updateVersionSelector();
+            updateColumnFilter();
+            updateSearchColumns();
+            currentPage = 1;
+            sortCol = null;
+            sortDir = null;
+            loadData();
+        }
 
-            // Populate version selector
+        function onDatasetChange() {
+            const val = document.getElementById('dataset-select').value;
+            currentDataset = val;
+            currentPage = 1;
+            sortCol = null;
+            sortDir = null;
+            if (currentSourceId && currentBatchId) loadData();
+        }
+
+        function updateVersionSelector() {
             const verSel = document.getElementById('version-select');
             verSel.innerHTML = '';
-            (src.versions || []).forEach(v => {
+            const batches = allSources.filter(s => s.source_id === currentSourceId && s.batch_id === currentBatchId);
+            const src = batches.find(s => s.dataset === currentDataset) || batches[0];
+            if (!src || !src.versions || src.versions.length === 0) {
+                document.getElementById('version-wrapper').classList.add('hidden');
+                return;
+            }
+            src.versions.forEach(v => {
                 const opt = document.createElement('option');
                 opt.value = v.version;
                 const ts = v.timestamp ? v.timestamp.substring(0, 19).replace('T', ' ') : '';
@@ -157,13 +244,18 @@
                 verSel.appendChild(opt);
             });
             document.getElementById('version-wrapper').classList.remove('hidden');
+        }
 
+        function updateColumnFilter() {
+            const batches = allSources.filter(s => s.source_id === currentSourceId && s.batch_id === currentBatchId);
+            const src = batches.find(s => s.dataset === currentDataset) || batches[0];
+            if (!src) return;
             selectedColumns = src.columns.slice(0, 8);
             const colDiv = document.getElementById('column-checkboxes');
             colDiv.innerHTML = '';
             src.columns.forEach(col => {
                 const label = document.createElement('label');
-                label.className = 'flex items-center gap-1 text-xs text-gray-600 cursor-pointer';
+                label.className = 'flex items-center gap-1 text-xs text-gray-600 cursor-pointer whitespace-nowrap';
                 const cb = document.createElement('input');
                 cb.type = 'checkbox';
                 cb.value = col;
@@ -175,7 +267,12 @@
                 colDiv.appendChild(label);
             });
             document.getElementById('column-filter').classList.remove('hidden');
+        }
 
+        function updateSearchColumns() {
+            const batches = allSources.filter(s => s.source_id === currentSourceId && s.batch_id === currentBatchId);
+            const src = batches.find(s => s.dataset === currentDataset) || batches[0];
+            if (!src) return;
             const sc = document.getElementById('search-column');
             sc.innerHTML = '<option value="">全列</option>';
             src.columns.forEach(col => {
@@ -184,76 +281,165 @@
                 opt.textContent = col;
                 sc.appendChild(opt);
             });
-
-            currentPage = 1;
-            loadData();
         }
 
+        // ── Column Selection ──────────────────────────────────────────
         function onColumnToggle() {
             selectedColumns = Array.from(document.querySelectorAll('.column-cb:checked')).map(cb => cb.value);
             if (selectedColumns.length === 0) return;
             loadData();
         }
 
+        function selectAllColumns() {
+            document.querySelectorAll('.column-cb').forEach(cb => cb.checked = true);
+            selectedColumns = Array.from(document.querySelectorAll('.column-cb')).map(cb => cb.value);
+            loadData();
+        }
+
+        function invertColumns() {
+            document.querySelectorAll('.column-cb').forEach(cb => cb.checked = !cb.checked);
+            selectedColumns = Array.from(document.querySelectorAll('.column-cb:checked')).map(cb => cb.value);
+            if (selectedColumns.length === 0) return;
+            loadData();
+        }
+
+        // ── Data Loading ──────────────────────────────────────────────
+        function setLoading(loading) {
+            isLoading = loading;
+            const tbody = document.getElementById('table-body');
+            const btn = document.getElementById('btn-search');
+            if (loading) {
+                tbody.innerHTML = '<tr><td class="px-4 py-8 text-center" colspan="100">' +
+                    '<div class="inline-block w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mr-2"></div>' +
+                    '加载中...</td></tr>';
+                btn.disabled = true;
+                btn.textContent = '查询中...';
+            } else {
+                btn.disabled = false;
+                btn.textContent = '查询';
+            }
+        }
+
+        function showError(msg) {
+            const tbody = document.getElementById('table-body');
+            tbody.innerHTML = `<tr><td class="px-4 py-8 text-center text-red-500" colspan="100">${msg}</td></tr>`;
+        }
+
         async function loadData() {
-            const val = document.getElementById('batch-select').value;
-            if (!val) return;
-            const parts = val.split('/');
-            const sourceId = parts[0];
-            const batchId = parts[1];
-            const dataset = parts[2] || 'ingest';
+            if (!currentSourceId || !currentBatchId) return;
             const search = document.getElementById('search-input').value.trim();
             const searchCol = document.getElementById('search-column').value;
             const pageSize = document.getElementById('page-size').value;
             const version = document.getElementById('version-select').value;
-
-            currentSourceId = sourceId;
-            currentBatchId = batchId;
-            currentDataset = dataset;
+            currentDataset = document.getElementById('dataset-select').value;
             currentVersion = version;
 
-            let url = `/api/lancedb/${sourceId}/${batchId}/data?page=${currentPage}&page_size=${pageSize}&dataset=${dataset}`;
+            let url = `/api/lancedb/${currentSourceId}/${currentBatchId}/data?page=${currentPage}&page_size=${pageSize}&dataset=${currentDataset}`;
             if (version) url += `&version=${version}`;
-            if (selectedColumns.length > 0) {
-                url += `&columns=${encodeURIComponent(selectedColumns.join(','))}`;
-            }
+            if (selectedColumns.length > 0) url += `&columns=${encodeURIComponent(selectedColumns.join(','))}`;
             if (search) {
                 url += `&search=${encodeURIComponent(search)}`;
                 if (searchCol) url += `&search_col=${encodeURIComponent(searchCol)}`;
             }
 
+            setLoading(true);
             try {
                 const res = await fetch(url);
+                if (!res.ok) { setLoading(false); showError(`请求失败: HTTP ${res.status}`); return; }
                 const data = await res.json();
+                lastData = data;
                 renderTable(data);
             } catch (e) {
-                console.error('Failed to load data:', e);
+                showError(`加载失败: ${e.message}`);
+            } finally {
+                setLoading(false);
             }
         }
 
+        // ── Sorting ───────────────────────────────────────────────────
+        function sortByColumn(col) {
+            if (sortCol === col) {
+                sortDir = sortDir === 'asc' ? 'desc' : sortDir === 'desc' ? null : 'asc';
+                if (!sortDir) sortCol = null;
+            } else {
+                sortCol = col;
+                sortDir = 'asc';
+            }
+            if (lastData) renderTable(lastData);
+        }
+
+        function getSortIndicator(col) {
+            if (sortCol !== col) return '';
+            return sortDir === 'asc' ? ' ▲' : ' ▼';
+        }
+
+        function getSortedRows(rows) {
+            if (!sortCol || !sortDir) return rows;
+            const copy = [...rows];
+            copy.sort((a, b) => {
+                let va = a[sortCol], vb = b[sortCol];
+                if (va == null && vb == null) return 0;
+                if (va == null) return 1;
+                if (vb == null) return -1;
+                if (typeof va === 'number' && typeof vb === 'number') return sortDir === 'asc' ? va - vb : vb - va;
+                va = String(va); vb = String(vb);
+                return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+            });
+            return copy;
+        }
+
+        // ── Render ────────────────────────────────────────────────────
         function escapeHtml(str) {
             if (str === null || str === undefined) return '<span class="text-gray-400">NULL</span>';
             const s = String(str);
-            if (s.length > 200) return s.substring(0, 200) + '...';
             return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        function cellDisplay(val, col, row) {
+            if (val === null || val === undefined) return '<span class="text-gray-400">NULL</span>';
+            if (col === 'embedding' && Array.isArray(val)) return `<span class="text-blue-600 text-xs">[${val.length}维向量]</span>`;
+            if (col === 'image_data' && typeof val === 'object' && val && val.has_image) {
+                const sid = (row && row['sample_id']) || '';
+                const kb = (val.size / 1024).toFixed(1);
+                return `<a href="javascript:void(0)" onclick="showImage('${sid}')" class="text-blue-600 underline text-xs cursor-pointer">${kb}KB</a>`;
+            }
+            if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+                const s = JSON.stringify(val);
+                const truncated = s.length > 200;
+                return truncated
+                    ? `<span class="text-xs text-gray-500">${escapeHtml(s.substring(0, 200))}...<button class="ml-1 text-blue-500 hover:underline text-xs" onclick="expandCell(this, '${encodeURIComponent(s)}')">展开</button></span>`
+                    : `<span class="text-xs text-gray-500">${escapeHtml(s)}</span>`;
+            }
+            const s = String(val);
+            const truncated = s.length > 200;
+            return truncated
+                ? `<span class="text-sm text-gray-700">${escapeHtml(s.substring(0, 200))}<button class="ml-1 text-blue-500 hover:underline text-xs" onclick="expandCell(this, '${encodeURIComponent(s)}')">展开</button></span>`
+                : escapeHtml(s);
+        }
+
+        function expandCell(btn, encoded) {
+            const full = decodeURIComponent(encoded);
+            btn.parentElement.innerHTML = escapeHtml(full);
         }
 
         function renderTable(data) {
             totalPages = data.total_pages || 1;
             const columns = data.columns || [];
-            const rows = data.data || [];
+            let rows = data.data || [];
+            rows = getSortedRows(rows);
 
-            // Header
             const thead = document.getElementById('table-head');
             thead.innerHTML = '<tr>' +
                 '<th class="px-3 py-2 text-xs font-medium text-gray-500 uppercase whitespace-nowrap">#</th>' +
-                columns.map(c => `<th class="px-3 py-2 text-xs font-medium text-gray-500 uppercase whitespace-nowrap cursor-pointer hover:text-blue-600" onclick="sortByColumn('${c}')" title="${c}">${c}</th>`).join('') +
+                columns.map(c => {
+                    const indicator = getSortIndicator(c);
+                    return `<th class="px-3 py-2 text-xs font-medium text-gray-500 uppercase whitespace-nowrap cursor-pointer hover:text-blue-600 select-none" onclick="sortByColumn('${c}')" title="${c}">${c}${indicator}</th>`;
+                }).join('') +
                 '</tr>';
 
-            // Body
             const tbody = document.getElementById('table-body');
             if (rows.length === 0) {
-                tbody.innerHTML = '<tr><td class="px-4 py-8 text-center text-gray-400" colspan="' + (columns.length + 1) + '">无数据</td></tr>';
+                tbody.innerHTML = `<tr><td class="px-4 py-8 text-center text-gray-400" colspan="${columns.length + 1}">无数据</td></tr>`;
             } else {
                 const startIdx = (data.page - 1) * data.page_size;
                 const isElement = currentDataset === 'element';
@@ -263,44 +449,33 @@
                         actionCell = `<td class="px-2 py-1"><button onclick="showElementViz('${row['sample_id']}', ${row['block_idx'] || 0})" class="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">查看</button></td>`;
                     }
                     return '<tr class="hover:bg-gray-50">' +
-                    '<td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">' + (startIdx + i + 1) + '</td>' +
-                    columns.map(col => {
-                        const val = row[col];
-                        let cls = 'px-3 py-2 text-sm text-gray-700 max-w-[300px] truncate';
-                        let display = escapeHtml(val);
-                        if (col === 'embedding' && Array.isArray(val)) {
-                            display = `<span class="text-blue-600 text-xs">[${val.length}维向量]</span>`;
-                        } else if (col === 'image_data' && val && typeof val === 'object' && val.has_image) {
-                            const sid = row['sample_id'] || '';
-                            const kb = (val.size / 1024).toFixed(1);
-                            display = `<a href="javascript:void(0)" onclick="showImage('${sid}')" class="text-blue-600 underline text-xs cursor-pointer">${kb}KB</a>`;
-                        } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
-                            display = `<span class="text-xs text-gray-500">${escapeHtml(JSON.stringify(val))}</span>`;
-                        }
-                        return `<td class="${cls}" title="${escapeHtml(typeof val === 'object' ? JSON.stringify(val) : val)}">${display}</td>`;
-                    }).join('') +
+                    `<td class="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">${startIdx + i + 1}</td>` +
+                    columns.map(col => `<td class="px-3 py-2 text-sm text-gray-700 max-w-[300px] truncate" title="${escapeHtml(typeof row[col] === 'object' ? JSON.stringify(row[col]) : row[col])}">${cellDisplay(row[col], col, row)}</td>`).join('') +
                     actionCell +
                     '</tr>';
                 }).join('');
             }
 
-            // Pagination
             document.getElementById('pagination').classList.remove('hidden');
             document.getElementById('btn-prev').disabled = currentPage <= 1;
             document.getElementById('btn-next').disabled = currentPage >= totalPages;
             document.getElementById('page-label').textContent = `第 ${data.page} / ${totalPages} 页`;
 
-            // Info badge
             const badge = document.getElementById('info-badge');
             const verLabel = data.version ? ` (v${data.version})` : '';
             badge.textContent = `共 ${data.total} 条${verLabel}`;
             badge.classList.remove('hidden');
         }
 
-        document.getElementById('version-select').addEventListener('change', function() {
-            currentPage = 1;
-            loadData();
-        });
+        function resetTable() {
+            document.getElementById('version-wrapper').classList.add('hidden');
+            document.getElementById('column-filter').classList.add('hidden');
+            document.getElementById('pagination').classList.add('hidden');
+            document.getElementById('table-head').innerHTML = '<tr><th class="px-4 py-3 text-xs font-medium text-gray-500 uppercase">请先选择批次</th></tr>';
+            document.getElementById('table-body').innerHTML = '<tr><td class="px-4 py-8 text-center text-gray-400">请选择批次加载数据</td></tr>';
+            document.getElementById('info-badge').classList.add('hidden');
+            lastData = null;
+        }
 
         function goPage(p) {
             if (p < 1 || p > totalPages) return;
@@ -308,34 +483,13 @@
             loadData();
         }
 
-        function changePageSize() {
-            currentPage = 1;
-            loadData();
-        }
-
-        function sortByColumn(col) {
-            // Re-fetch with current search but this column as search column, just re-select it
-            const sc = document.getElementById('search-column');
-            sc.value = col;
-        }
-
-        document.getElementById('search-input').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
-                currentPage = 1;
-                loadData();
-            }
-        });
-
-        document.addEventListener('DOMContentLoaded', init);
-
+        // ── Image Modal ───────────────────────────────────────────────
         function showImage(sampleId) {
             const verParam = currentVersion ? `?version=${currentVersion}` : '';
             const url = `/api/lancedb/${currentSourceId}/${currentBatchId}/image/${sampleId}${verParam}`;
             const modal = document.getElementById('image-modal');
-            const img = document.getElementById('modal-image');
-            const label = document.getElementById('modal-label');
-            img.src = url;
-            label.textContent = sampleId;
+            document.getElementById('modal-image').src = url;
+            document.getElementById('modal-label').textContent = sampleId;
             modal.classList.remove('hidden');
             modal.classList.add('flex');
         }
@@ -347,7 +501,7 @@
             document.getElementById('modal-image').src = '';
         }
 
-        // 可视化：图片 + bbox 叠加
+        // ── Element Viz Modal ─────────────────────────────────────────
         const BLOCK_COLORS = {
             text: {stroke:'#3b82f6', fill:'rgba(59,130,246,0.15)'},
             table: {stroke:'#ef4444', fill:'rgba(239,68,68,0.15)'},
@@ -369,37 +523,30 @@
             modal.classList.add('flex');
 
             try {
-                // 1. 获取整页图片（返回原始字节）
                 const imgRes = await fetch(`/api/lancedb/${currentSourceId}/${currentBatchId}/image/${sampleId}?dataset=ingest`);
                 if (!imgRes.ok) { body.innerHTML = '<div class="text-red-500 p-8">图片加载失败</div>'; return; }
                 const imgBuf = await imgRes.arrayBuffer();
-                const bytes = new Uint8Array(imgBuf);
-                let binary = '';
-                for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-                const imgBase64 = btoa(binary);
+                const blob = new Blob([imgBuf], {type: 'image/jpeg'});
+                const imgUrl = URL.createObjectURL(blob);
 
-                // 2. 获取该 sample 的所有 block
                 const blkRes = await fetch(`/api/lancedb/${currentSourceId}/${currentBatchId}/data?page=1&page_size=200&dataset=element&search=${sampleId}&search_col=sample_id`);
                 const blkData = await blkRes.json();
                 const blocks = (blkData.data || []).filter(b => b.sample_id === sampleId);
                 if (!blocks.length) { body.innerHTML = '<div class="text-gray-400 p-8">无 block 数据</div>'; return; }
 
-                // 3. 加载图片并裁剪每个 block
                 const img = new Image();
                 img.onload = function() {
                     let html = `<div class="text-sm font-medium mb-3">${sampleId} — ${blocks.length} blocks</div>`;
                     html += '<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">';
 
-                    blocks.forEach((b, i) => {
+                    blocks.forEach(b => {
                         let bbox = b.bbox_json;
                         if (typeof bbox === 'string') bbox = JSON.parse(bbox);
                         if (!bbox || bbox.length < 4) return;
-
                         const [x1, y1, x2, y2] = bbox.map(v => Math.round(v));
                         const w = x2 - x1, h = y2 - y1;
                         if (w <= 0 || h <= 0) return;
 
-                        // 裁剪 block 图片
                         const cropCanvas = document.createElement('canvas');
                         cropCanvas.width = w;
                         cropCanvas.height = h;
@@ -414,7 +561,7 @@
                             <div class="flex gap-3">
                                 <div class="flex-shrink-0">
                                     <img src="${cropDataUrl}" class="max-w-[280px] max-h-[200px] object-contain border rounded" />
-                                    <div class="text-xs text-gray-400 mt-1">${w}×${h}px</div>
+                                    <div class="text-xs text-gray-400 mt-1">${w}x${h}px</div>
                                 </div>
                                 <div class="flex-1 min-w-0 space-y-2">
                                     <div class="flex items-center gap-2">
@@ -423,18 +570,9 @@
                                         ${b.consistency_pattern ? `<span class="text-xs px-1.5 py-0.5 rounded ${b.consistency_pattern === 'all_agree' ? 'bg-green-100 text-green-700' : b.consistency_pattern === 'partial_agree' ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}">${b.consistency_pattern}</span>` : ''}
                                     </div>
                                     <div class="space-y-1.5 text-xs">
-                                        <div class="bg-blue-50 rounded p-2">
-                                            <div class="text-blue-600 font-medium mb-0.5">PaddleOCR VL</div>
-                                            <div class="text-gray-700 break-words">${b.paddle_text || '<span class="text-gray-300">空</span>'}</div>
-                                        </div>
-                                        <div class="bg-green-50 rounded p-2">
-                                            <div class="text-green-600 font-medium mb-0.5">GLM OCR</div>
-                                            <div class="text-gray-700 break-words">${b.glm_text || '<span class="text-gray-300">空</span>'}</div>
-                                        </div>
-                                        <div class="bg-purple-50 rounded p-2">
-                                            <div class="text-purple-600 font-medium mb-0.5">自研 OCR</div>
-                                            <div class="text-gray-700 break-words">${b.self_text || '<span class="text-gray-300">空</span>'}</div>
-                                        </div>
+                                        <div class="bg-blue-50 rounded p-2"><div class="text-blue-600 font-medium mb-0.5">PaddleOCR VL</div><div class="text-gray-700 break-words">${b.paddle_text || '<span class="text-gray-300">空</span>'}</div></div>
+                                        <div class="bg-green-50 rounded p-2"><div class="text-green-600 font-medium mb-0.5">GLM OCR</div><div class="text-gray-700 break-words">${b.glm_text || '<span class="text-gray-300">空</span>'}</div></div>
+                                        <div class="bg-purple-50 rounded p-2"><div class="text-purple-600 font-medium mb-0.5">自研 OCR</div><div class="text-gray-700 break-words">${b.self_text || '<span class="text-gray-300">空</span>'}</div></div>
                                     </div>
                                 </div>
                             </div>
@@ -443,8 +581,9 @@
 
                     html += '</div>';
                     body.innerHTML = html;
+                    URL.revokeObjectURL(imgUrl);
                 };
-                img.src = `data:image/jpeg;base64,${imgBase64}`;
+                img.src = imgUrl;
             } catch(e) {
                 body.innerHTML = `<div class="text-red-500 p-8">加载失败: ${e.message}</div>`;
             }
@@ -455,6 +594,8 @@
             modal.classList.add('hidden');
             modal.classList.remove('flex');
         }
+
+        document.addEventListener('DOMContentLoaded', init);
     </script>
 
     <!-- Element Visualization Modal -->
