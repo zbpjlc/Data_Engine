@@ -3365,7 +3365,43 @@
                 // 4. 加载已有 Per-Cluster Sampling 结果
                 loadExistingEcsResults();
 
-                // 5. 加载 Page_index 统计
+                // 5. 加载已有 Difficulty Sampling 结果
+                if (batchData.length > 0) {
+                    const first = batchData[0];
+                    fetch(`/api/bucket-samples-difficulty/${first.source_id}/${first.batch_id}`)
+                        .then(r => r.ok ? r.json() : null)
+                        .then(data => {
+                            if (data && data.total_sampled > 0) {
+                                showElemDiffSampling(true);
+                                // 复用 edsBtn click handler 中的渲染逻辑
+                                const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
+                                for (const [partKey, stats] of Object.entries(data.bucket_diff_stats || {})) {
+                                    const t = stats.tier || 'medium';
+                                    if (!tierAgg[t]) continue;
+                                    tierAgg[t].sampled += stats.sampled || 0;
+                                    tierAgg[t].total += stats.total || 0;
+                                }
+                                const ts = data.total_sampled || 0;
+                                let html = `<div class="font-medium mb-2">总计抽样: <b>${ts.toLocaleString()}</b> blocks</div>`;
+                                html += '<div class="grid grid-cols-3 gap-2">';
+                                for (const [tier, info] of Object.entries(tierAgg)) {
+                                    const color = tier === 'easy' ? 'green' : tier === 'medium' ? 'yellow' : 'red';
+                                    const pct = ts > 0 ? (info.sampled / ts * 100).toFixed(1) : 0;
+                                    html += `<div class="bg-${color}-50 border rounded p-2 text-center text-xs">
+                                        <div class="text-${color}-700 font-medium">${tier}</div>
+                                        <div>${info.sampled.toLocaleString()}/${info.total.toLocaleString()}</div>
+                                        <div class="text-gray-500">占输出 ${pct}%</div>
+                                    </div>`;
+                                }
+                                html += '</div>';
+                                document.getElementById('eds-summary').innerHTML = html;
+                                edsResults.classList.remove('hidden');
+                                edsEmpty.classList.add('hidden');
+                            }
+                        }).catch(() => {});
+                }
+
+                // 6. 加载 Page_index 统计
                 const idxSrc = getSourceId();
                 const idxBid = getBatchId() || (batchData.length > 0 ? batchData[0].batch_id : '');
                 if (idxSrc && idxBid) {
