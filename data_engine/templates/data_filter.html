@@ -3322,15 +3322,23 @@
                 // 4. 检查 Per-Cluster Sampling 是否已有数据
                 if (batchData.length > 0) {
                     batchData.forEach(b => {
-                        fetch(`/api/element-samples/${b.source_id}/${b.batch_id}`)
+                        fetch(`/api/element-sample/${b.source_id}/${b.batch_id}`)
                             .then(r => r.ok ? r.json() : null)
                             .then(data => {
-                                if (data && data.total_sampled > 0) {
+                                if (data && data.status === 'completed' && data.total_sampled > 0) {
                                     document.getElementById('ecs-results')?.classList.remove('hidden');
                                     document.getElementById('ecs-empty')?.classList.add('hidden');
+                                    setTabBadge('el-cluster', '✅');
                                 }
                             }).catch(() => {});
                     });
+                }
+
+                // 5. 加载 Page_index 统计
+                const idxSrc = getSourceId();
+                const idxBid = getBatchId() || (batchData.length > 0 ? batchData[0].batch_id : '');
+                if (idxSrc && idxBid) {
+                    loadIndexStats(idxSrc, idxBid);
                 }
             }, 100);
         })();

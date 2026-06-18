@@ -3366,6 +3366,26 @@ async def element_sample(source_id: str, batch_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/element-sample/{source_id}/{batch_id}")
+async def get_element_sample_status(source_id: str, batch_id: str):
+    """获取已有抽样结果状态。"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        out_path = batch_dir / "artifacts" / "element_samples.json"
+        if not out_path.exists():
+            return {"status": "not_started", "total_sampled": 0}
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        return {
+            "status": "completed",
+            "per_cluster": data.get("per_cluster", 0),
+            "summary": data.get("summary", {}),
+            "total_sampled": data.get("total_sampled", sum(s.get("sampled", 0) for s in data.get("summary", {}).values())),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/element-ocr/{source_id}/{batch_id}")
 async def element_ocr(source_id: str, batch_id: str, request: Request,
                       model: str = "paddleocr", test_mode: bool = False,
