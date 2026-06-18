@@ -2106,26 +2106,26 @@ async def get_difficulty_aware_samples(
             return {"source_id": source_id, "batch_id": batch_id,
                     "error": "无数据", "bucket_count": 0, "total_sampled": 0, "buckets": {}}
 
-        # 根据目标占比计算每个分区的抽样数
-        # 总目标采样数 = grand_total * max_ratio / 100（保证最高比例的层级不超采）
-        # 然后按目标占比分配各层级的采样数
-        total_target = grand_total
-        tier_target = {}  # 每个层级的目标采样数
-        for tier_name in ["easy", "medium", "hard"]:
-            pct = ratio_map.get(tier_name, 0)
-            tier_target[tier_name] = max(0, int(total_target * pct / 100))
-
-        # 如果某层级没有数据但有目标，重新分配给有数据的层级
+        # 根据目标占比计算每个层级的采样数
+        # 先归一化占比（确保总和=100%），没有数据的层级占比重新分配
+        raw_pcts = {t: ratio_map.get(t, 0) for t in ["easy", "medium", "hard"]}
         active_tiers = [t for t in ["easy", "medium", "hard"] if tier_totals[t] > 0]
-        zero_tiers = [t for t in ["easy", "medium", "hard"] if tier_totals[t] == 0 and tier_target[t] > 0]
-        if zero_tiers and active_tiers:
-            redistributed = sum(tier_target[t] for t in zero_tiers)
+        zero_tiers = [t for t in ["easy", "medium", "hard"] if tier_totals[t] == 0]
+        if zero_tiers:
+            active_raw = sum(raw_pcts[t] for t in active_tiers)
             for t in zero_tiers:
-                tier_target[t] = 0
-            # 按现有占比分配给有数据的层级
-            active_total = sum(tier_totals[t] for t in active_tiers)
-            for t in active_tiers:
-                tier_target[t] += int(redistributed * tier_totals[t] / active_total) if active_total > 0 else 0
+                raw_pcts[t] = 0
+            if active_raw > 0:
+                for t in active_tiers:
+                    raw_pcts[t] = raw_pcts[t] / active_raw * 100
+            elif active_tiers:
+                for t in active_tiers:
+                    raw_pcts[t] = 100 / len(active_tiers)
+
+        tier_target = {}
+        for tier_name in ["easy", "medium", "hard"]:
+            pct = raw_pcts.get(tier_name, 0)
+            tier_target[tier_name] = max(0, int(grand_total * pct / 100))
 
         buckets = {}
         bucket_diff_stats = {}
