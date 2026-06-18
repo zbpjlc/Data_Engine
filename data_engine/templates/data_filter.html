@@ -1144,6 +1144,8 @@
                         const toFetch = filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                         if (toFetch.length > 0) loadEcResultsAggregated(toFetch);
                     }
+                    // 加载已有 Per-Cluster Sampling 结果
+                    loadExistingEcsResults();
                 }
             });
         });
@@ -3273,6 +3275,47 @@
         }
 
         // ── 页面加载时初始化 Element OCR / CMCV / 聚类已有状态 ──────────────
+        // 加载已有 Per-Cluster Sampling 结果（从 element_samples.json）
+        function loadExistingEcsResults() {
+            const targets = batchData.length > 0
+                ? batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}))
+                : [];
+            if (targets.length === 0) return;
+            Promise.all(targets.map(b =>
+                fetch(`/api/element-sample/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`)
+                    .then(r => r.ok ? r.json() : null).catch(() => null)
+            )).then(results => {
+                const completed = results.filter(r => r && r.status === 'completed' && r.total_sampled > 0);
+                if (completed.length === 0) return;
+                // 聚合
+                const agg = {};
+                for (const cat of ['text', 'formula', 'table']) {
+                    let sampled = 0, clusters = 0; const details = [];
+                    completed.forEach(r => {
+                        const s = r.summary?.[cat]; if (!s) return;
+                        sampled += s.sampled || 0; clusters += s.clusters || 0;
+                        (s.details || []).forEach(d => details.push(d));
+                    });
+                    agg[cat] = {sampled, clusters, details};
+                }
+                document.getElementById('ecs-results')?.classList.remove('hidden');
+                document.getElementById('ecs-empty')?.classList.add('hidden');
+                document.getElementById('ecs-text-count').textContent = agg.text.sampled.toLocaleString();
+                document.getElementById('ecs-formula-count').textContent = agg.formula.sampled.toLocaleString();
+                document.getElementById('ecs-table-count').textContent = agg.table.sampled.toLocaleString();
+                let html = '';
+                for (const cat of ['text', 'formula', 'table']) {
+                    if (agg[cat].details.length > 0) {
+                        html += `<div class="mb-2"><b class="text-gray-700">${cat}</b>: `;
+                        html += agg[cat].details.map(d => `Cluster${d.cluster_id}: ${d.sampled}/${d.total}`).join(', ');
+                        html += `</div>`;
+                    }
+                }
+                document.getElementById('ecs-detail').innerHTML = html;
+                setTabBadge('el-cluster', '✅');
+            });
+        }
+
         (function initAllElementState() {
             // 等 filterBatches() 同步完成后执行
             setTimeout(() => {
@@ -3319,47 +3362,8 @@
                     });
                 }
 
-                // 4. 检查 Per-Cluster Sampling 是否已有数据
-                if (batchData.length > 0) {
-                    const ecsPromises = batchData.map(b =>
-                        fetch(`/api/element-sample/${b.source_id}/${b.batch_id}`)
-                            .then(r => r.ok ? r.json() : null)
-                            .catch(() => null)
-                    );
-                    Promise.all(ecsPromises).then(results => {
-                        const completed = results.filter(r => r && r.status === 'completed' && r.total_sampled > 0);
-                        if (completed.length === 0) return;
-                        document.getElementById('ecs-results')?.classList.remove('hidden');
-                        document.getElementById('ecs-empty')?.classList.add('hidden');
-                        setTabBadge('el-cluster', '✅');
-                        // 聚合所有批次 summary
-                        const agg = {};
-                        for (const cat of ['text', 'formula', 'table']) {
-                            let sampled = 0, clusters = 0;
-                            const details = [];
-                            completed.forEach(r => {
-                                const s = r.summary?.[cat];
-                                if (!s) return;
-                                sampled += s.sampled || 0;
-                                clusters += s.clusters || 0;
-                                (s.details || []).forEach(d => details.push(d));
-                            });
-                            agg[cat] = {sampled, clusters, details};
-                        }
-                        document.getElementById('ecs-text-count').textContent = agg.text.sampled.toLocaleString();
-                        document.getElementById('ecs-formula-count').textContent = agg.formula.sampled.toLocaleString();
-                        document.getElementById('ecs-table-count').textContent = agg.table.sampled.toLocaleString();
-                        let detailHtml = '';
-                        for (const cat of ['text', 'formula', 'table']) {
-                            if (agg[cat].details.length > 0) {
-                                detailHtml += `<div class="mb-2"><b class="text-gray-700">${cat}</b>: `;
-                                detailHtml += agg[cat].details.map(d => `Cluster${d.cluster_id}: ${d.sampled}/${d.total}`).join(', ');
-                                detailHtml += `</div>`;
-                            }
-                        }
-                        document.getElementById('ecs-detail').innerHTML = detailHtml;
-                    });
-                }
+                // 4. 加载已有 Per-Cluster Sampling 结果
+                loadExistingEcsResults();
 
                 // 5. 加载 Page_index 统计
                 const idxSrc = getSourceId();
