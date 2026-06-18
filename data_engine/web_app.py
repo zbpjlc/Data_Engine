@@ -1480,6 +1480,8 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                 new_diffs.append(diff_map.get(key, diffs[i]))
                             import pyarrow as pa
                             update_table = pa.table({
+                                "sample_id": pa.array(sids, type=pa.large_string()),
+                                "block_idx": pa.array(bidxs, type=pa.int32()),
                                 "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
                                 "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
                             })
