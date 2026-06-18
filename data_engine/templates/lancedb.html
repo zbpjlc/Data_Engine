@@ -419,8 +419,9 @@
             if (col === 'embedding' && Array.isArray(val)) return `<span class="text-blue-600 text-xs">[${val.length}维向量]</span>`;
             if (col === 'image_data' && typeof val === 'object' && val && val.has_image) {
                 const sid = (row && row['sample_id']) || '';
+                const bidx = (row && row['block_idx'] != null) ? row['block_idx'] : '';
                 const kb = (val.size / 1024).toFixed(1);
-                return `<a href="javascript:void(0)" onclick="showImage('${sid}')" class="text-blue-600 underline text-xs cursor-pointer">${kb}KB</a>`;
+                return `<a href="javascript:void(0)" onclick="showImage('${sid}', ${bidx})" class="text-blue-600 underline text-xs cursor-pointer">${kb}KB</a>`;
             }
             if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
                 const s = JSON.stringify(val);
@@ -503,9 +504,11 @@
         }
 
         // ── Image Modal ───────────────────────────────────────────────
-        function showImage(sampleId) {
-            const verParam = currentVersion ? `?version=${currentVersion}` : '';
-            const url = `/api/lancedb/${currentSourceId}/${currentBatchId}/image/${sampleId}${verParam}`;
+        function showImage(sampleId, blockIdx) {
+            const verParam = currentVersion ? `&version=${currentVersion}` : '';
+            const dsParam = `&dataset=${currentDataset}`;
+            const bidxParam = blockIdx != null && blockIdx !== '' ? `&block_idx=${blockIdx}` : '';
+            const url = `/api/lancedb/${currentSourceId}/${currentBatchId}/image/${sampleId}?${dsParam.substring(1)}${verParam}${bidxParam}`;
             const modal = document.getElementById('image-modal');
             document.getElementById('modal-image').src = url;
             document.getElementById('modal-label').textContent = sampleId;

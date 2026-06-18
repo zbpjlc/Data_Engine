@@ -1198,16 +1198,45 @@ async def lancedb_query_data(
 
 
 @app.get("/api/lancedb/{source_id}/{batch_id}/image/{sample_id}")
-async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, version: int = None, dataset: str = "ingest"):
-    """获取样本图片（始终从 ingest.lance 读取 image_data）"""
+async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, version: int = None, dataset: str = "ingest", block_idx: int = None):
+    """获取样本图片。
+    - ingest/element: 从 ingest.lance 读整页图
+    - text/formula/table: 优先从 category lance 读裁剪后的 block 图（需 block_idx），
+      若无则 fallback 到 ingest.lance
+    """
     try:
         source_config = registry.get(source_id)
         batch_dir = source_config.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
-        # 图片始终从 ingest.lance 读取
-        manifest_path = find_stage_manifest(manifests_dir, "ingest")
-        if not manifest_path or manifest_path.suffix != ".lance":
-            raise HTTPException(status_code=404, detail="ingest.lance 不存在")
+
+        image_bytes = None
+
+        # text/formula/table: 尝试从 category lance 读裁剪后的 block 图
+        if dataset in ("text", "formula", "table"):
+            cat_path = find_stage_manifest(manifests_dir, dataset)
+            if cat_path and cat_path.suffix == ".lance" and cat_path.exists():
+                try:
+                    with _lance_write_lock:
+                        ds = lance.dataset(str(cat_path))
+                        if version:
+                            ds = ds.checkout_version(version)
+                        cols = ["sample_id", "image_data"]
+                        if "block_idx" in ds.schema.names:
+                            cols.append("block_idx")
+                        flt = f"sample_id = '{sample_id}'"
+                        if block_idx is not None and "block_idx" in ds.schema.names:
+                            flt += f" AND block_idx = {block_idx}"
+                        tbl = ds.to_table(columns=cols, filter=flt)
+                        if tbl.num_rows > 0 and tbl.column("image_data")[0].as_py() is not None:
+                            image_bytes = tbl.column("image_data")[0].as_py()
+                except Exception:
+                    pass
+
+        # fallback: 从 ingest.lance 读整页图
+        if image_bytes is None:
+            manifest_path = find_stage_manifest(manifests_dir, "ingest")
+            if not manifest_path or manifest_path.suffix != ".lance":
+                raise HTTPException(status_code=404, detail="ingest.lance 不存在")
 
         with _lance_write_lock:
             if version:
