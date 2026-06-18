@@ -3503,6 +3503,27 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 save_interval = int(get_config("ocr", "save_interval", default=20))
                 pending_rows: dict[str, list[dict]] = {"text": [], "formula": [], "table": []}
 
+                # test_mode: 预加载所有 category lance 的 paddle/glm 结果作为 ref_map
+                _test_ref_map: dict[tuple[str, int], dict] = {}
+                if use_test_mode:
+                    for _cat, _lp in cat_paths:
+                        try:
+                            _ds = lance.dataset(_lp)
+                            _cols_needed = ["sample_id", "block_idx"]
+                            for _col in ("paddle_text", "glm_text", "paddle_table", "glm_table", "paddle_formula", "glm_formula"):
+                                if _col in _ds.schema.names:
+                                    _cols_needed.append(_col)
+                            if len(_cols_needed) > 2:
+                                for _batch in _ds.to_table(columns=_cols_needed).to_batches():
+                                    for _row in _batch.to_pylist():
+                                        _key = (_row["sample_id"], _row["block_idx"])
+                                        _ref = {k: v for k, v in _row.items() if k not in ("sample_id", "block_idx")}
+                                        _test_ref_map[_key] = _ref
+                        except Exception as _e:
+                            print(f"[el-ocr] test_mode 加载 {_cat} ref_map 失败: {_e}", file=sys.stderr)
+                    if _test_ref_map:
+                        print(f"[el-ocr] test_mode: 加载 {len(_test_ref_map)} 条 ref_map", file=sys.stderr)
+
                 # 阶段 2：按类别流式处理，逐批读取并处理
                 for cat, lp_str in cat_paths:
                     if progress_tracker.is_stopped(task_id):
@@ -3584,6 +3605,11 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                 bbox=[0, 0, _w, _h],
                                 confidence=row.get("layout_confidence", 1.0),
                             )
+                            if use_test_mode:
+                                # idx 在 _recognize_test_mode 中是 regions 列表下标（始终=0），
+                                # 需要把实际 block_idx 的数据映射到 key=(sample_id, 0)
+                                _single_ref = {(sid, 0): _test_ref_map.get((sid, bidx), {})}
+                                engine.set_test_context(sid, _single_ref)
                             try:
                                 results = engine.recognize_regions(tmp_path, [region])
                                 r = results[0] if results else None
