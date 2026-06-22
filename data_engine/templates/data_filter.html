@@ -3383,6 +3383,7 @@
                         document.getElementById('ecmcv-detail').textContent = `共 ${valid.length} 个批次, ${totalBlocks} blocks`;
                         document.getElementById('ecmcv-results').classList.remove('hidden');
                         document.getElementById('ecmcv-empty')?.classList.add('hidden');
+                        console.log('[CMCV init] aggregated:', aggHist, 'totalBlocks:', totalBlocks, 'batches:', valid.length);
                     });
                 }
 
