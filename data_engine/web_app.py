@@ -1405,8 +1405,6 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                     # 收集所有 batch 的抽样列表
                     sample_keys = set()
                     for b in global_status.batches:
-                        if source_id and b.source_id != source_id:
-                            continue
                         try:
                             sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
                             if sp.exists():
