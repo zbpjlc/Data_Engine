@@ -1956,43 +1956,41 @@ async def get_bucket_samples_batch(request: Request, full: bool = False):
 async def get_difficulty_aware_samples(
     source_id: str,
     batch_id: str,
-    base_count: int | None = None,
     easy_ratio: float | None = None,
     medium_ratio: float | None = None,
     hard_ratio: float | None = None,
     force: bool = False,
 ):
-    """难度感知抽样。比例是占分区向量数的百分比，如 0.5 = 0.5%。"""
-    if base_count is None:
-        base_count = int(get_config("ocr", "sampling", "base_count", default=10))
-    if easy_ratio is None:
-        easy_ratio = float(get_config("ocr", "sampling", "easy_ratio", default=0.5))
-    if medium_ratio is None:
-        medium_ratio = float(get_config("ocr", "sampling", "medium_ratio", default=1.0))
-    if hard_ratio is None:
-        hard_ratio = float(get_config("ocr", "sampling", "hard_ratio", default=2.0))
-    """难度感知抽样：先按分区抽样判难度，再按难度比例从分区中抽样。
+    """基于 Element Clustering + CMCV 的难度抽样。
 
-    ratio 含义：占该分区向量数的千分比（‰）。
-    例：easy_ratio=0.3 → 从 easy 分区抽 0.3% 的向量
-        medium_ratio=1.0 → 从 medium 分区抽 1.0%
-        hard_ratio=2.0 → 从 hard 分区抽 2.0%
+    流程：
+    1. 读取 element_clusters.json 获取每个 block 的 cluster_id
+    2. 从 text/formula/table.lance 读取 consistency_pattern（CMCV 结果）
+    3. 统计每个 cluster 的 easy/medium/hard 分布
+    4. 根据用户指定的比例，从各 cluster 中按难度抽样
+
+    ratio 含义：从该难度层级中抽取的百分比。
     """
-    import random
+    if easy_ratio is None:
+        easy_ratio = float(get_config("ocr", "sampling", "easy_ratio", default=50))
+    if medium_ratio is None:
+        medium_ratio = float(get_config("ocr", "sampling", "medium_ratio", default=35))
+    if hard_ratio is None:
+        hard_ratio = float(get_config("ocr", "sampling", "hard_ratio", default=15))
+
+    ratio_map = {"easy": easy_ratio, "medium": medium_ratio, "hard": hard_ratio}
+
     try:
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
-        manifest_path = find_stage_manifest(manifests_dir, "ingest")
-        if not manifest_path:
-            raise HTTPException(status_code=404, detail="ingest manifest 不存在")
 
+        # 检查缓存
         cache_path = batch_dir / "artifacts" / "bucket_samples.json"
-
         if not force and cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
-                if cached.get("base_count") == base_count:
+                if cached.get("strategy") == "element_cluster":
                     cached_ratios = cached.get("ratios", {})
                     if (float(cached_ratios.get("easy", 0)) == easy_ratio and
                         float(cached_ratios.get("medium", 0)) == medium_ratio and
@@ -2001,174 +1999,172 @@ async def get_difficulty_aware_samples(
             except Exception:
                 pass
 
-        with _lance_write_lock:
-            ds = lance.dataset(str(manifest_path))
+        # 1. 读取 element_clusters.json
+        clusters_path = batch_dir / "artifacts" / "element_clusters.json"
+        if not clusters_path.exists():
+            raise HTTPException(status_code=400, detail="未找到 Element 聚类结果，请先运行 Element Clustering")
 
-            indices = ds.list_indices()
-            index_name = None
-            for idx in indices:
-                name = idx.get("name", "") if isinstance(idx, dict) else getattr(idx, "name", "")
-                if name:
-                    index_name = name
-                    break
+        clusters_data = json.loads(clusters_path.read_text(encoding="utf-8"))
 
-            if not index_name:
-                return {
-                    "source_id": source_id, "batch_id": batch_id,
-                    "error": "未找到向量索引，请先构建索引",
-                    "bucket_count": 0, "total_sampled": 0, "buckets": {},
-                }
+        # 2. 从 text/formula/table.lance 读取 consistency_pattern
+        # 构建 block → tier 映射（由 CMCV 产生）
+        # consistency_pattern: all_agree→easy, partial_agree→medium, all_disagree→hard
+        PATTERN_TIER = {"all_agree": "easy", "partial_agree": "medium", "all_disagree": "hard"}
 
-            stats = ds.index_statistics(index_name)
-            indices_data = stats.get("indices", [{}])
-            partitions = indices_data[0].get("partitions", []) if indices_data else []
-            centroids = indices_data[0].get("centroids", []) if indices_data else []
+        block_tiers: dict[str, str] = {}  # "sample_id:block_idx" → tier
+        block_cluster: dict[str, int] = {}  # "sample_id:block_idx" → cluster_id
 
-            # ── 第一步：从每个分区抽 base_count 个，判定分区难度 ──────────────
-            ratio_map = {"easy": easy_ratio, "medium": medium_ratio, "hard": hard_ratio}
-            bucket_sizes = {}
-            partition_tiers = {}  # P{i} -> easy/medium/hard
-            all_probe_ids = []
+        for cat in ("text", "formula", "table"):
+            cat_info = clusters_data.get(cat, {})
+            labels_map = cat_info.get("labels", {})  # "sample_id:block_idx" → cluster_id
+            if not labels_map:
+                continue
 
-            for i, part_info in enumerate(partitions):
-                part_size = part_info.get("size", 0)
-                bucket_sizes[f"P{i}"] = part_size
-                if part_size == 0 or not centroids:
-                    partition_tiers[f"P{i}"] = "medium"
-                    continue
+            # 保存 cluster 映射
+            for key, cid in labels_map.items():
+                block_cluster[key] = cid
 
-                k = min(base_count, part_size)
-                try:
-                    centroid = centroids[i]
-                    query_vec = pa.array(centroid, type=pa.float32())
-                    with _lance_write_lock:
-                        scanner = ds.scanner(
-                            columns=["sample_id"],
-                            nearest={"column": "embedding", "q": query_vec, "k": k},
-                            disable_scoring_autoprojection=True,
-                        )
-                        probe_rows = scanner.to_table().to_pylist()
-                    for r in probe_rows:
-                        all_probe_ids.append(r["sample_id"])
-                except Exception:
-                    partition_tiers[f"P{i}"] = "medium"
+            # 从 lance 读取 consistency_pattern
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    if "consistency_pattern" not in ds.schema.names:
+                        continue
+                    tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
+                    for row in tbl.to_pylist():
+                        key = f"{row['sample_id']}:{row['block_idx']}"
+                        pattern = row.get("consistency_pattern")
+                        if pattern and pattern in PATTERN_TIER:
+                            block_tiers[key] = PATTERN_TIER[pattern]
+            except Exception as e:
+                print(f"[difficulty-samples] 读取 {cat}.lance 失败: {e}", file=sys.stderr)
 
-            # 只读 probe 样本的 difficulty（而不是全量 2.5M）
-            diff_map = {}
-            if all_probe_ids:
-                try:
-                    ids_str = ",".join(repr(s) for s in set(all_probe_ids))
-                    with _lance_write_lock:
-                        diff_tbl = ds.to_table(
-                            columns=["sample_id", "difficulty"],
-                            filter=f"sample_id IN ({ids_str})",
-                        )
-                        for r in diff_tbl.to_pylist():
-                            diff_map[r["sample_id"]] = r.get("difficulty") or "unlabeled"
-                except Exception:
-                    pass
+        if not block_cluster:
+            raise HTTPException(status_code=400, detail="无聚类数据")
 
-            # 判定每个分区的难度
-            probe_idx = 0
-            for i, part_info in enumerate(partitions):
-                part_key = f"P{i}"
-                if part_key in partition_tiers:
-                    continue
-                k = min(base_count, part_info.get("size", 0))
-                probe_ids = all_probe_ids[probe_idx:probe_idx + k]
-                probe_idx += k
+        # 3. 统计每个 cluster 的难度分布
+        # cluster_stats[cat][cluster_id] = {"easy": N, "medium": N, "hard": N, "unknown": N, "total": N}
+        cluster_stats: dict[str, dict[int, dict]] = {}
+        for key, cid in block_cluster.items():
+            # key 格式: "sample_id:block_idx"，提取 category
+            cat = key.split(":")[0] if ":" in key else "text"
+            # 实际 category 从 labels_map 的外层获取
+            # 更好的方式：按 block_cluster 的 key 反查
+            pass
 
-                diff_counts = {"easy": 0, "medium": 0, "hard": 0, "unlabeled": 0}
-                for sid in probe_ids:
-                    d = diff_map.get(sid, "unlabeled")
-                    diff_counts[d] = diff_counts.get(d, 0) + 1
+        # 重新组织：按 category → cluster_id 统计
+        cluster_stats = {}
+        for cat in ("text", "formula", "table"):
+            cat_info = clusters_data.get(cat, {})
+            labels_map = cat_info.get("labels", {})
+            if not labels_map:
+                continue
+            cat_stats: dict[int, dict] = {}
+            for key, cid in labels_map.items():
+                if cid not in cat_stats:
+                    cat_stats[cid] = {"easy": 0, "medium": 0, "hard": 0, "unknown": 0, "total": 0}
+                cat_stats[cid]["total"] += 1
+                tier = block_tiers.get(key, "unknown")
+                cat_stats[cid][tier] = cat_stats[cid].get(tier, 0) + 1
+            cluster_stats[cat] = cat_stats
 
-                if diff_counts["hard"] > diff_counts["easy"] and diff_counts["hard"] > diff_counts.get("medium", 0):
-                    partition_tiers[part_key] = "hard"
-                elif diff_counts["easy"] > diff_counts["hard"] and diff_counts["easy"] > diff_counts.get("medium", 0):
-                    partition_tiers[part_key] = "easy"
+        # 4. 按层级汇总统计
+        tier_totals = {"easy": 0, "medium": 0, "hard": 0, "unknown": 0}
+        tier_clusters: dict[str, list[tuple[str, int, dict]]] = {"easy": [], "medium": [], "hard": [], "unknown": []}
+        for cat, cat_stats in cluster_stats.items():
+            for cid, stats in cat_stats.items():
+                # cluster 的难度 = 多数已标注样本的难度
+                labeled = {"easy": stats["easy"], "medium": stats["medium"], "hard": stats["hard"]}
+                if sum(labeled.values()) == 0:
+                    cluster_tier = "unknown"
                 else:
-                    partition_tiers[part_key] = "medium"
-
-        # ── 第二步：按难度比例抽样（ratio 是目标输出占比）──────────
-        # 先统计每个难度层级的总向量数
-        tier_totals = {"easy": 0, "medium": 0, "hard": 0}
-        tier_partitions: dict[str, list[int]] = {"easy": [], "medium": [], "hard": []}
-        for i, part_info in enumerate(partitions):
-            part_size = part_info.get("size", 0)
-            part_key = f"P{i}"
-            tier = partition_tiers.get(part_key, "medium")
-            tier_totals[tier] += part_size
-            tier_partitions[tier].append(i)
+                    cluster_tier = max(labeled, key=labeled.get)
+                tier_totals[cluster_tier] += stats["total"]
+                tier_clusters[cluster_tier].append((cat, cid, stats))
 
         grand_total = sum(tier_totals.values())
         if grand_total == 0:
             return {"source_id": source_id, "batch_id": batch_id,
                     "error": "无数据", "bucket_count": 0, "total_sampled": 0, "buckets": {}}
 
-        # 每个层级独立抽样：ratio 是该层级的抽样百分比
-        tier_target = {}
-        for tier_name in ["easy", "medium", "hard"]:
+        # 5. 按比例抽样
+        # 每个层级独立抽样：ratio 是从该层级中抽取的百分比
+        buckets = {}  # "cat_C{cid}" → [sample_id, ...]
+        cluster_diff_stats = {}  # "cat_C{cid}" → {tier, ratio, sampled, total, ...}
+
+        import random
+
+        for tier_name in ("easy", "medium", "hard"):
             pct = ratio_map.get(tier_name, 0)
-            tier_target[tier_name] = max(0, int(tier_totals[tier_name] * pct / 100))
-
-        buckets = {}
-        bucket_diff_stats = {}
-
-        # 分批处理避免 Too many open files（Lance 每次 nearest search 会打开索引文件）
-        BATCH_SIZE = 8
-        for tier_name in ["easy", "medium", "hard"]:
-            target = tier_target.get(tier_name, 0)
-            total_size = tier_totals.get(tier_name, 0)
-            if target == 0 or total_size == 0:
+            tier_target = max(0, int(tier_totals[tier_name] * pct / 100))
+            tier_cluster_list = tier_clusters.get(tier_name, [])
+            if tier_target == 0 or not tier_cluster_list:
                 continue
-            tier_parts = tier_partitions.get(tier_name, [])
-            for batch_start in range(0, len(tier_parts), BATCH_SIZE):
-                batch = tier_parts[batch_start:batch_start + BATCH_SIZE]
-                for i in batch:
-                    part_size = partitions[i].get("size", 0)
-                    part_key = f"P{i}"
-                    if part_size == 0 or not centroids:
+
+            # 按 cluster 大小分配 target
+            tier_cluster_total = sum(s["total"] for _, _, s in tier_cluster_list)
+
+            for cat, cid, stats in tier_cluster_list:
+                cluster_key = f"{cat}_C{cid}"
+                cluster_total = stats["total"]
+                if cluster_total == 0:
+                    continue
+
+                # 按 cluster 大小占该层级总量的比例分配
+                cluster_target = max(1, int(tier_target * cluster_total / tier_cluster_total)) if tier_cluster_total > 0 else 0
+                cluster_target = min(cluster_target, cluster_total)
+
+                # 从该 cluster 的 lance 中随机抽样
+                lp = manifests_dir / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+
+                try:
+                    cat_info = clusters_data.get(cat, {})
+                    labels_map = cat_info.get("labels", {})
+                    # 获取该 cluster 的所有 block keys
+                    cluster_keys = [k for k, cid_val in labels_map.items() if cid_val == cid]
+                    if not cluster_keys:
                         continue
-                    k = max(1, int(target * part_size / total_size))
-                    k = min(k, part_size)
-                    try:
-                        centroid = centroids[i]
-                        query_vec = pa.array(centroid, type=pa.float32())
-                        with _lance_write_lock:
-                            scanner = ds.scanner(
-                                columns=["sample_id"],
-                                nearest={"column": "embedding", "q": query_vec, "k": k},
-                                disable_scoring_autoprojection=True,
-                            )
-                            rows = scanner.to_table().to_pylist()
-                        buckets[part_key] = [r["sample_id"] for r in rows]
-                        bucket_diff_stats[part_key] = {
-                            "tier": tier_name,
-                            "ratio": ratio_map.get(tier_name, 0),
-                            "sampled": len(rows),
-                            "total": part_size,
-                        }
-                    except Exception as e:
-                        print(f"[difficulty-samples] P{i} error: {e}", file=sys.stderr)
+
+                    # 随机抽样
+                    sampled_keys = random.sample(cluster_keys, min(cluster_target, len(cluster_keys)))
+                    # 解析 sample_id
+                    sampled_ids = []
+                    for sk in sampled_keys:
+                        parts = sk.split(":")
+                        if len(parts) == 2:
+                            sampled_ids.append(parts[0])
+
+                    buckets[cluster_key] = sampled_ids
+                    cluster_diff_stats[cluster_key] = {
+                        "tier": tier_name,
+                        "ratio": pct,
+                        "sampled": len(sampled_ids),
+                        "total": cluster_total,
+                        "easy_count": stats["easy"],
+                        "medium_count": stats["medium"],
+                        "hard_count": stats["hard"],
+                        "unknown_count": stats["unknown"],
+                    }
+                except Exception as e:
+                    print(f"[difficulty-samples] {cat}_C{cid} error: {e}", file=sys.stderr)
 
         total_sampled = sum(len(v) for v in buckets.values())
 
-        # 统计分区难度分布
-        tier_counts = {"easy": 0, "medium": 0, "hard": 0}
-        for t in partition_tiers.values():
-            tier_counts[t] = tier_counts.get(t, 0) + 1
+        tier_counts = {"easy": len(tier_clusters["easy"]), "medium": len(tier_clusters["medium"]), "hard": len(tier_clusters["hard"])}
 
         result = {
             "source_id": source_id,
             "batch_id": batch_id,
-            "strategy": "difficulty_aware",
-            "base_count": base_count,
+            "strategy": "element_cluster",
             "ratios": {"easy": easy_ratio, "medium": medium_ratio, "hard": hard_ratio},
-            "partition_tiers": tier_counts,
-            "bucket_count": len(partitions),
-            "bucket_sizes": bucket_sizes,
-            "bucket_diff_stats": bucket_diff_stats,
+            "cluster_tiers": tier_counts,
+            "bucket_count": len(buckets),
+            "bucket_diff_stats": cluster_diff_stats,
             "total_sampled": total_sampled,
             "buckets": buckets,
             "cached_at": datetime.now().isoformat(timespec='seconds'),
@@ -2176,11 +2172,6 @@ async def get_difficulty_aware_samples(
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        # 难度抽样后清除 layout 结果缓存
-        layout_cache = batch_dir / "artifacts" / "layout_results.json"
-        if layout_cache.exists():
-            layout_cache.unlink()
 
         return result
     except HTTPException:
