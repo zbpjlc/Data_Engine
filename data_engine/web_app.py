@@ -1580,6 +1580,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
 async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
     """获取 CMCV 比较结果（只统计被 CMCV 处理过的抽样 block）"""
     try:
+        global_status = collect_global_status(registry)
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
