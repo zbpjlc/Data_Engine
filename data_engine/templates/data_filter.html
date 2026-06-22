@@ -3373,7 +3373,6 @@
                         .then(data => {
                             if (data && data.total_sampled > 0) {
                                 showElemDiffSampling(true);
-                                // 复用 edsBtn click handler 中的渲染逻辑
                                 const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
                                 for (const [partKey, stats] of Object.entries(data.bucket_diff_stats || {})) {
                                     const t = stats.tier || 'medium';
@@ -3387,8 +3386,10 @@
                                 for (const [tier, info] of Object.entries(tierAgg)) {
                                     const color = tier === 'easy' ? 'green' : tier === 'medium' ? 'yellow' : 'red';
                                     const pct = ts > 0 ? (info.sampled / ts * 100).toFixed(1) : 0;
+                                    const tierInfo = (data.tier_summary || {})[tier] || {};
+                                    const ratio = tierInfo.ratio || 0;
                                     html += `<div class="bg-${color}-50 border rounded p-2 text-center text-xs">
-                                        <div class="text-${color}-700 font-medium">${tier}</div>
+                                        <div class="text-${color}-700 font-medium">${tier} (${ratio}%)</div>
                                         <div>${info.sampled.toLocaleString()}/${info.total.toLocaleString()}</div>
                                         <div class="text-gray-500">占输出 ${pct}%</div>
                                     </div>`;
