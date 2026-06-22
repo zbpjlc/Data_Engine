@@ -1400,7 +1400,26 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                 ingest_path = find_stage_manifest(manifests_dir, "ingest")
 
                 def _read_blocks_from_category_lance() -> list[dict]:
-                    """从 text/formula/table.lance 读取所有 block，拼成 CMCV 所需格式"""
+                    """从 element_samples.json 获取抽样 block 列表，再从 lance 读取完整数据"""
+                    # 读取抽样列表
+                    samples_path = batch_dir / "artifacts" / "element_samples.json"
+                    if not samples_path.exists():
+                        print("[CMCV] element_samples.json 不存在，回退到全量模式", file=sys.stderr)
+                        return _read_all_blocks_from_category_lance(manifests_dir)
+
+                    samples_data = json.loads(samples_path.read_text(encoding="utf-8"))
+                    sample_list = samples_data.get("samples", [])
+                    if not sample_list:
+                        print("[CMCV] element_samples 为空，回退到全量模式", file=sys.stderr)
+                        return _read_all_blocks_from_category_lance(manifests_dir)
+
+                    # 构建 (category, sample_id, block_idx) -> True 的查找表
+                    sample_keys = set()
+                    for s in sample_list:
+                        sample_keys.add((s["category"], s["sample_id"], s["block_idx"]))
+
+                    print(f"[CMCV] 从 element_samples 加载 {len(sample_keys)} 个抽样 block", file=sys.stderr)
+
                     all_rows = []
                     for cat in ("text", "formula", "table"):
                         lp = manifests_dir / f"{cat}.lance"
@@ -1418,11 +1437,45 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                             read_cols.append(col)
                                 rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
                             for row in rows:
-                                for key in ("paddle_table", "glm_table", "self_table",
+                                key = (cat, row["sample_id"], row["block_idx"])
+                                if key not in sample_keys:
+                                    continue
+                                for k in ("paddle_table", "glm_table", "self_table",
                                             "paddle_formula", "glm_formula", "self_formula"):
-                                    if key in row and isinstance(row[key], str) and row[key]:
+                                    if k in row and isinstance(row[k], str) and row[k]:
                                         try:
-                                            row[key] = json.loads(row[key])
+                                            row[k] = json.loads(row[k])
+                                        except (json.JSONDecodeError, TypeError):
+                                            pass
+                                all_rows.append(row)
+                        except Exception as e:
+                            print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+                    return all_rows
+
+                def _read_all_blocks_from_category_lance(manifests_dir: Path) -> list[dict]:
+                    """全量模式：读取所有 block"""
+                    all_rows = []
+                    for cat in ("text", "formula", "table"):
+                        lp = manifests_dir / f"{cat}.lance"
+                        if not lp.exists():
+                            continue
+                        try:
+                            with _lance_write_lock:
+                                ds = lance.dataset(str(lp))
+                                all_cols = ds.schema.names
+                                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                                for prefix in ("paddle", "glm", "self"):
+                                    for suffix in ("_text", "_confidence", "_table", "_formula"):
+                                        col = f"{prefix}{suffix}"
+                                        if col in all_cols:
+                                            read_cols.append(col)
+                                rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
+                            for row in rows:
+                                for k in ("paddle_table", "glm_table", "self_table",
+                                            "paddle_formula", "glm_formula", "self_formula"):
+                                    if k in row and isinstance(row[k], str) and row[k]:
+                                        try:
+                                            row[k] = json.loads(row[k])
                                         except (json.JSONDecodeError, TypeError):
                                             pass
                                 all_rows.append(row)
