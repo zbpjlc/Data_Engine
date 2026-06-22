@@ -3205,49 +3205,59 @@
         const edsResults = document.getElementById('eds-results');
         const edsEmpty = document.getElementById('eds-empty');
 
+        function renderDiffSamplingResult(ts, tierAgg, ratios) {
+            let html = `<div class="font-medium mb-2">总计抽样: <b>${ts.toLocaleString()}</b> blocks</div>`;
+            html += '<div class="grid grid-cols-3 gap-2">';
+            for (const [tier, info] of Object.entries(tierAgg)) {
+                const color = tier === 'easy' ? 'green' : tier === 'medium' ? 'yellow' : 'red';
+                const pct = ts > 0 ? (info.sampled / ts * 100).toFixed(1) : 0;
+                const ratio = ratios[tier] || 0;
+                html += `<div class="bg-${color}-50 border rounded p-2 text-center text-xs">
+                    <div class="text-${color}-700 font-medium">${tier} (${ratio}%)</div>
+                    <div>${info.sampled.toLocaleString()}/${info.total.toLocaleString()}</div>
+                    <div class="text-gray-500">占输出 ${pct}%</div>
+                </div>`;
+            }
+            html += '</div>';
+            document.getElementById('eds-summary').innerHTML = html;
+            edsResults.classList.remove('hidden');
+            edsEmpty.classList.add('hidden');
+        }
+
         function showElemDiffSampling(show) {
             edsBtn.classList.toggle('hidden', !show);
             edsEmpty.classList.toggle('hidden', show);
         }
 
         edsBtn.addEventListener('click', async () => {
-            const src = _ecsBatches[0]?.source_id || getSourceId();
-            const bid = _ecsBatches[0]?.batch_id || getBatchId();
-            if (!src || !bid) { showToast('请先完成 Element-Type 聚类，或选择数据源和批次', 'warning'); return; }
+            const targets = getEoTargets();
+            if (targets.length === 0) { showToast('请先完成 Element-Type 聚类', 'warning'); return; }
             edsBtn.disabled = true;
             edsBtn.textContent = '抽样中...';
             const easy = document.getElementById('eds-easy').value;
             const medium = document.getElementById('eds-medium').value;
             const hard = document.getElementById('eds-hard').value;
             try {
-                const resp = await fetch(
-                    `/api/bucket-samples-difficulty/${src}/${bid}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}`
+                const promises = targets.map(t =>
+                    fetch(`/api/bucket-samples-difficulty/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}`)
+                        .then(r => r.ok ? r.json() : null).catch(() => null)
                 );
-                const data = await resp.json();
-                // 从 bucket_diff_stats 聚合出 tier 级别 summary
+                const results = await Promise.all(promises);
+                const valid = results.filter(r => r && r.total_sampled > 0);
+                if (valid.length === 0) { showToast('无数据', 'warning'); return; }
+                // 聚合
                 const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
-                for (const [partKey, stats] of Object.entries(data.bucket_diff_stats || {})) {
-                    const t = stats.tier || 'medium';
-                    if (!tierAgg[t]) continue;
-                    tierAgg[t].sampled += stats.sampled || 0;
-                    tierAgg[t].total += stats.total || 0;
-                }
-                const totalSampled = data.total_sampled || 0;
-                let html = `<div class="font-medium mb-2">总计抽样: <b>${totalSampled.toLocaleString()}</b> blocks</div>`;
-                html += '<div class="grid grid-cols-3 gap-2">';
-                for (const [tier, info] of Object.entries(tierAgg)) {
-                    const color = tier === 'easy' ? 'green' : tier === 'medium' ? 'yellow' : 'red';
-                    const pct = totalSampled > 0 ? (info.sampled / totalSampled * 100).toFixed(1) : 0;
-                    html += `<div class="bg-${color}-50 border rounded p-2 text-center text-xs">
-                        <div class="text-${color}-700 font-medium">${tier}</div>
-                        <div>${info.sampled.toLocaleString()}/${info.total.toLocaleString()}</div>
-                        <div class="text-gray-500">占输出 ${pct}%</div>
-                    </div>`;
-                }
-                html += '</div>';
-                document.getElementById('eds-summary').innerHTML = html;
-                edsResults.classList.remove('hidden');
-                edsEmpty.classList.add('hidden');
+                let ts = 0;
+                valid.forEach(d => {
+                    ts += d.total_sampled || 0;
+                    for (const [k, v] of Object.entries(d.bucket_diff_stats || {})) {
+                        const t = v.tier || 'medium';
+                        if (!tierAgg[t]) continue;
+                        tierAgg[t].sampled += v.sampled || 0;
+                        tierAgg[t].total += v.total || 0;
+                    }
+                });
+                renderDiffSamplingResult(ts, tierAgg, valid[0]?.ratios || {});
             } catch (e) {
                 showToast(`抽样失败: ${e.message}`, 'error');
             } finally {
@@ -3367,33 +3377,28 @@
 
                 // 5. 加载已有 Difficulty Sampling 结果
                 if (batchData.length > 0) {
-                    const first = batchData[0];
-                    fetch(`/api/bucket-samples-difficulty/${first.source_id}/${first.batch_id}`)
-                        .then(r => r.ok ? r.json() : null)
-                        .then(data => {
-                            if (data && data.total_sampled > 0) {
-                                showElemDiffSampling(true);
-                                const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
-                                for (const [partKey, stats] of Object.entries(data.bucket_diff_stats || {})) {
-                                    const t = stats.tier || 'medium';
-                                    if (!tierAgg[t]) continue;
-                                    tierAgg[t].sampled += stats.sampled || 0;
-                                    tierAgg[t].total += stats.total || 0;
-                                }
-                                const ts = data.total_sampled || 0;
-                                let html = `<div class="font-medium mb-2">总计抽样: <b>${ts.toLocaleString()}</b> blocks</div>`;
-                                html += '<div class="grid grid-cols-3 gap-2">';
-                                for (const [tier, info] of Object.entries(tierAgg)) {
-                                    const color = tier === 'easy' ? 'green' : tier === 'medium' ? 'yellow' : 'red';
-                                    const pct = ts > 0 ? (info.sampled / ts * 100).toFixed(1) : 0;
-                                    const tierInfo = (data.tier_summary || {})[tier] || {};
-                                    const ratio = tierInfo.ratio || 0;
-                                    html += `<div class="bg-${color}-50 border rounded p-2 text-center text-xs">
-                                        <div class="text-${color}-700 font-medium">${tier} (${ratio}%)</div>
-                                        <div>${info.sampled.toLocaleString()}/${info.total.toLocaleString()}</div>
-                                        <div class="text-gray-500">占输出 ${pct}%</div>
-                                    </div>`;
-                                }
+                    const promises = batchData.map(b =>
+                        fetch(`/api/bucket-samples-difficulty/${b.source_id}/${b.batch_id}`)
+                            .then(r => r.ok ? r.json() : null).catch(() => null)
+                    );
+                    Promise.all(promises).then(results => {
+                        const valid = results.filter(r => r && r.total_sampled > 0);
+                        if (valid.length === 0) return;
+                        showElemDiffSampling(true);
+                        const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
+                        let ts = 0;
+                        valid.forEach(d => {
+                            ts += d.total_sampled || 0;
+                            for (const [k, v] of Object.entries(d.bucket_diff_stats || {})) {
+                                const t = v.tier || 'medium';
+                                if (!tierAgg[t]) continue;
+                                tierAgg[t].sampled += v.sampled || 0;
+                                tierAgg[t].total += v.total || 0;
+                            }
+                        });
+                        renderDiffSamplingResult(ts, tierAgg, valid[0]?.ratios || {});
+                    }).catch(() => {});
+                }
                                 html += '</div>';
                                 document.getElementById('eds-summary').innerHTML = html;
                                 edsResults.classList.remove('hidden');
