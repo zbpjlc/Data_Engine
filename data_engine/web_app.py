@@ -1423,35 +1423,39 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                     print(f"[CMCV] 从 element_samples 加载 {len(sample_keys)} 个抽样 block", file=sys.stderr)
 
                     all_rows = []
-                    for cat in ("text", "formula", "table"):
-                        lp = manifests_dir / f"{cat}.lance"
-                        if not lp.exists():
+                    for b in global_status.batches:
+                        if source_id and b.source_id != source_id:
                             continue
-                        try:
-                            with _lance_write_lock:
-                                ds = lance.dataset(str(lp))
-                                all_cols = ds.schema.names
-                                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
-                                for prefix in ("paddle", "glm", "self"):
-                                    for suffix in ("_text", "_confidence", "_table", "_formula"):
-                                        col = f"{prefix}{suffix}"
-                                        if col in all_cols:
-                                            read_cols.append(col)
-                                rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
-                            for row in rows:
-                                key = (cat, row["sample_id"], row["block_idx"])
-                                if key not in sample_keys:
-                                    continue
-                                for k in ("paddle_table", "glm_table", "self_table",
-                                            "paddle_formula", "glm_formula", "self_formula"):
-                                    if k in row and isinstance(row[k], str) and row[k]:
-                                        try:
-                                            row[k] = json.loads(row[k])
-                                        except (json.JSONDecodeError, TypeError):
-                                            pass
-                                all_rows.append(row)
-                        except Exception as e:
-                            print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+                        b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+                        for cat in ("text", "formula", "table"):
+                            lp = b_manifests / f"{cat}.lance"
+                            if not lp.exists():
+                                continue
+                            try:
+                                with _lance_write_lock:
+                                    ds = lance.dataset(str(lp))
+                                    all_cols = ds.schema.names
+                                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                                    for prefix in ("paddle", "glm", "self"):
+                                        for suffix in ("_text", "_confidence", "_table", "_formula"):
+                                            col = f"{prefix}{suffix}"
+                                            if col in all_cols:
+                                                read_cols.append(col)
+                                    rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
+                                for row in rows:
+                                    key = (cat, row["sample_id"], row["block_idx"])
+                                    if key not in sample_keys:
+                                        continue
+                                    for k in ("paddle_table", "glm_table", "self_table",
+                                                "paddle_formula", "glm_formula", "self_formula"):
+                                        if k in row and isinstance(row[k], str) and row[k]:
+                                            try:
+                                                row[k] = json.loads(row[k])
+                                            except (json.JSONDecodeError, TypeError):
+                                                pass
+                                    all_rows.append(row)
+                            except Exception as e:
+                                print(f"[CMCV] 读 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
                     return all_rows
 
                 def _read_all_blocks_from_category_lance(manifests_dir: Path) -> list[dict]:
