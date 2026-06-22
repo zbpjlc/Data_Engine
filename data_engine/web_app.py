@@ -1499,51 +1499,55 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                 cmcv = CMCVEngine()
                 updated_rows, page_tiers = cmcv.process_element_batch(element_rows)
 
-                for cat in ("text", "formula", "table"):
-                    lp = manifests_dir / f"{cat}.lance"
-                    if not lp.exists():
+                for b in global_status.batches:
+                    if source_id and b.source_id != source_id:
                         continue
-                    try:
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(lp))
-                            col_names = set(ds.schema.names)
-                            if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
-                                continue
-                        update_map: dict[str, dict] = {}
-                        for r in updated_rows:
-                            key = (r["sample_id"], r["block_idx"])
-                            if r.get("consistency_pattern"):
-                                update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
-                            if r.get("block_diff_json"):
-                                update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
-                        if not update_map:
+                    b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+                    for cat in ("text", "formula", "table"):
+                        lp = b_manifests / f"{cat}.lance"
+                        if not lp.exists():
                             continue
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(lp))
-                            t = ds.to_table()
-                            patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
-                            diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
-                            sids = t.column("sample_id").to_pylist()
-                            bidxs = t.column("block_idx").to_pylist()
-                            pat_map = update_map.get("consistency_pattern", {})
-                            diff_map = update_map.get("block_diff_json", {})
-                            new_patterns = []
-                            new_diffs = []
-                            for i in range(len(t)):
-                                key = (sids[i], bidxs[i])
-                                new_patterns.append(pat_map.get(key, patterns[i]))
-                                new_diffs.append(diff_map.get(key, diffs[i]))
-                            import pyarrow as pa
-                            update_table = pa.table({
-                                "sample_id": pa.array(sids, type=pa.large_string()),
-                                "block_idx": pa.array(bidxs, type=pa.int32()),
-                                "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
-                                "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
-                            })
-                            ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
-                        print(f"[CMCV] 已将一致性结果写回 {cat}.lance", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[CMCV] 写回 {cat}.lance 失败: {e}", file=sys.stderr)
+                        try:
+                            with _lance_write_lock:
+                                ds = lance.dataset(str(lp))
+                                col_names = set(ds.schema.names)
+                                if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
+                                    continue
+                            update_map: dict[str, dict] = {}
+                            for r in updated_rows:
+                                key = (r["sample_id"], r["block_idx"])
+                                if r.get("consistency_pattern"):
+                                    update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
+                                if r.get("block_diff_json"):
+                                    update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
+                            if not update_map:
+                                continue
+                            with _lance_write_lock:
+                                ds = lance.dataset(str(lp))
+                                t = ds.to_table()
+                                patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
+                                diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
+                                sids = t.column("sample_id").to_pylist()
+                                bidxs = t.column("block_idx").to_pylist()
+                                pat_map = update_map.get("consistency_pattern", {})
+                                diff_map = update_map.get("block_diff_json", {})
+                                new_patterns = []
+                                new_diffs = []
+                                for i in range(len(t)):
+                                    key = (sids[i], bidxs[i])
+                                    new_patterns.append(pat_map.get(key, patterns[i]))
+                                    new_diffs.append(diff_map.get(key, diffs[i]))
+                                import pyarrow as pa
+                                update_table = pa.table({
+                                    "sample_id": pa.array(sids, type=pa.large_string()),
+                                    "block_idx": pa.array(bidxs, type=pa.int32()),
+                                    "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
+                                    "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
+                                })
+                                ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
+                            print(f"[CMCV] 已将一致性结果写回 {b.source_id}/{b.batch_id}/{cat}.lance", file=sys.stderr)
+                        except Exception as e:
+                            print(f"[CMCV] 写回 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
 
                 if ingest_path and ingest_path.exists() and page_tiers:
                     import pyarrow as pa
@@ -1598,23 +1602,27 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                 pass
 
         rows = []
-        for cat in ("text", "formula", "table"):
-            lp = manifests_dir / f"{cat}.lance"
-            if not lp.exists():
+        for b in global_status.batches:
+            if source_id and b.source_id != source_id:
                 continue
-            try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
-                    col_names = set(ds.schema.names)
-                    read_cols = ["sample_id", "block_idx", "block_type",
-                                 "consistency_pattern", "block_diff_json"]
-                    for prefix in ("paddle", "glm", "self"):
-                        col = f"{prefix}_text"
-                        if col in col_names:
-                            read_cols.append(col)
-                    rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
-            except Exception:
-                pass
+            b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+            for cat in ("text", "formula", "table"):
+                lp = b_manifests / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+                try:
+                    with _lance_write_lock:
+                        ds = lance.dataset(str(lp))
+                        col_names = set(ds.schema.names)
+                        read_cols = ["sample_id", "block_idx", "block_type",
+                                     "consistency_pattern", "block_diff_json"]
+                        for prefix in ("paddle", "glm", "self"):
+                            col = f"{prefix}_text"
+                            if col in col_names:
+                                read_cols.append(col)
+                        rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
+                except Exception:
+                    pass
 
         if sample_keys:
             rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in sample_keys]
