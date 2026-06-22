@@ -1400,23 +1400,24 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                 ingest_path = find_stage_manifest(manifests_dir, "ingest")
 
                 def _read_blocks_from_category_lance() -> list[dict]:
-                    """从 element_samples.json 获取抽样 block 列表，再从 lance 读取完整数据"""
-                    # 读取抽样列表
-                    samples_path = batch_dir / "artifacts" / "element_samples.json"
-                    if not samples_path.exists():
-                        print("[CMCV] element_samples.json 不存在，回退到全量模式", file=sys.stderr)
-                        return _read_all_blocks_from_category_lance(manifests_dir)
-
-                    samples_data = json.loads(samples_path.read_text(encoding="utf-8"))
-                    sample_list = samples_data.get("samples", [])
-                    if not sample_list:
-                        print("[CMCV] element_samples 为空，回退到全量模式", file=sys.stderr)
-                        return _read_all_blocks_from_category_lance(manifests_dir)
-
-                    # 构建 (category, sample_id, block_idx) -> True 的查找表
+                    """从所有 batch 的 element_samples.json 获取抽样 block 列表，再从 lance 读取完整数据"""
+                    # 收集所有 batch 的抽样列表
                     sample_keys = set()
-                    for s in sample_list:
-                        sample_keys.add((s["category"], s["sample_id"], s["block_idx"]))
+                    for b in global_status.batches:
+                        if source_id and b.source_id != source_id:
+                            continue
+                        try:
+                            sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
+                            if sp.exists():
+                                sd = json.loads(sp.read_text(encoding="utf-8"))
+                                for s in sd.get("samples", []):
+                                    sample_keys.add((s["category"], s["sample_id"], s["block_idx"]))
+                        except Exception:
+                            pass
+
+                    if not sample_keys:
+                        print("[CMCV] 无 element_samples 数据，回退到全量模式", file=sys.stderr)
+                        return _read_all_blocks_from_category_lance(manifests_dir)
 
                     print(f"[CMCV] 从 element_samples 加载 {len(sample_keys)} 个抽样 block", file=sys.stderr)
 
