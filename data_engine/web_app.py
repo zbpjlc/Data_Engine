@@ -1394,6 +1394,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
             try:
                 from data_engine.ocr.cmcv import CMCVEngine
 
+                global_status = collect_global_status(registry)
                 source = registry.get(source_id)
                 batch_dir = source.resolve_batch_dir(batch_id)
                 manifests_dir = batch_dir / "manifests"
