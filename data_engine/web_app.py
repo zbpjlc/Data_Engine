@@ -1590,8 +1590,6 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
         global_status = collect_global_status(registry)
         sample_keys = set()
         for b in global_status.batches:
-            if source_id and b.source_id != source_id:
-                continue
             try:
                 sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
                 if sp.exists():
@@ -1603,8 +1601,6 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
 
         rows = []
         for b in global_status.batches:
-            if source_id and b.source_id != source_id:
-                continue
             b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
             for cat in ("text", "formula", "table"):
                 lp = b_manifests / f"{cat}.lance"
