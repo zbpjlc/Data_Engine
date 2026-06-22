@@ -1596,23 +1596,25 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             pass
 
         rows = []
-        for cat in ("text", "formula", "table"):
-            lp = manifests_dir / f"{cat}.lance"
-            if not lp.exists():
-                continue
-            try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
-                    col_names = set(ds.schema.names)
-                    read_cols = ["sample_id", "block_idx", "block_type",
-                                 "consistency_pattern", "block_diff_json"]
-                    for prefix in ("paddle", "glm", "self"):
-                        col = f"{prefix}_text"
-                        if col in col_names:
-                            read_cols.append(col)
-                    rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
-            except Exception:
-                pass
+        for b in global_status.batches:
+            b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+            for cat in ("text", "formula", "table"):
+                lp = b_manifests / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+                try:
+                    with _lance_write_lock:
+                        ds = lance.dataset(str(lp))
+                        col_names = set(ds.schema.names)
+                        read_cols = ["sample_id", "block_idx", "block_type",
+                                     "consistency_pattern", "block_diff_json"]
+                        for prefix in ("paddle", "glm", "self"):
+                            col = f"{prefix}_text"
+                            if col in col_names:
+                                read_cols.append(col)
+                        rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
+                except Exception:
+                    pass
 
         if sample_keys:
             rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in sample_keys]
