@@ -2054,6 +2054,7 @@ async def get_difficulty_aware_samples(
     ratio_map = {"easy": easy_ratio, "medium": medium_ratio, "hard": hard_ratio}
 
     try:
+        global_status = collect_global_status(registry)
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
