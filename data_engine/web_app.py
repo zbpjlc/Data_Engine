@@ -1575,11 +1575,25 @@ async def start_cmcv(source_id: str, batch_id: str = None):
 
 @app.get("/api/cmcv/{source_id}/{batch_id}/results")
 async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
-    """获取 CMCV 比较结果"""
+    """获取 CMCV 比较结果（只统计抽样 block）"""
     try:
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
+
+        # 收集所有 batch 的抽样 keys
+        sample_keys = set()
+        for b in global_status.batches:
+            if source_id and b.source_id != source_id:
+                continue
+            try:
+                sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
+                if sp.exists():
+                    sd = json.loads(sp.read_text(encoding="utf-8"))
+                    for s in sd.get("samples", []):
+                        sample_keys.add((s["sample_id"], s["block_idx"]))
+            except Exception:
+                pass
 
         rows = []
         for cat in ("text", "formula", "table"):
@@ -1599,6 +1613,10 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                     rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
             except Exception:
                 pass
+
+        # 只统计抽样 block
+        if sample_keys:
+            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in sample_keys]
 
         if tier:
             rows = [r for r in rows if r.get("consistency_pattern") == tier]
