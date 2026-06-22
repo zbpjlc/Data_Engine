@@ -1585,15 +1585,26 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
 
-        # 收集所有 batch 的抽样 keys
-        sample_keys = set()
+        # 收集当前 batch 的抽样 keys（用于过滤显示）
+        current_sample_keys = set()
+        try:
+            sp = batch_dir / "artifacts" / "element_samples.json"
+            if sp.exists():
+                sd = json.loads(sp.read_text(encoding="utf-8"))
+                for s in sd.get("samples", []):
+                    current_sample_keys.add((s["sample_id"], s["block_idx"]))
+        except Exception:
+            pass
+
+        # 收集所有 batch 的抽样 keys（用于确定哪些 block 被 CMCV 处理过）
+        all_sample_keys = set()
         for b in global_status.batches:
             try:
                 sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
                 if sp.exists():
                     sd = json.loads(sp.read_text(encoding="utf-8"))
                     for s in sd.get("samples", []):
-                        sample_keys.add((s["sample_id"], s["block_idx"]))
+                        all_sample_keys.add((s["sample_id"], s["block_idx"]))
             except Exception:
                 pass
 
@@ -1618,8 +1629,8 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                 except Exception:
                     pass
 
-        if sample_keys:
-            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in sample_keys]
+        if current_sample_keys:
+            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in current_sample_keys]
 
         if tier:
             rows = [r for r in rows if r.get("consistency_pattern") == tier]
