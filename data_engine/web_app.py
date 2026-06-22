@@ -1629,8 +1629,8 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                 except Exception:
                     pass
 
-        if all_sample_keys:
-            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in all_sample_keys]
+        if current_sample_keys:
+            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in current_sample_keys]
 
         if tier:
             rows = [r for r in rows if r.get("consistency_pattern") == tier]
