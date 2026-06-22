@@ -1585,16 +1585,17 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
 
-        # 收集当前 batch 的抽样 keys
+        # 收集所有 batch 的抽样 keys
         sample_keys = set()
-        try:
-            sp = batch_dir / "artifacts" / "element_samples.json"
-            if sp.exists():
-                sd = json.loads(sp.read_text(encoding="utf-8"))
-                for s in sd.get("samples", []):
-                    sample_keys.add((s["sample_id"], s["block_idx"]))
-        except Exception:
-            pass
+        for b in global_status.batches:
+            try:
+                sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
+                if sp.exists():
+                    sd = json.loads(sp.read_text(encoding="utf-8"))
+                    for s in sd.get("samples", []):
+                        sample_keys.add((s["sample_id"], s["block_idx"]))
+            except Exception:
+                pass
 
         rows = []
         for b in global_status.batches:
