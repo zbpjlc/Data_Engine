@@ -2104,7 +2104,8 @@ async def get_difficulty_aware_samples(
                 sampled = random.sample(cblocks, cluster_target)
                 sampled_ids = [b["key"].split(":")[0] for b in sampled]
 
-                buckets[cluster_key] = sampled_ids
+                bucket_key = f"{cluster_key}_{tier_name}"
+                buckets[bucket_key] = sampled_ids
                 # 统计该 cluster 的难度分布
                 cluster_tier_counts = {"easy": 0, "medium": 0, "hard": 0}
                 for b in cblocks:
@@ -2112,7 +2113,7 @@ async def get_difficulty_aware_samples(
                     if t in cluster_tier_counts:
                         cluster_tier_counts[t] += 1
 
-                cluster_diff_stats[cluster_key] = {
+                cluster_diff_stats[bucket_key] = {
                     "tier": tier_name,
                     "ratio": pct,
                     "sampled": cluster_target,
