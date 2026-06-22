@@ -2051,17 +2051,30 @@ async def get_difficulty_aware_samples(
             except Exception:
                 pass
 
-        # 1. 读取 element_clusters.json
+        # 1. 读取 element_clusters.json + element_samples.json
         clusters_path = batch_dir / "artifacts" / "element_clusters.json"
         if not clusters_path.exists():
             raise HTTPException(status_code=400, detail="未找到 Element 聚类结果，请先运行 Element Clustering")
 
         clusters_data = json.loads(clusters_path.read_text(encoding="utf-8"))
 
+        # 收集所有 batch 的抽样 keys（用于确定哪些 block 有 CMCV 结果）
+        all_sample_keys = set()
+        for b in global_status.batches:
+            if source_id and b.source_id != source_id:
+                continue
+            try:
+                sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
+                if sp.exists():
+                    sd = json.loads(sp.read_text(encoding="utf-8"))
+                    for s in sd.get("samples", []):
+                        all_sample_keys.add((s["sample_id"], s["block_idx"]))
+            except Exception:
+                pass
+
         # 2. 构建 block → cluster_id 映射 和 block → tier 映射
         PATTERN_TIER = {"all_agree": "easy", "partial_agree": "medium", "all_disagree": "hard"}
 
-        # cat_blocks[cat] = [{"key": "sid:bid", "cluster_id": int, "tier": str|None}, ...]
         cat_blocks: dict[str, list[dict]] = {}
 
         for cat in ("text", "formula", "table"):
@@ -2070,7 +2083,7 @@ async def get_difficulty_aware_samples(
             if not labels_map:
                 continue
 
-            # 从 lance 读取 consistency_pattern
+            # 从 lance 读取 consistency_pattern（只读有 CMCV 结果的 block）
             lp = manifests_dir / f"{cat}.lance"
             if not lp.exists():
                 continue
@@ -2091,6 +2104,10 @@ async def get_difficulty_aware_samples(
 
             blocks = []
             for key, cid in labels_map.items():
+                # 只有被 CMCV 处理过的 block（在抽样列表中）才有难度标签
+                sid, bid = key.split(":") if ":" in key else (key, "")
+                if all_sample_keys and (sid, int(bid)) not in all_sample_keys:
+                    continue  # 不在抽样列表中，跳过
                 blocks.append({
                     "key": key,
                     "cluster_id": cid,
