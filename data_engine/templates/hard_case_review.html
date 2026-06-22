@@ -441,6 +441,28 @@
         });
 
         init();
+
+        // 自动刷新：轮询检测 el_ocr/cmcv 任务完成后刷新数据
+        let lastHardCount = -1;
+        setInterval(async () => {
+            const val = document.getElementById('batch-select').value;
+            if (!val) return;
+            const [sourceId, batchId] = val.split('/');
+            try {
+                const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}`);
+                const data = await res.json();
+                const newCount = data.total || 0;
+                if (lastHardCount >= 0 && newCount !== lastHardCount) {
+                    hardBlocks = data.blocks || [];
+                    document.getElementById('stat-total').textContent = data.total || 0;
+                    document.getElementById('stat-corrected').textContent = data.corrected || 0;
+                    document.getElementById('stat-judged').textContent = data.judged || 0;
+                    document.getElementById('stat-expert').textContent = data.needs_expert || 0;
+                    renderBlockList();
+                }
+                lastHardCount = newCount;
+            } catch (e) {}
+        }, 10000);
     </script>
 </body>
 </html>
