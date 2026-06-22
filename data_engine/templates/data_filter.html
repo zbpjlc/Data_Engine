@@ -3181,6 +3181,8 @@
         });
 
         async function loadElemCmcvResults(optSrc, optBid) {
+            // 如果 init 已经聚合了所有批次数据，不再覆盖
+            if (document.getElementById('ecmcv-results') && !document.getElementById('ecmcv-results').classList.contains('hidden')) return;
             try {
                 const src = optSrc || _ecsBatches[0]?.source_id || getSourceId();
                 const bid = optBid || _ecsBatches[0]?.batch_id || getBatchId();
