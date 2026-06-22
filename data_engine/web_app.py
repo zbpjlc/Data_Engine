@@ -3964,6 +3964,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                     print(f"[el-ocr] CMCV 重算完成 {cat}.lance", file=sys.stderr)
                             except Exception as e:
                                 print(f"[el-ocr] CMCV 重算 {cat} 失败: {e}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[el-ocr] CMCV 自动重算整体失败: {e}", file=sys.stderr)
             except Exception as e:
                 import traceback
                 traceback.print_exc(file=sys.stderr)
