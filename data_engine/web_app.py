@@ -1562,13 +1562,13 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                 page_stats[sid]["worst_pattern"] = "partial_agree"
 
         tier_histogram = {"easy": 0, "medium": 0, "hard": 0}
-        for ps in page_stats.values():
-            wp = ps["worst_pattern"]
-            if wp == "all_agree":
+        for row in rows:
+            pat = row.get("consistency_pattern", "")
+            if pat == "all_agree":
                 tier_histogram["easy"] += 1
-            elif wp == "partial_agree":
+            elif pat == "partial_agree":
                 tier_histogram["medium"] += 1
-            else:
+            elif pat == "all_disagree":
                 tier_histogram["hard"] += 1
 
         return {
