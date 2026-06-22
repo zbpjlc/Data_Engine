@@ -3399,13 +3399,6 @@
                         renderDiffSamplingResult(ts, tierAgg, valid[0]?.ratios || {});
                     }).catch(() => {});
                 }
-                                html += '</div>';
-                                document.getElementById('eds-summary').innerHTML = html;
-                                edsResults.classList.remove('hidden');
-                                edsEmpty.classList.add('hidden');
-                            }
-                        }).catch(() => {});
-                }
 
                 // 6. 加载 Page_index 统计
                 const idxSrc = getSourceId();
