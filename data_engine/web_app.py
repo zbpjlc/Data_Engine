@@ -3905,6 +3905,65 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{total_blocks}）")
                 else:
                     progress_tracker.complete_task(task_id, f"{model} 完成: {done} block（跳过 {len(done_keys)} 已完成{f'，{skipped} 无图' if skipped else ''}{f'，{errors} 错误' if errors else ''}）")
+
+                    # 自动触发 CMCV 重算
+                    try:
+                        from data_engine.ocr.cmcv import CMCVEngine
+                        print(f"[el-ocr] 自动触发 CMCV 重算...", file=sys.stderr)
+                        cmcv_engine = CMCVEngine()
+                        for cat in ("text", "formula", "table"):
+                            lp = manifests_dir / f"{cat}.lance"
+                            if not lp.exists():
+                                continue
+                            try:
+                                with _lance_write_lock:
+                                    ds = lance.dataset(str(lp))
+                                    all_cols = ds.schema.names
+                                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                                    for prefix in ("paddle", "glm", "self"):
+                                        for suffix in ("_text", "_confidence", "_table", "_formula"):
+                                            col = f"{prefix}{suffix}"
+                                            if col in all_cols:
+                                                read_cols.append(col)
+                                    rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
+                                for row in rows:
+                                    for key in ("paddle_table", "glm_table", "self_table",
+                                                "paddle_formula", "glm_formula", "self_formula"):
+                                        if key in row and isinstance(row[key], str) and row[key]:
+                                            try:
+                                                row[key] = json.loads(row[key])
+                                            except (json.JSONDecodeError, TypeError):
+                                                pass
+                                updated_rows, _ = cmcv_engine.process_element_batch(rows)
+                                update_map = {}
+                                for r in updated_rows:
+                                    if r.get("consistency_pattern"):
+                                        update_map.setdefault("consistency_pattern", {})[(r["sample_id"], r["block_idx"])] = r["consistency_pattern"]
+                                    if r.get("block_diff_json"):
+                                        update_map.setdefault("block_diff_json", {})[(r["sample_id"], r["block_idx"])] = r["block_diff_json"]
+                                if update_map:
+                                    with _lance_write_lock:
+                                        ds = lance.dataset(str(lp))
+                                        t = ds.to_table()
+                                        patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
+                                        diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
+                                        sids = t.column("sample_id").to_pylist()
+                                        bidxs = t.column("block_idx").to_pylist()
+                                        pat_map = update_map.get("consistency_pattern", {})
+                                        diff_map = update_map.get("block_diff_json", {})
+                                        new_p = [pat_map.get((sids[i], bidxs[i]), patterns[i]) for i in range(len(t))]
+                                        new_d = [diff_map.get((sids[i], bidxs[i]), diffs[i]) for i in range(len(t))]
+                                        import pyarrow as pa
+                                        update_table = pa.table({
+                                            "sample_id": pa.array(sids, type=pa.large_string()),
+                                            "block_idx": pa.array(bidxs, type=pa.int32()),
+                                            "consistency_pattern": pa.array(new_p, type=pa.large_string()),
+                                            "block_diff_json": pa.array(new_d, type=pa.large_string()),
+                                        })
+                                        ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
+                                    print(f"[el-ocr] CMCV 重算完成 {cat}.lance", file=sys.stderr)
+                            except Exception as e:
+                                print(f"[el-ocr] CMCV 重算 {cat} 失败: {e}", file=sys.stderr)
             except Exception as e:
                 import traceback
                 traceback.print_exc(file=sys.stderr)
