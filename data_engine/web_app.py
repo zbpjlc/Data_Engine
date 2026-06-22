@@ -1500,8 +1500,6 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                 updated_rows, page_tiers = cmcv.process_element_batch(element_rows)
 
                 for b in global_status.batches:
-                    if source_id and b.source_id != source_id:
-                        continue
                     b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
                     for cat in ("text", "formula", "table"):
                         lp = b_manifests / f"{cat}.lance"
