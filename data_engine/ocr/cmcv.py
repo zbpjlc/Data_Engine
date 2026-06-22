@@ -313,15 +313,15 @@ def compare_block(
     }
 
     # Plan §6.6:
-    # easy   — 三模型两两都一致
-    # medium — 任意两个模型一致（paddle-glm 或 paddle-self 或 glm-self）
-    # hard   — 三模型都不一致
-    all_agree = sim_pg >= thr and sim_ps >= thr and sim_gs >= thr
-    any_pair_agree = sim_pg >= thr or sim_ps >= thr or sim_gs >= thr
+    # easy   — paddle 和 glm 一致，且 self 也一致
+    # medium — paddle 和 glm 一致，但 self 不一致
+    # hard   — paddle 和 glm 不一致
+    external_agree = sim_pg >= thr  # paddle 与 glm 一致
+    self_agree_with_external = sim_ps >= thr and sim_gs >= thr  # self 与两者都一致
 
-    if all_agree:
+    if external_agree and self_agree_with_external:
         pattern = "all_agree"
-    elif any_pair_agree:
+    elif external_agree:
         pattern = "partial_agree"
     else:
         pattern = "all_disagree"
