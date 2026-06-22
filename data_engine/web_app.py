@@ -2069,23 +2069,11 @@ async def get_difficulty_aware_samples(
             except Exception:
                 pass
 
-        # 1. 读取 element_clusters.json（支持多 batch 聚合）
-        clusters_data = {}
-        for b in global_status.batches:
-            try:
-                cp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_clusters.json"
-                if cp.exists():
-                    bd = json.loads(cp.read_text(encoding="utf-8"))
-                    for cat in ("text", "formula", "table"):
-                        if cat in bd and bd[cat].get("labels"):
-                            clusters_data.setdefault(cat, {"n_clusters": 0, "total_blocks": 0, "labels": {}})
-                            clusters_data[cat]["n_clusters"] += bd[cat].get("n_clusters", 0)
-                            clusters_data[cat]["total_blocks"] += bd[cat].get("total_blocks", 0)
-                            clusters_data[cat]["labels"].update(bd[cat]["labels"])
-            except Exception:
-                pass
-        if not clusters_data:
+        # 1. 读取 element_clusters.json
+        clusters_path = batch_dir / "artifacts" / "element_clusters.json"
+        if not clusters_path.exists():
             raise HTTPException(status_code=400, detail="未找到 Element 聚类结果，请先运行 Element Clustering")
+        clusters_data = json.loads(clusters_path.read_text(encoding="utf-8"))
 
         # 收集所有 batch 的抽样 keys（用于确定哪些 block 有 CMCV 结果）
         all_sample_keys = set()
@@ -2105,41 +2093,39 @@ async def get_difficulty_aware_samples(
         # cluster_diff_map[(cat, cid)] = {"easy": N, "medium": N, "hard": N}
         cluster_diff_map: dict[tuple, dict] = {}
 
-        for b in global_status.batches:
-            b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
-            for cat in ("text", "formula", "table"):
-                lp = b_manifests / f"{cat}.lance"
-                if not lp.exists():
-                    continue
-                try:
-                    with _lance_write_lock:
-                        ds = lance.dataset(str(lp))
-                        if "consistency_pattern" not in ds.schema.names:
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    if "consistency_pattern" not in ds.schema.names:
+                        continue
+                    tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
+                    for row in tbl.to_pylist():
+                        key = (row["sample_id"], row["block_idx"])
+                        if key not in all_sample_keys:
+                            continue  # 只看抽样 block
+                        pattern = row.get("consistency_pattern")
+                        if not pattern:
                             continue
-                        tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
-                        for row in tbl.to_pylist():
-                            key = (row["sample_id"], row["block_idx"])
-                            if key not in all_sample_keys:
-                                continue  # 只看抽样 block
-                            pattern = row.get("consistency_pattern")
-                            if not pattern:
-                                continue
-                            tier = PATTERN_TIER.get(pattern)
-                            if not tier:
-                                continue
-                            # 查找 cluster_id
-                            cat_info = clusters_data.get(cat, {})
-                            labels_map = cat_info.get("labels", {})
-                            ckey = f"{row['sample_id']}:{row['block_idx']}"
-                            cid = labels_map.get(ckey)
-                            if cid is None:
-                                continue
-                            cluster_key = (cat, cid)
-                            cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
-                            cluster_diff_map[cluster_key][tier] += 1
-                except Exception as e:
-                    print(f"[difficulty-samples] 读取 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
-                    continue
+                        tier = PATTERN_TIER.get(pattern)
+                        if not tier:
+                            continue
+                        # 查找 cluster_id
+                        cat_info = clusters_data.get(cat, {})
+                        labels_map = cat_info.get("labels", {})
+                        ckey = f"{row['sample_id']}:{row['block_idx']}"
+                        cid = labels_map.get(ckey)
+                        if cid is None:
+                            continue
+                        cluster_key = (cat, cid)
+                        cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
+                        cluster_diff_map[cluster_key][tier] += 1
+            except Exception as e:
+                print(f"[difficulty-samples] 读取 {cat}.lance 失败: {e}", file=sys.stderr)
+                continue
 
         if not cluster_diff_map:
             return {"source_id": source_id, "batch_id": batch_id,
