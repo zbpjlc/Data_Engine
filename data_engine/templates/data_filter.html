@@ -3357,18 +3357,30 @@
                     }
                 }).catch(() => {});
 
-                // 3. 加载已有 Element CMCV 结果（遍历所有批次）
+                // 3. 加载已有 Element CMCV 结果（遍历所有批次，聚合 tier_histogram）
                 if (batchData.length > 0) {
-                    batchData.forEach(b => {
+                    const cmcvPromises = batchData.map(b =>
                         fetch(`/api/cmcv/${b.source_id}/${b.batch_id}/results`)
-                            .then(r => r.ok ? r.json() : null)
-                            .then(data => {
-                                if (data && data.tier_histogram) {
-                                    showElemCmcvButton(true);
-                                    loadElemCmcvResults(b.source_id, b.batch_id);
-                                    document.getElementById('eo-empty')?.classList.add('hidden');
-                                }
-                            }).catch(() => {});
+                            .then(r => r.ok ? r.json() : null).catch(() => null)
+                    );
+                    Promise.all(cmcvPromises).then(results => {
+                        const valid = results.filter(r => r && r.tier_histogram);
+                        if (valid.length === 0) return;
+                        showElemCmcvButton(true);
+                        document.getElementById('eo-empty')?.classList.add('hidden');
+                        // 聚合所有批次的 tier_histogram
+                        const aggHist = {easy: 0, medium: 0, hard: 0};
+                        let totalBlocks = 0;
+                        valid.forEach(d => {
+                            totalBlocks += d.total_blocks || 0;
+                            for (const [k, v] of Object.entries(d.tier_histogram || {})) {
+                                if (aggHist[k] !== undefined) aggHist[k] += v;
+                            }
+                        });
+                        document.getElementById('ecmcv-easy').textContent = aggHist.easy;
+                        document.getElementById('ecmcv-medium').textContent = aggHist.medium;
+                        document.getElementById('ecmcv-hard').textContent = aggHist.hard;
+                        document.getElementById('ecmcv-detail').textContent = `共 ${valid.length} 个批次, ${totalBlocks} blocks`;
                     });
                 }
 
