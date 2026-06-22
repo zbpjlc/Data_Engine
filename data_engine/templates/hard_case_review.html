@@ -17,335 +17,429 @@
                         <a href="/" class="text-gray-600 hover:text-blue-600">数据地图</a>
                         <a href="/data-filter" class="text-gray-600 hover:text-blue-600">数据筛选</a>
                         <a href="/hard-case-review" class="text-blue-600 font-medium">Hard Case复核</a>
-                        <a href="/qa-sampling" class="text-gray-600 hover:text-blue-600">QA抽检</a>
                         <a href="/lancedb" class="text-gray-600 hover:text-blue-600">LanceData</a>
                     </nav>
                 </div>
             </div>
         </header>
 
-        <!-- Main Content -->
         <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <!-- Controls -->
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div class="bg-white rounded-lg shadow mb-6 p-4">
+                <div class="flex flex-wrap items-center gap-3">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">选择数据源</label>
-                        <select id="source-select" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="">全部数据源</option>
+                        <label class="block text-xs font-medium text-gray-500 mb-1">数据源</label>
+                        <select id="source-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[160px]">
+                            <option value="">选择数据源...</option>
                         </select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">选择批次</label>
-                        <select id="batch-select" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="">全部批次</option>
+                        <label class="block text-xs font-medium text-gray-500 mb-1">批次</label>
+                        <select id="batch-select" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[240px]">
+                            <option value="">选择批次...</option>
                         </select>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">任务类型</label>
-                        <select id="task-type-select" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="">全部类型</option>
-                            <option value="layout">布局检测</option>
-                            <option value="text">文本识别</option>
-                            <option value="formula">公式识别</option>
-                            <option value="table">表格识别</option>
-                        </select>
-                    </div>
-                    <div class="flex items-end">
-                        <button onclick="loadHardCases()" class="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 transition-colors">
-                            加载样本
-                        </button>
+                    <div class="flex items-end gap-2">
+                        <button id="btn-load" class="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700">加载 Hard Cases</button>
+                        <button id="btn-run" class="px-4 py-2 bg-rose-600 text-white text-sm rounded-md hover:bg-rose-700 hidden">运行 Judge-and-Refine</button>
+                        <button id="btn-stop" class="px-4 py-2 bg-gray-200 text-sm rounded-md hover:bg-gray-300 hidden">停止</button>
                     </div>
                 </div>
             </div>
 
-            <!-- Sample Review Area -->
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <!-- Original Image -->
-                <div class="bg-white rounded-lg shadow">
-                    <div class="px-6 py-4 border-b border-gray-200">
-                        <h2 class="text-lg font-semibold text-gray-900">原始图像</h2>
+            <!-- Stats -->
+            <div id="stats-panel" class="grid grid-cols-4 gap-4 mb-6 hidden">
+                <div class="bg-white rounded-lg shadow p-4 text-center">
+                    <div class="text-xs text-gray-500">Hard 总数</div>
+                    <div id="stat-total" class="text-2xl font-bold text-gray-800">-</div>
+                </div>
+                <div class="bg-green-50 rounded-lg shadow p-4 text-center">
+                    <div class="text-xs text-green-600">已纠正</div>
+                    <div id="stat-corrected" class="text-2xl font-bold text-green-800">-</div>
+                </div>
+                <div class="bg-yellow-50 rounded-lg shadow p-4 text-center">
+                    <div class="text-xs text-yellow-600">已审核</div>
+                    <div id="stat-judged" class="text-2xl font-bold text-yellow-800">-</div>
+                </div>
+                <div class="bg-red-50 rounded-lg shadow p-4 text-center">
+                    <div class="text-xs text-red-600">需专家</div>
+                    <div id="stat-expert" class="text-2xl font-bold text-red-800">-</div>
+                </div>
+            </div>
+
+            <!-- Progress -->
+            <div id="progress-panel" class="bg-white rounded-lg shadow mb-6 p-4 hidden">
+                <div class="flex items-center gap-3 mb-2">
+                    <div class="animate-spin h-5 w-5 border-2 border-rose-600 border-t-transparent rounded-full"></div>
+                    <span id="progress-msg" class="text-sm text-gray-600">...</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-2">
+                    <div id="progress-bar" class="bg-rose-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Main Content: Left list + Right detail -->
+            <div class="flex gap-6">
+                <!-- Left: Block List -->
+                <div class="w-1/3 bg-white rounded-lg shadow">
+                    <div class="px-4 py-3 border-b border-gray-200">
+                        <h3 class="text-sm font-semibold text-gray-700">Hard Blocks</h3>
+                        <div class="flex gap-2 mt-2">
+                            <button class="filter-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-filter="all">全部</button>
+                            <button class="filter-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-filter="uncorrected">未纠正</button>
+                            <button class="filter-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-filter="corrected">已纠正</button>
+                            <button class="filter-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-filter="expert">需专家</button>
+                        </div>
                     </div>
-                    <div class="p-6">
-                        <div id="original-image-container" class="bg-gray-100 rounded-lg min-h-[400px] flex items-center justify-center">
-                            <p class="text-gray-500">请选择样本进行复核</p>
-                        </div>
-                        <div id="sample-info" class="mt-4 text-sm text-gray-600 hidden">
-                            <div class="grid grid-cols-2 gap-4">
-                                <div><strong>样本ID:</strong> <span id="sample-id"></span></div>
-                                <div><strong>批次:</strong> <span id="sample-batch"></span></div>
-                                <div><strong>类型:</strong> <span id="sample-type"></span></div>
-                                <div><strong>难度:</strong> <span id="sample-difficulty"></span></div>
-                            </div>
-                        </div>
+                    <div id="block-list" class="divide-y max-h-[70vh] overflow-y-auto">
+                        <div class="px-4 py-8 text-center text-gray-400 text-sm">请先选择数据源和批次</div>
                     </div>
                 </div>
 
-                <!-- Review Panel -->
-                <div class="bg-white rounded-lg shadow">
-                    <div class="px-6 py-4 border-b border-gray-200">
-                        <h2 class="text-lg font-semibold text-gray-900">复核面板</h2>
+                <!-- Right: Detail -->
+                <div class="w-2/3 bg-white rounded-lg shadow">
+                    <div id="detail-empty" class="px-4 py-16 text-center text-gray-400 text-sm">
+                        选择左侧 Block 查看详情
                     </div>
-                    <div class="p-6">
-                        <div id="review-content" class="space-y-4">
-                            <div class="text-center text-gray-500 py-8">
-                                请选择样本进行复核
-                            </div>
-                        </div>
-                        
-                        <!-- Review Actions -->
-                        <div id="review-actions" class="mt-6 space-y-3 hidden">
-                            <div class="flex space-x-3">
-                                <button onclick="submitReview('correct')" class="flex-1 bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition-colors">
-                                    ✓ 正确
-                                </button>
-                                <button onclick="submitReview('incorrect')" class="flex-1 bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 transition-colors">
-                                    ✗ 错误
-                                </button>
-                                <button onclick="submitReview('needs_expert')" class="flex-1 bg-yellow-600 text-white px-4 py-2 rounded-md hover:bg-yellow-700 transition-colors">
-                                    ? 需要专家
-                                </button>
-                            </div>
+                    <div id="detail-panel" class="hidden">
+                        <div class="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
                             <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-2">备注</label>
-                                <textarea id="review-comment" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="请输入复核备注..."></textarea>
+                                <span id="detail-id" class="font-medium text-gray-800"></span>
+                                <span id="detail-type" class="ml-2 text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600"></span>
+                                <span id="detail-status" class="ml-2 text-xs px-2 py-0.5 rounded"></span>
+                            </div>
+                        </div>
+                        <div class="p-4 space-y-4">
+                            <!-- Image -->
+                            <div>
+                                <h4 class="text-xs font-medium text-gray-500 mb-1">原始图片</h4>
+                                <img id="detail-image" class="max-w-full max-h-[300px] object-contain border rounded" />
+                            </div>
+                            <!-- OCR Results -->
+                            <div>
+                                <h4 class="text-xs font-medium text-gray-500 mb-2">三模型 OCR 结果</h4>
+                                <div class="grid grid-cols-3 gap-2 text-xs">
+                                    <div class="bg-blue-50 rounded p-2">
+                                        <div class="font-medium text-blue-700 mb-1">PaddleOCR</div>
+                                        <div id="detail-paddle" class="text-gray-700 break-words max-h-[120px] overflow-y-auto"></div>
+                                    </div>
+                                    <div class="bg-green-50 rounded p-2">
+                                        <div class="font-medium text-green-700 mb-1">GLM OCR</div>
+                                        <div id="detail-glm" class="text-gray-700 break-words max-h-[120px] overflow-y-auto"></div>
+                                    </div>
+                                    <div class="bg-purple-50 rounded p-2">
+                                        <div class="font-medium text-purple-700 mb-1">自研 OCR</div>
+                                        <div id="detail-self" class="text-gray-700 break-words max-h-[120px] overflow-y-auto"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Judge Result -->
+                            <div id="judge-result" class="hidden">
+                                <h4 class="text-xs font-medium text-gray-500 mb-2">Judge-and-Refine 结果</h4>
+                                <div class="bg-amber-50 border border-amber-200 rounded p-3 text-xs">
+                                    <div class="flex items-center gap-2 mb-2">
+                                        <span class="font-medium text-amber-700">置信度:</span>
+                                        <span id="judge-confidence" class="font-bold"></span>
+                                        <span class="text-gray-500">| 轮数:</span>
+                                        <span id="judge-rounds"></span>
+                                    </div>
+                                    <div id="judge-corrected-text" class="hidden mb-2">
+                                        <div class="font-medium text-green-700 mb-1">纠正结果:</div>
+                                        <div id="judge-corrected-content" class="bg-white rounded p-2 text-gray-700 break-words max-h-[120px] overflow-y-auto"></div>
+                                    </div>
+                                    <div id="judge-errors" class="hidden">
+                                        <div class="font-medium text-red-700 mb-1">错误定位:</div>
+                                        <div id="judge-errors-content" class="text-gray-600"></div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            </div>
-
-            <!-- Sample List -->
-            <div class="bg-white rounded-lg shadow mt-6">
-                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                    <h2 class="text-lg font-semibold text-gray-900">待复核样本列表</h2>
-                    <div class="text-sm text-gray-600">
-                        总计: <span id="total-samples">0</span> | 已复核: <span id="reviewed-samples">0</span>
-                    </div>
-                </div>
-                <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-gray-200">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">样本ID</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">批次</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类型</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">难度</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
-                            </tr>
-                        </thead>
-                        <tbody class="bg-white divide-y divide-gray-200" id="samples-table">
-                            <tr>
-                                <td colspan="6" class="px-6 py-8 text-center text-gray-500">
-                                    暂无数据，请选择条件并加载样本
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
                 </div>
             </div>
         </main>
     </div>
 
     <script>
-        let currentSamples = [];
-        let currentSampleIndex = 0;
+        let allSources = [];
+        let hardBlocks = [];
+        let selectedBlock = null;
+        let currentFilter = 'all';
 
-        // 页面加载时初始化
-        document.addEventListener('DOMContentLoaded', function() {
-            loadSources();
-        });
-
-        async function loadSources() {
+        // Init
+        async function init() {
             try {
-                const response = await fetch('/api/status');
-                const data = await response.json();
-                const sourceSelect = document.getElementById('source-select');
-                
-                data.sources.forEach(source => {
-                    const option = document.createElement('option');
-                    option.value = source.source_id;
-                    option.textContent = `${source.source_id} (${source.category})`;
-                    sourceSelect.appendChild(option);
-                });
-            } catch (error) {
-                console.error('加载数据源失败:', error);
+                const res = await fetch('/api/lancedb/sources');
+                const data = await res.json();
+                allSources = data.sources || [];
+                populateSourceSelect();
+            } catch (e) {
+                console.error('Failed to load sources:', e);
             }
         }
 
-        document.getElementById('source-select').addEventListener('change', async function() {
-            const sourceId = this.value;
-            const batchSelect = document.getElementById('batch-select');
-            batchSelect.innerHTML = '<option value="">全部批次</option>';
-            
-            if (sourceId) {
-                try {
-                    const response = await fetch(`/api/sources/${sourceId}/batches`);
-                    const data = await response.json();
-                    
-                    data.batches.forEach(batch => {
-                        const option = document.createElement('option');
-                        option.value = batch.batch_id;
-                        option.textContent = batch.batch_id;
-                        batchSelect.appendChild(option);
-                    });
-                } catch (error) {
-                    console.error('加载批次失败:', error);
-                }
-            }
-        });
+        function populateSourceSelect() {
+            const sel = document.getElementById('source-select');
+            sel.innerHTML = '<option value="">选择数据源...</option>';
+            const sources = [...new Set(allSources.map(s => s.source_id))];
+            sources.forEach(src => {
+                const opt = document.createElement('option');
+                opt.value = src;
+                opt.textContent = src;
+                sel.appendChild(opt);
+            });
+        }
 
+        function populateBatchSelect() {
+            const sel = document.getElementById('batch-select');
+            sel.innerHTML = '<option value="">选择批次...</option>';
+            const src = document.getElementById('source-select').value;
+            const filtered = src ? allSources.filter(s => s.source_id === src) : allSources;
+            const grouped = {};
+            filtered.forEach(s => {
+                const key = `${s.source_id}/${s.batch_id}`;
+                if (!grouped[key]) grouped[key] = s;
+            });
+            Object.values(grouped).forEach(g => {
+                const opt = document.createElement('option');
+                opt.value = `${g.source_id}/${g.batch_id}`;
+                opt.textContent = `${g.source_id} / ${g.batch_id}`;
+                sel.appendChild(opt);
+            });
+        }
+
+        // Load hard cases
         async function loadHardCases() {
-            const sourceId = document.getElementById('source-select').value;
-            const batchId = document.getElementById('batch-select').value;
-            const taskType = document.getElementById('task-type-select').value;
-            
+            const val = document.getElementById('batch-select').value;
+            if (!val) { alert('请选择批次'); return; }
+            const [sourceId, batchId] = val.split('/');
+
+            document.getElementById('btn-load').textContent = '加载中...';
             try {
-                // 这里应该调用实际的API获取hard cases
-                // 暂时使用模拟数据
-                currentSamples = await getMockHardCases(sourceId, batchId, taskType);
-                renderSamplesTable();
-                updateSampleCount();
-            } catch (error) {
-                console.error('加载困难样本失败:', error);
+                const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}`);
+                const data = await res.json();
+                hardBlocks = data.blocks || [];
+
+                document.getElementById('stat-total').textContent = data.total || 0;
+                document.getElementById('stat-corrected').textContent = data.corrected || 0;
+                document.getElementById('stat-judged').textContent = data.judged || 0;
+                document.getElementById('stat-expert').textContent = data.needs_expert || 0;
+                document.getElementById('stats-panel').classList.remove('hidden');
+                document.getElementById('btn-run').classList.remove('hidden');
+
+                renderBlockList();
+            } catch (e) {
+                console.error('Failed to load hard cases:', e);
+                alert('加载失败: ' + e.message);
+            } finally {
+                document.getElementById('btn-load').textContent = '加载 Hard Cases';
             }
         }
 
-        function renderSamplesTable() {
-            const tbody = document.getElementById('samples-table');
-            
-            if (currentSamples.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="px-6 py-8 text-center text-gray-500">暂无数据</td></tr>';
+        function renderBlockList() {
+            const list = document.getElementById('block-list');
+            const filtered = hardBlocks.filter(b => {
+                if (currentFilter === 'all') return true;
+                if (currentFilter === 'corrected') return b.corrected;
+                if (currentFilter === 'expert') return b.needs_expert;
+                if (currentFilter === 'uncorrected') return b.judged && !b.corrected && !b.needs_expert;
+                return true;
+            });
+
+            if (filtered.length === 0) {
+                list.innerHTML = '<div class="px-4 py-8 text-center text-gray-400 text-sm">无匹配数据</div>';
                 return;
             }
-            
-            tbody.innerHTML = currentSamples.map((sample, index) => `
-                <tr class="${index === currentSampleIndex ? 'bg-blue-50' : ''}">
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${sample.id}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${sample.batch_id}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${sample.task_type}</td>
-                    <td class="px-6 py-4 whitespace-nowrap">
-                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">${sample.difficulty}</span>
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap">
-                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusClass(sample.status)}">${sample.status}</span>
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm">
-                        <button onclick="selectSample(${index})" class="text-blue-600 hover:text-blue-900">复核</button>
-                    </td>
-                </tr>
-            `).join('');
+
+            list.innerHTML = filtered.map((b, i) => {
+                const statusBadge = b.corrected
+                    ? '<span class="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">已纠正</span>'
+                    : b.needs_expert
+                    ? '<span class="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">需专家</span>'
+                    : b.judged
+                    ? '<span class="text-xs px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">已审核</span>'
+                    : '<span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">待处理</span>';
+                return `<div class="px-3 py-2 hover:bg-gray-50 cursor-pointer block-item" data-idx="${i}">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xs text-gray-700 truncate">${b.sample_id}:${b.block_idx}</span>
+                        ${statusBadge}
+                    </div>
+                    <div class="text-xs text-gray-400">${b.block_type}</div>
+                </div>`;
+            }).join('');
+
+            list.querySelectorAll('.block-item').forEach(el => {
+                el.addEventListener('click', () => {
+                    const idx = parseInt(el.dataset.idx);
+                    selectBlock(filtered[idx]);
+                    list.querySelectorAll('.block-item').forEach(e => e.classList.remove('bg-blue-50'));
+                    el.classList.add('bg-blue-50');
+                });
+            });
         }
 
-        function selectSample(index) {
-            currentSampleIndex = index;
-            const sample = currentSamples[index];
-            
-            // 更新表格高亮
-            renderSamplesTable();
-            
-            // 显示样本信息
-            document.getElementById('sample-info').classList.remove('hidden');
-            document.getElementById('sample-id').textContent = sample.id;
-            document.getElementById('sample-batch').textContent = sample.batch_id;
-            document.getElementById('sample-type').textContent = sample.task_type;
-            document.getElementById('sample-difficulty').textContent = sample.difficulty;
-            
-            // 显示图像（这里应该是实际的图像URL）
-            document.getElementById('original-image-container').innerHTML = `
-                <img src="/api/samples/${sample.id}/image" alt="Sample ${sample.id}" class="max-w-full max-h-[400px] object-contain" onerror="this.onerror=null; this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZTVlN2ViIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzlhOWU5ZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPuWbvueJh+WKoOi9veWksei0pTwvdGV4dD48L3N2Zz4=';">
-            `;
-            
-            // 显示复核面板
-            document.getElementById('review-actions').classList.remove('hidden');
-            document.getElementById('review-content').innerHTML = `
-                <div class="space-y-3">
-                    <div class="p-3 bg-gray-50 rounded">
-                        <strong>模型预测结果:</strong>
-                        <p class="mt-1 text-sm">${sample.prediction || '暂无预测结果'}</p>
-                    </div>
-                    <div class="p-3 bg-yellow-50 rounded">
-                        <strong>不一致原因:</strong>
-                        <p class="mt-1 text-sm">${sample.inconsistency_reason || '模型间预测结果不一致'}</p>
-                    </div>
-                </div>
-            `;
+        function selectBlock(block) {
+            selectedBlock = block;
+            document.getElementById('detail-empty').classList.add('hidden');
+            document.getElementById('detail-panel').classList.remove('hidden');
+
+            document.getElementById('detail-id').textContent = `${block.sample_id}:${block.block_idx}`;
+            document.getElementById('detail-type').textContent = block.block_type;
+
+            const statusEl = document.getElementById('detail-status');
+            if (block.corrected) {
+                statusEl.textContent = '已纠正';
+                statusEl.className = 'ml-2 text-xs px-2 py-0.5 rounded bg-green-100 text-green-700';
+            } else if (block.needs_expert) {
+                statusEl.textContent = '需专家';
+                statusEl.className = 'ml-2 text-xs px-2 py-0.5 rounded bg-red-100 text-red-700';
+            } else if (block.judged) {
+                statusEl.textContent = '已审核';
+                statusEl.className = 'ml-2 text-xs px-2 py-0.5 rounded bg-yellow-100 text-yellow-700';
+            } else {
+                statusEl.textContent = '待处理';
+                statusEl.className = 'ml-2 text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-500';
+            }
+
+            // Load image
+            loadBlockImage(block);
+
+            // Show OCR results
+            const cat = block.block_type === 'table' ? 'table' : block.block_type === 'formula' ? 'formula' : 'text';
+            document.getElementById('detail-paddle').textContent = block[`paddle_${cat}`] || '(无)';
+            document.getElementById('detail-glm').textContent = block[`glm_${cat}`] || '(无)';
+            document.getElementById('detail-self').textContent = block[`self_${cat}`] || '(无)';
+
+            // Show judge result
+            const judgeEl = document.getElementById('judge-result');
+            if (block.judged) {
+                judgeEl.classList.remove('hidden');
+                document.getElementById('judge-confidence').textContent = (block.judge_confidence || 0).toFixed(2);
+                document.getElementById('judge-rounds').textContent = block.judge_rounds || 0;
+
+                const correctedEl = document.getElementById('judge-corrected-text');
+                const correctedContent = document.getElementById('judge-corrected-content');
+                if (block.corrected) {
+                    correctedEl.classList.remove('hidden');
+                    const refined = block[`judge_refined_${cat}`] || block.judge_refined_text || block.judge_refined_formula || block.judge_refined_table || '(无)';
+                    correctedContent.textContent = typeof refined === 'string' ? refined : JSON.stringify(refined);
+                } else {
+                    correctedEl.classList.add('hidden');
+                }
+
+                const errorsEl = document.getElementById('judge-errors');
+                const errorsContent = document.getElementById('judge-errors-content');
+                if (block.judge_error_locations) {
+                    try {
+                        const errors = JSON.parse(block.judge_error_locations);
+                        if (errors.length > 0) {
+                            errorsEl.classList.remove('hidden');
+                            errorsContent.innerHTML = errors.map(e => `<div class="mb-1">• ${e.description || JSON.stringify(e)}</div>`).join('');
+                        } else {
+                            errorsEl.classList.add('hidden');
+                        }
+                    } catch { errorsEl.classList.add('hidden'); }
+                } else {
+                    errorsEl.classList.add('hidden');
+                }
+            } else {
+                judgeEl.classList.add('hidden');
+            }
         }
 
-        async function submitReview(result) {
-            const sample = currentSamples[currentSampleIndex];
-            const comment = document.getElementById('review-comment').value;
-            
+        async function loadBlockImage(block) {
+            const img = document.getElementById('detail-image');
+            img.src = '';
+            img.alt = '加载中...';
             try {
-                // 这里应该调用实际的API提交复核结果
-                console.log('提交复核结果:', { sampleId: sample.id, result, comment });
-                
-                // 更新样本状态
-                sample.status = result === 'correct' ? 'approved' : result === 'incorrect' ? 'rejected' : 'expert_review';
-                sample.review_comment = comment;
-                
-                // 渲染更新后的表格
-                renderSamplesTable();
-                updateSampleCount();
-                
-                // 清空复核面板
-                document.getElementById('review-actions').classList.add('hidden');
-                document.getElementById('review-content').innerHTML = '<div class="text-center text-gray-500 py-8">请选择样本进行复核</div>';
-                document.getElementById('sample-info').classList.add('hidden');
-                document.getElementById('original-image-container').innerHTML = '<p class="text-gray-500">请选择样本进行复核</p>';
-                document.getElementById('review-comment').value = '';
-                
-                // 自动选择下一个未复核的样本
-                const nextIndex = currentSamples.findIndex((s, i) => i > currentSampleIndex && !s.status);
-                if (nextIndex !== -1) {
-                    selectSample(nextIndex);
-                }
-                
-            } catch (error) {
-                console.error('提交复核结果失败:', error);
+                const src = document.getElementById('source-select').value;
+                const batch = document.getElementById('batch-select').value.split('/')[1];
+                const cat = block.block_type === 'table' ? 'table' : block.block_type === 'formula' ? 'formula' : 'text';
+                const url = `/api/lancedb/${encodeURIComponent(src)}/${encodeURIComponent(batch)}/image/${block.sample_id}?dataset=${cat}&block_idx=${block.block_idx}`;
+                img.src = url;
+            } catch (e) {
+                img.alt = '图片加载失败';
             }
         }
 
-        function getStatusClass(status) {
-            switch (status) {
-                case 'approved': return 'bg-green-100 text-green-800';
-                case 'rejected': return 'bg-red-100 text-red-800';
-                case 'expert_review': return 'bg-yellow-100 text-yellow-800';
-                default: return 'bg-gray-100 text-gray-800';
+        // Run Judge-and-Refine
+        async function runJudgeRefine() {
+            const val = document.getElementById('batch-select').value;
+            if (!val) return;
+            const [sourceId, batchId] = val.split('/');
+
+            document.getElementById('btn-run').textContent = '启动中...';
+            document.getElementById('btn-run').disabled = true;
+            document.getElementById('progress-panel').classList.remove('hidden');
+            document.getElementById('btn-stop').classList.remove('hidden');
+
+            try {
+                const res = await fetch(`/api/judge-refine/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({max_rounds: 3, force: false}),
+                });
+                const data = await res.json();
+                if (data.task_id) {
+                    pollProgress(data.task_id);
+                }
+            } catch (e) {
+                alert('启动失败: ' + e.message);
+                document.getElementById('btn-run').textContent = '运行 Judge-and-Refine';
+                document.getElementById('btn-run').disabled = false;
             }
         }
 
-        function updateSampleCount() {
-            const total = currentSamples.length;
-            const reviewed = currentSamples.filter(s => s.status).length;
-            document.getElementById('total-samples').textContent = total;
-            document.getElementById('reviewed-samples').textContent = reviewed;
+        function pollProgress(taskId) {
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/progress');
+                    const data = await res.json();
+                    const task = (data.tasks || {})[taskId];
+                    if (!task) return;
+
+                    const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                    document.getElementById('progress-bar').style.width = pct + '%';
+                    document.getElementById('progress-msg').textContent = task.message || `${task.current}/${task.total}`;
+
+                    if (task.status === 'completed' || task.status === 'failed') {
+                        clearInterval(interval);
+                        document.getElementById('btn-run').textContent = '运行 Judge-and-Refine';
+                        document.getElementById('btn-run').disabled = false;
+                        document.getElementById('btn-stop').classList.add('hidden');
+                        // Reload results
+                        loadHardCases();
+                    }
+                } catch (e) {}
+            }, 2000);
         }
 
-        // 模拟数据
-        async function getMockHardCases(sourceId, batchId, taskType) {
-            return [
-                {
-                    id: 'sample_001',
-                    batch_id: batchId || 'batch_001',
-                    task_type: taskType || 'formula',
-                    difficulty: 'hard',
-                    status: null,
-                    prediction: 'E=mc²',
-                    inconsistency_reason: '模型A和模型B对公式识别结果不一致'
-                },
-                {
-                    id: 'sample_002',
-                    batch_id: batchId || 'batch_001',
-                    task_type: taskType || 'table',
-                    difficulty: 'hard',
-                    status: null,
-                    prediction: '3x3表格',
-                    inconsistency_reason: '表格结构识别存在分歧'
-                }
-            ];
-        }
+        // Filter buttons
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                currentFilter = btn.dataset.filter;
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('bg-blue-100', 'text-blue-700'));
+                btn.classList.add('bg-blue-100', 'text-blue-700');
+                renderBlockList();
+            });
+        });
+
+        // Event listeners
+        document.getElementById('source-select').addEventListener('change', populateBatchSelect);
+        document.getElementById('btn-load').addEventListener('click', loadHardCases);
+        document.getElementById('btn-run').addEventListener('click', runJudgeRefine);
+        document.getElementById('btn-stop').addEventListener('click', async () => {
+            const val = document.getElementById('batch-select').value;
+            if (!val) return;
+            const [sourceId, batchId] = val.split('/');
+            await fetch('/api/stop', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({task_id: `judge_refine_${sourceId}_${batchId}`}),
+            });
+        });
+
+        init();
     </script>
 </body>
 </html>

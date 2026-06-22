@@ -2153,6 +2153,252 @@ async def get_difficulty_aware_samples(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Judge-and-Refine (Hard Case 自动纠错) ──────────────────────────────────
+
+@app.get("/api/hard-cases/{source_id}/{batch_id}")
+async def get_hard_cases(source_id: str, batch_id: str):
+    """获取需要 Judge-and-Refine 的 Hard block 列表。"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        hard_blocks = []
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    cols = ds.schema.names
+                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json",
+                                 "consistency_pattern"]
+                    for c in ("paddle_text", "glm_text", "self_text",
+                              "paddle_table", "glm_table", "self_table",
+                              "paddle_formula", "glm_formula", "self_formula",
+                              "judged", "corrected", "needs_expert",
+                              "judge_confidence", "judge_rounds"):
+                        if c in cols:
+                            read_cols.append(c)
+                    tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
+                for row in tbl.to_pylist():
+                    if row.get("consistency_pattern") != "all_disagree":
+                        continue
+                    hard_blocks.append(row)
+            except Exception as e:
+                print(f"[hard-cases] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+
+        return {
+            "total": len(hard_blocks),
+            "judged": sum(1 for b in hard_blocks if b.get("judged")),
+            "corrected": sum(1 for b in hard_blocks if b.get("corrected")),
+            "needs_expert": sum(1 for b in hard_blocks if b.get("needs_expert")),
+            "blocks": hard_blocks,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/judge-refine/{source_id}/{batch_id}")
+async def start_judge_refine(source_id: str, batch_id: str, request: Request):
+    """启动 Judge-and-Refine 纠错流程。"""
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        max_rounds: int = body.get("max_rounds", 3)
+        force: bool = body.get("force", False)
+
+        task_id = f"judge_refine_{source_id}_{batch_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+            if task_id in alive_threads:
+                return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
+            progress_tracker.stop_task(task_id, "线程已终止")
+
+        def execute():
+            try:
+                from data_engine.ocr.judge_refine import JudgeRefineEngine
+
+                source = registry.get(source_id)
+                batch_dir = source.resolve_batch_dir(batch_id)
+                manifests_dir = batch_dir / "manifests"
+
+                # 收集所有 Hard blocks
+                hard_blocks = []
+                for cat in ("text", "formula", "table"):
+                    lp = manifests_dir / f"{cat}.lance"
+                    if not lp.exists():
+                        continue
+                    try:
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(lp))
+                            cols = ds.schema.names
+                            read_cols = ["sample_id", "block_idx", "block_type", "bbox_json"]
+                            for c in ("paddle_text", "glm_text", "self_text",
+                                      "paddle_table", "glm_table", "self_table",
+                                      "paddle_formula", "glm_formula", "self_formula",
+                                      "image_data", "judged", "consistency_pattern"):
+                                if c in cols:
+                                    read_cols.append(c)
+                            tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
+                        for row in tbl.to_pylist():
+                            if row.get("consistency_pattern") != "all_disagree":
+                                continue
+                            if not force and row.get("judged"):
+                                continue
+                            row["_cat"] = cat
+                            hard_blocks.append(row)
+                    except Exception as e:
+                        print(f"[judge-refine] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+
+                if not hard_blocks:
+                    progress_tracker.complete_task(task_id=task_id, message="无需纠错的 Hard block")
+                    return
+
+                progress_tracker.start_task(
+                    task_id=task_id, task_type="judge_refine",
+                    source_id=source_id, batch_id=batch_id,
+                    total=len(hard_blocks), message=f"开始纠错 {len(hard_blocks)} 个 Hard block",
+                )
+
+                engine = JudgeRefineEngine(max_rounds=max_rounds)
+
+                for i, block in enumerate(hard_blocks):
+                    if progress_tracker.is_stopped(task_id):
+                        break
+
+                    cat = block.pop("_cat")
+                    sid = block["sample_id"]
+                    bidx = block["block_idx"]
+
+                    # 获取原始图片
+                    img_bytes = block.get("image_data")
+                    if isinstance(img_bytes, str):
+                        img_bytes = img_bytes.encode("latin-1")
+
+                    # 执行 Judge-and-Refine
+                    try:
+                        rounds = engine.judge_and_refine(
+                            block_type=block.get("block_type", "text"),
+                            paddle_text=block.get("paddle_text"),
+                            glm_text=block.get("glm_text"),
+                            self_text=block.get("self_text"),
+                            paddle_table=block.get("paddle_table"),
+                            glm_table=block.get("glm_table"),
+                            self_table=block.get("self_table"),
+                            paddle_formula=block.get("paddle_formula"),
+                            glm_formula=block.get("glm_formula"),
+                            self_formula=block.get("self_formula"),
+                            original_image=img_bytes,
+                        )
+                    except Exception as e:
+                        print(f"[judge-refine] {sid}/{bidx} 失败: {e}", file=sys.stderr)
+                        rounds = []
+
+                    # 解析最终结果
+                    judged = True
+                    corrected = False
+                    needs_expert = True
+                    refined_text = None
+                    refined_table = None
+                    refined_formula = None
+                    confidence = 0.0
+                    rounds_count = len(rounds)
+                    error_locations = []
+
+                    if rounds:
+                        last = rounds[-1].result
+                        confidence = last.confidence
+                        needs_expert = last.needs_expert
+                        refined_text = last.corrected_text
+                        refined_table = last.corrected_table
+                        refined_formula = last.corrected_formula
+                        error_locations = last.error_locations
+                        corrected = (refined_text is not None or refined_table is not None or refined_formula is not None) and not needs_expert
+
+                    # 写回 lance
+                    try:
+                        lp = manifests_dir / f"{cat}.lance"
+                        with _lance_write_lock:
+                            ds = lance.dataset(str(lp))
+                            update_data = {
+                                "judged": [True],
+                                "corrected": [corrected],
+                                "needs_expert": [needs_expert],
+                                "judge_confidence": [confidence],
+                                "judge_rounds": [rounds_count],
+                                "judge_error_locations": [json.dumps(error_locations, ensure_ascii=False)],
+                            }
+                            if refined_text is not None:
+                                update_data["judge_refined_text"] = [refined_text]
+                            if refined_table is not None:
+                                update_data["judge_refined_table"] = [refined_table if isinstance(refined_table, str) else json.dumps(refined_table, ensure_ascii=False)]
+                            if refined_formula is not None:
+                                update_data["judge_refined_formula"] = [refined_formula]
+                            ds.update(update_data, where=f"sample_id = '{sid}' AND block_idx = {bidx}")
+                    except Exception as e:
+                        print(f"[judge-refine] 写回 {cat}.lance 失败: {e}", file=sys.stderr)
+
+                    progress_tracker.update_progress(
+                        task_id=task_id, current=i + 1,
+                        message=f"Judge-Refine: {i + 1}/{len(hard_blocks)} ({'✓' if corrected else '✗'})",
+                    )
+
+                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(hard_blocks)} 个 Hard block 纠错")
+
+            except Exception as e:
+                print(f"[judge-refine] 任务失败: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc()
+                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
+
+        thread = threading.Thread(target=execute, name=task_id)
+        thread.daemon = True
+        thread.start()
+
+        return {"message": f"已启动 Judge-and-Refine 纠错", "task_id": task_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/judge-refine/{source_id}/{batch_id}/results")
+async def get_judge_refine_results(source_id: str, batch_id: str):
+    """获取 Judge-and-Refine 纠错结果统计。"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        stats = {"total": 0, "judged": 0, "corrected": 0, "needs_expert": 0}
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    if "judged" not in ds.schema.names:
+                        continue
+                    tbl = ds.to_table(columns=["consistency_pattern", "judged", "corrected", "needs_expert"])
+                    for row in tbl.to_pylist():
+                        if row.get("consistency_pattern") != "all_disagree":
+                            continue
+                        stats["total"] += 1
+                        if row.get("judged"):
+                            stats["judged"] += 1
+                        if row.get("corrected"):
+                            stats["corrected"] += 1
+                        if row.get("needs_expert"):
+                            stats["needs_expert"] += 1
+            except Exception:
+                pass
+
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/layout-preview")
 async def run_layout_preview(request: Request):
     """预览 layout 结果：优先读 Lance 缓存，无缓存时才跑模型"""

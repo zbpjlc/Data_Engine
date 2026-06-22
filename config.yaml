@@ -87,3 +87,10 @@ ocr:
     hard_ratio: 15        # hard 分区抽 15%
 
   save_interval: 50 # 每处理 50 个 sample 保存一次
+
+  judge_refine:
+    api_url: "http://localhost:8002"  # Qwen3-VL-235B 本地服务
+    max_rounds: 3                     # 最大纠错轮数
+    agreement_threshold: 0.9          # Judge 置信度阈值
+    timeout: 120                      # 单次 API 调用超时
+    max_retries: 2                    # API 调用重试次数
