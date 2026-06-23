@@ -246,7 +246,13 @@ def cdm_similarity(formula_a: str, formula_b: str) -> float:
 def normalize_text(text: str | None) -> str:
     if not text:
         return ""
-    return re.sub(r"\s+", " ", text).strip()
+    # 全角 → 半角（ASCII 范围 0xFF01-0xFF5E → 0x0021-0x007E）
+    text = "".join(chr(ord(c) - 0xFEE0) if "\uff01" <= c <= "\uff5e" else c for c in text)
+    # 全角空格 → 半角空格
+    text = text.replace("\u3000", " ")
+    # 合并空白
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def normalize_table(table: dict | None) -> dict | None:
