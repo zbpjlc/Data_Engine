@@ -1578,62 +1578,56 @@ async def start_cmcv(source_id: str, batch_id: str = None):
 
 @app.get("/api/cmcv/{source_id}/{batch_id}/results")
 async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
-    """获取 CMCV 比较结果（只统计被 CMCV 处理过的抽样 block）"""
+    """获取单个 batch 的 CMCV 比较结果"""
     try:
-        global_status = collect_global_status(registry)
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
 
-        # 收集当前 batch 的抽样 keys（用于过滤显示）
-        current_sample_keys = set()
+        sample_keys = set()
         try:
             sp = batch_dir / "artifacts" / "element_samples.json"
             if sp.exists():
                 sd = json.loads(sp.read_text(encoding="utf-8"))
                 for s in sd.get("samples", []):
-                    current_sample_keys.add((s["sample_id"], s["block_idx"]))
+                    sample_keys.add((s["sample_id"], s["block_idx"]))
         except Exception:
             pass
 
-        # 收集所有 batch 的抽样 keys（用于确定哪些 block 被 CMCV 处理过）
-        all_sample_keys = set()
-        for b in global_status.batches:
+        rows = []
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
             try:
-                sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
-                if sp.exists():
-                    sd = json.loads(sp.read_text(encoding="utf-8"))
-                    for s in sd.get("samples", []):
-                        all_sample_keys.add((s["sample_id"], s["block_idx"]))
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    col_names = set(ds.schema.names)
+                    read_cols = ["sample_id", "block_idx", "block_type",
+                                 "consistency_pattern", "block_diff_json"]
+                    for prefix in ("paddle", "glm", "self"):
+                        col = f"{prefix}_text"
+                        if col in col_names:
+                            read_cols.append(col)
+                    rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
             except Exception:
                 pass
 
-        rows = []
-        for b in global_status.batches:
-            b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
-            for cat in ("text", "formula", "table"):
-                lp = b_manifests / f"{cat}.lance"
-                if not lp.exists():
-                    continue
-                try:
-                    with _lance_write_lock:
-                        ds = lance.dataset(str(lp))
-                        col_names = set(ds.schema.names)
-                        read_cols = ["sample_id", "block_idx", "block_type",
-                                     "consistency_pattern", "block_diff_json"]
-                        for prefix in ("paddle", "glm", "self"):
-                            col = f"{prefix}_text"
-                            if col in col_names:
-                                read_cols.append(col)
-                        rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
-                except Exception:
-                    pass
-
-        if current_sample_keys:
-            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in current_sample_keys]
+        if sample_keys:
+            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in sample_keys]
 
         if tier:
             rows = [r for r in rows if r.get("consistency_pattern") == tier]
+
+        tier_histogram = {"easy": 0, "medium": 0, "hard": 0}
+        for row in rows:
+            pat = row.get("consistency_pattern", "")
+            if pat == "all_agree":
+                tier_histogram["easy"] += 1
+            elif pat == "partial_agree":
+                tier_histogram["medium"] += 1
+            elif pat == "all_disagree":
+                tier_histogram["hard"] += 1
 
         page_stats: dict[str, dict] = {}
         for row in rows:
@@ -1646,16 +1640,6 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                 page_stats[sid]["worst_pattern"] = "all_disagree"
             elif pat == "partial_agree" and page_stats[sid]["worst_pattern"] != "all_disagree":
                 page_stats[sid]["worst_pattern"] = "partial_agree"
-
-        tier_histogram = {"easy": 0, "medium": 0, "hard": 0}
-        for row in rows:
-            pat = row.get("consistency_pattern", "")
-            if pat == "all_agree":
-                tier_histogram["easy"] += 1
-            elif pat == "partial_agree":
-                tier_histogram["medium"] += 1
-            elif pat == "all_disagree":
-                tier_histogram["hard"] += 1
 
         return {
             "total_blocks": len(rows),

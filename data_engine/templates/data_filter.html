@@ -872,6 +872,8 @@
         const _eoIntervals = {};              // taskId → active flag
         let _ecPollCancelled = false;      // B5 fix: pollEcStatus cancellation token
         let _sourceAbortController = null; // B8 fix: abort stale fetches on source/batch change
+        const ecmcvResults = document.getElementById('ecmcv-results');
+        const ecmcvEmpty = document.getElementById('ecmcv-empty');
 
         function filterBatches() {
             // B8 fix: cancel any in-flight fetches from the previous source/batch selection
@@ -910,6 +912,17 @@
 
             // 加载缓存数据（逐批加载后合并）
             loadAllCachedBuckets(sourceId, filtered, signal);
+
+            // 刷新 CMCV 结果
+            if (!ecmcvResults.classList.contains('hidden')) {
+                const bid = selBatch.value;
+                if (bid && sourceId) {
+                    loadElemCmcvResults(sourceId, bid);
+                } else {
+                    const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
+                    loadElemCmcvResultsAggregated(filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id})));
+                }
+            }
         }
 
         // 直接加载 category-stats，显示拆分结果和无图统计
@@ -1061,6 +1074,16 @@
                 if (toFetch.length > 0) loadEcResultsAggregated(toFetch);
             }
             updateOcrBatchSelect();
+            // 刷新 CMCV 结果
+            if (!ecmcvResults.classList.contains('hidden')) {
+                if (batchId && sourceId) {
+                    loadElemCmcvResults(sourceId, batchId);
+                } else {
+                    const ecSrc = selSource.value;
+                    const filtered = ecSrc ? batchData.filter(b => b.source_id === ecSrc) : batchData;
+                    loadElemCmcvResultsAggregated(filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id})));
+                }
+            }
         }, 300));
 
         selSource.addEventListener('change', debounce(filterBatches, 300));
@@ -3132,8 +3155,6 @@
         const ecmcvBtn = document.getElementById('btn-run-ecmcv');
         const ecmcvProgress = document.getElementById('ecmcv-progress');
         const ecmcvProgressMsg = document.getElementById('ecmcv-progress-msg');
-        const ecmcvResults = document.getElementById('ecmcv-results');
-        const ecmcvEmpty = document.getElementById('ecmcv-empty');
 
         function showElemCmcvButton(show) {
             ecmcvBtn.classList.toggle('hidden', !show);
@@ -3181,8 +3202,6 @@
         });
 
         async function loadElemCmcvResults(optSrc, optBid) {
-            // 如果 init 已经聚合了所有批次数据，不再覆盖
-            if (document.getElementById('ecmcv-results') && !document.getElementById('ecmcv-results').classList.contains('hidden')) return;
             try {
                 const src = optSrc || _ecsBatches[0]?.source_id || getSourceId();
                 const bid = optBid || _ecsBatches[0]?.batch_id || getBatchId();
@@ -3190,16 +3209,44 @@
                 const resp = await fetch(`/api/cmcv/${src}/${bid}/results`);
                 const data = await resp.json();
                 if (data.status === 'not_found') return;
-                const hist = data.tier_histogram || {};
-                document.getElementById('ecmcv-easy').textContent = hist.easy || 0;
-                document.getElementById('ecmcv-medium').textContent = hist.medium || 0;
-                document.getElementById('ecmcv-hard').textContent = hist.hard || 0;
-                document.getElementById('ecmcv-detail').textContent =
-                    `处理 ${data.processed || 0} blocks, ${Object.keys(data.page_tiers || {}).length} pages`;
-                ecmcvResults.classList.remove('hidden');
-                ecmcvEmpty.classList.add('hidden');
-                showElemDiffSampling(true);
+                renderElemCmcvResults(data.tier_histogram, data.total_blocks, data.total_pages, `${src}/${bid}`);
             } catch {}
+        }
+
+        function renderElemCmcvResults(hist, totalBlocks, totalPages, label) {
+            hist = hist || {};
+            document.getElementById('ecmcv-easy').textContent = hist.easy || 0;
+            document.getElementById('ecmcv-medium').textContent = hist.medium || 0;
+            document.getElementById('ecmcv-hard').textContent = hist.hard || 0;
+            document.getElementById('ecmcv-detail').textContent = `${label} — ${totalBlocks || 0} blocks, ${totalPages || 0} pages`;
+            ecmcvResults.classList.remove('hidden');
+            ecmcvEmpty.classList.add('hidden');
+            showElemDiffSampling(true);
+        }
+
+        function loadElemCmcvResultsAggregated(targets) {
+            if (!targets || targets.length === 0) return;
+            const promises = targets.map(t =>
+                fetch(`/api/cmcv/${t.source_id}/${t.batch_id}/results`)
+                    .then(r => r.ok ? r.json() : null).catch(() => null)
+            );
+            Promise.all(promises).then(results => {
+                const valid = results.filter(r => r && r.tier_histogram);
+                if (valid.length === 0) return;
+                const aggHist = {easy: 0, medium: 0, hard: 0};
+                let totalBlocks = 0, totalPages = 0;
+                valid.forEach(d => {
+                    totalBlocks += d.total_blocks || 0;
+                    totalPages += d.total_pages || 0;
+                    for (const [k, v] of Object.entries(d.tier_histogram || {})) {
+                        if (aggHist[k] !== undefined) aggHist[k] += v;
+                    }
+                });
+                const label = targets.length > 1 ? `全部 ${targets.length} 批次` : `${targets[0].source_id}/${targets[0].batch_id}`;
+                renderElemCmcvResults(aggHist, totalBlocks, totalPages, label);
+                showElemCmcvButton(true);
+                document.getElementById('eo-empty')?.classList.add('hidden');
+            });
         }
 
         // === Element Difficulty Sampling ===
@@ -3276,10 +3323,6 @@
                 if (ecsRes && !ecsRes.classList.contains('hidden')) {
                     document.getElementById('eo-empty')?.classList.add('hidden');
                     showElemCmcvButton(true);
-                    // 尝试加载已有 CMCV 结果
-                    const ecsSrc = _ecsBatches[0]?.source_id || getSourceId();
-                    const ecsBid = _ecsBatches[0]?.batch_id || getBatchId();
-                    if (ecsSrc && ecsBid) loadElemCmcvResults(ecsSrc, ecsBid);
                 }
             });
             const ecsResEl = document.getElementById('ecs-results');
@@ -3359,34 +3402,9 @@
                     }
                 }).catch(() => {});
 
-                // 3. 加载已有 Element CMCV 结果（遍历所有批次，聚合 tier_histogram）
+                // 3. 加载已有 Element CMCV 结果（全部批次聚合）
                 if (batchData.length > 0) {
-                    const cmcvPromises = batchData.map(b =>
-                        fetch(`/api/cmcv/${b.source_id}/${b.batch_id}/results`)
-                            .then(r => r.ok ? r.json() : null).catch(() => null)
-                    );
-                    Promise.all(cmcvPromises).then(results => {
-                        const valid = results.filter(r => r && r.tier_histogram);
-                        if (valid.length === 0) return;
-                        showElemCmcvButton(true);
-                        document.getElementById('eo-empty')?.classList.add('hidden');
-                        // 聚合所有批次的 tier_histogram
-                        const aggHist = {easy: 0, medium: 0, hard: 0};
-                        let totalBlocks = 0;
-                        valid.forEach(d => {
-                            totalBlocks += d.total_blocks || 0;
-                            for (const [k, v] of Object.entries(d.tier_histogram || {})) {
-                                if (aggHist[k] !== undefined) aggHist[k] += v;
-                            }
-                        });
-                        document.getElementById('ecmcv-easy').textContent = aggHist.easy;
-                        document.getElementById('ecmcv-medium').textContent = aggHist.medium;
-                        document.getElementById('ecmcv-hard').textContent = aggHist.hard;
-                        document.getElementById('ecmcv-detail').textContent = `共 ${valid.length} 个批次, ${totalBlocks} blocks`;
-                        document.getElementById('ecmcv-results').classList.remove('hidden');
-                        document.getElementById('ecmcv-empty')?.classList.add('hidden');
-                        console.log('[CMCV init] aggregated:', aggHist, 'totalBlocks:', totalBlocks, 'batches:', valid.length);
-                    });
+                    loadElemCmcvResultsAggregated(batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id})));
                 }
 
                 // 4. 加载已有 Per-Cluster Sampling 结果
