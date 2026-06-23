@@ -250,6 +250,9 @@ def normalize_text(text: str | None) -> str:
     text = "".join(chr(ord(c) - 0xFEE0) if "\uff01" <= c <= "\uff5e" else c for c in text)
     # 全角空格 → 半角空格
     text = text.replace("\u3000", " ")
+    # 去掉标点符号周围的空格
+    text = re.sub(r"\s+([,\.\/\;\:\!\?\-\+\=\(\)\[\]\{\}])", r"\1", text)
+    text = re.sub(r"([,\.\/\;\:\!\?\-\+\=\(\)\[\]\{\}])\s+", r"\1", text)
     # 合并空白
     text = re.sub(r"\s+", " ", text).strip()
     return text
