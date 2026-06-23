@@ -2086,20 +2086,52 @@ async def get_difficulty_aware_samples(
             except Exception:
                 pass
 
-        # 3. 按比例归属：每个 cluster 的 block 按 CMCV 分布比例分摊到三个 tier
-        # cluster_diff_map[(cat, cid)] = {"easy": N, "medium": N, "hard": N}（抽样 block 的分布）
-        cluster_diff_map: dict[tuple, dict] = {}
-        for block_key, cid in block_cluster_map.items():
-            cat = block_key[0]
-            cluster_key = (cat, cid)
-            tier = next((t for t in ("easy", "medium", "hard") if block_key in tier_block_map[t]), None)
-            if tier:
-                cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
-                cluster_diff_map[cluster_key][tier] += 1
+        # 2. 从抽样 block 的 CMCV 结果推算每个 cluster 的难度分布
+        PATTERN_TIER = {"all_agree": "easy", "partial_agree": "medium", "all_disagree": "hard"}
 
-        # 统计每个 tier 的 block 总数（从所有 lance block，按比例归属）
+        # cluster_diff_map[(cat, cid)] = {"easy": N, "medium": N, "hard": N}
+        cluster_diff_map: dict[tuple, dict] = {}
+
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
+            try:
+                with _lance_write_lock:
+                    ds = lance.dataset(str(lp))
+                    if "consistency_pattern" not in ds.schema.names:
+                        continue
+                    tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
+                    for row in tbl.to_pylist():
+                        key = (row["sample_id"], row["block_idx"])
+                        if key not in all_sample_keys:
+                            continue
+                        pattern = row.get("consistency_pattern")
+                        if not pattern:
+                            continue
+                        tier = PATTERN_TIER.get(pattern)
+                        if not tier:
+                            continue
+                        cat_info = clusters_data.get(cat, {})
+                        labels_map = cat_info.get("labels", {})
+                        ckey = f"{row['sample_id']}:{row['block_idx']}"
+                        cid = labels_map.get(ckey)
+                        if cid is None:
+                            continue
+                        cluster_key = (cat, cid)
+                        cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
+                        cluster_diff_map[cluster_key][tier] += 1
+            except Exception as e:
+                print(f"[difficulty-samples] 读取 {cat}.lance 失败: {e}", file=sys.stderr)
+                continue
+
+        if not cluster_diff_map:
+            return {"source_id": source_id, "batch_id": batch_id,
+                    "error": "无 CMCV 结果，请先运行 Element CMCV",
+                    "bucket_count": 0, "total_sampled": 0, "buckets": {}}
+
+        # 3. 按比例归属：每个 cluster 的 block 按 CMCV 分布比例分摊到三个 tier
         tier_totals = {"easy": 0, "medium": 0, "hard": 0}
-        # tier_cluster_sizes[tier] = [(cat, cid, proportional_size), ...]
         tier_cluster_sizes: dict[str, list] = {"easy": [], "medium": [], "hard": []}
 
         for cat in ("text", "formula", "table"):
