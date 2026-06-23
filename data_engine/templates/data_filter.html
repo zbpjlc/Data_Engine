@@ -3288,7 +3288,7 @@
             const hard = document.getElementById('eds-hard').value;
             try {
                 const promises = targets.map(t =>
-                    fetch(`/api/bucket-samples-difficulty/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}`)
+                    fetch(`/api/bucket-samples-difficulty/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}&force=true`)
                         .then(r => r.ok ? r.json() : null).catch(() => null)
                 );
                 const results = await Promise.all(promises);
@@ -3410,10 +3410,10 @@
                 // 4. 加载已有 Per-Cluster Sampling 结果
                 loadExistingEcsResults();
 
-                // 5. 加载已有 Difficulty Sampling 结果
+                // 5. 加载已有 Difficulty Sampling 结果（不走缓存，确保数据最新）
                 if (batchData.length > 0) {
                     const promises = batchData.map(b =>
-                        fetch(`/api/bucket-samples-difficulty/${b.source_id}/${b.batch_id}`)
+                        fetch(`/api/bucket-samples-difficulty/${b.source_id}/${b.batch_id}?force=true`)
                             .then(r => r.ok ? r.json() : null).catch(() => null)
                     );
                     Promise.all(promises).then(results => {
