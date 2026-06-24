@@ -3066,24 +3066,17 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     done += len(missing_sids)
 
                     if valid_sids:
-                        # 写临时文件（一次性）
                         import tempfile
                         tmp_dir = tempfile.mkdtemp(prefix="layout_batch_")
-                        tmp_paths: list[Path] = []
                         try:
-                            for sid in valid_sids:
+                            # 逐张推理，每张都更新进度
+                            for si, sid in enumerate(valid_sids):
+                                if progress_tracker.is_stopped(task_id):
+                                    break
                                 tmp_path = Path(tmp_dir) / f"{sid}.png"
                                 tmp_path.write_bytes(image_map[sid])
-                                tmp_paths.append(tmp_path)
-
-                            # 批量推理
-                            progress_tracker.update_progress(
-                                task_id, current=done,
-                                message=f"layout 推理 {done+1}-{done+len(valid_sids)}/{len(ids)}"
-                            )
-                            try:
-                                all_blocks_list = layout.detect_layout_batch(tmp_paths)
-                                for si, (sid, blocks) in enumerate(zip(valid_sids, all_blocks_list)):
+                                try:
+                                    blocks = layout.detect_layout(tmp_path)
                                     result_entry = {
                                         "sample_id": sid,
                                         "blocks": [
@@ -3095,36 +3088,14 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                                     batch_results.append(result_entry)
                                     if not write_lance:
                                         all_results.append(result_entry)
-                                    done += 1
-                                    if (si + 1) % 50 == 0:
-                                        progress_tracker.update_progress(
-                                            task_id, current=done,
-                                            message=f"layout 推理 {done}/{len(ids)}"
-                                        )
-                                progress_tracker.update_progress(
-                                    task_id, current=done,
-                                    message=f"layout 推理 {done}/{len(ids)}，写入中..."
-                                )
-                            except Exception as e:
-                                # 批量失败时回退到逐张
-                                print(f"[layout] batch failed, fallback to single: {e}", file=sys.stderr)
-                                for sid in valid_sids:
-                                    try:
-                                        blocks = layout.detect_layout_from_bytes(image_map[sid])
-                                        result_entry = {
-                                            "sample_id": sid,
-                                            "blocks": [
-                                                {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
-                                                for b in blocks
-                                            ],
-                                            "block_count": len(blocks),
-                                        }
-                                        batch_results.append(result_entry)
-                                        if not write_lance:
-                                            all_results.append(result_entry)
-                                    except Exception as e2:
-                                        errors.append({"sample_id": sid, "error": str(e2)})
-                                    done += 1
+                                except Exception as e:
+                                    errors.append({"sample_id": sid, "error": str(e)})
+                                done += 1
+                                if (si + 1) % 10 == 0 or si == len(valid_sids) - 1:
+                                    progress_tracker.update_progress(
+                                        task_id, current=done,
+                                        message=f"layout 推理 {done}/{len(ids)}"
+                                    )
                         finally:
                             # 清理临时目录
                             import shutil
