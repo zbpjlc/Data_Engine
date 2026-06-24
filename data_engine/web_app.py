@@ -340,9 +340,17 @@ async def start_ingest(source_id: str, batch_id: str = None):
                 
                 if not source_batches:
                     print(f"[INGEST后台线程] ⚠ 未找到数据源 {source_id} 的批次")
-                    # 列出所有存在的source_id
                     all_source_ids = set(b.source_id for b in global_status.batches)
                     print(f"[INGEST后台线程] 系统中存在的source_id: {all_source_ids}")
+                    progress_tracker.start_task(
+                        task_id=task_id,
+                        task_type="ingest",
+                        source_id=source_id,
+                        batch_id=batch_id or "",
+                        total=0,
+                        message="无可处理的批次（数据源可能离线或无 ingest.lance）"
+                    )
+                    progress_tracker.fail_task(task_id=task_id, error_message="无可处理的批次（数据源可能离线或无 ingest.lance）")
                     return
                 
                 for batch in source_batches:
@@ -557,6 +565,15 @@ async def start_embed(source_id: str, batch_id: str = None):
                     print(f"[Embedding后台线程] ⚠ 未找到数据源 {source_id} 的批次")
                     all_source_ids = set(b.source_id for b in global_status.batches)
                     print(f"[Embedding后台线程] 系统中存在的source_id: {all_source_ids}")
+                    progress_tracker.start_task(
+                        task_id=task_id,
+                        task_type="embed",
+                        source_id=source_id,
+                        batch_id=batch_id or "",
+                        total=0,
+                        message="无可处理的批次（数据源可能离线或无 ingest.lance）"
+                    )
+                    progress_tracker.fail_task(task_id=task_id, error_message="无可处理的批次（数据源可能离线或无 ingest.lance）")
                     return
                 
                 for batch in source_batches:
@@ -848,6 +865,18 @@ async def start_index_build(source_id: str, batch_id: str = None, num_partitions
                 if batch_id:
                     source_batches = [b for b in source_batches if b.batch_id == batch_id]
 
+                if not source_batches:
+                    progress_tracker.start_task(
+                        task_id=task_id,
+                        task_type="index",
+                        source_id=source_id,
+                        batch_id=batch_id or "",
+                        total=0,
+                        message="无可处理的批次（数据源可能离线或无 ingest.lance）"
+                    )
+                    progress_tracker.fail_task(task_id=task_id, error_message="无可处理的批次（数据源可能离线或无 ingest.lance）")
+                    return
+
                 for batch in source_batches:
                     bid = batch.batch_id
                     s_id = batch.source_id
@@ -859,7 +888,7 @@ async def start_index_build(source_id: str, batch_id: str = None, num_partitions
                         print(f"[Index] 跳过 {bid}: ingest.lance 不存在", file=sys.stderr)
                         continue
 
-                    t_id = f"index_{s_id}_{bid}"
+                    t_id = f"index_{s_id}_{bid}" if len(source_batches) > 1 else task_id
                     total_count = manifest_count(manifest_path)
 
                     progress_tracker.start_task(
