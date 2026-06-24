@@ -1982,14 +1982,14 @@
                     const pct = task.pct;
                     const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
                     const batchLabel = taskId.replace('layout_batch_', '');
-                    const barColor = task.status === 'completed' ? 'bg-green-500' : task.status === 'failed' ? 'bg-red-500' : 'bg-orange-500';
+                    const barColor = task.status === 'completed' ? '#22c55e' : task.status === 'failed' ? '#ef4444' : '#f97316';
 
                     taskEl.innerHTML = `<div class="flex items-center justify-between mb-0.5">
                         <span>${statusIcon} <span class="text-gray-500">${batchLabel}</span> ${task.message || ''}</span>
                         <span class="text-gray-400">${task.current}/${task.total}</span>
                     </div>
                     <div class="w-full bg-gray-200 rounded-full h-1.5">
-                        <div class="${barColor} h-1.5 rounded-full transition-all" style="width:${pct}%"></div>
+                        <div class="h-1.5 rounded-full transition-all" style="width:${pct}%;background:${barColor}"></div>
                     </div>`;
                 },
                 onComplete(task) {
