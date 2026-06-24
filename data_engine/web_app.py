@@ -2976,10 +2976,9 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     lp = manifests_dir / f"{cat}.lance"
                     if lp.exists():
                         try:
-                            with _lance_write_lock:
-                                ds = lance.dataset(str(lp))
-                                ids_col = ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
-                                done_ids.update(ids_col)
+                            ds = lance.dataset(str(lp))
+                            ids_col = ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
+                            done_ids.update(ids_col)
                         except Exception as e:
                             print(f"[layout] resume: failed to read {cat}.lance: {e}", file=sys.stderr)
                 if done_ids:
@@ -3031,29 +3030,28 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     image_map: dict[str, bytes] = {}
                     loaded_in_batch = 0
                     try:
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(manifest_path))
-                            query_batch = get_config("layout", "query_batch", default=200)
-                            for qi in range(0, len(batch_ids), query_batch):
-                                if progress_tracker.is_stopped(task_id):
-                                    break
-                                chunk = batch_ids[qi:qi + query_batch]
-                                ids_str = ",".join(repr(s) for s in chunk)
-                                try:
-                                    recs = ds.to_table(
-                                        columns=["sample_id", "image_data"],
-                                        filter=f"sample_id IN ({ids_str})",
-                                    ).to_pylist()
-                                    for r in recs:
-                                        if r.get("image_data"):
-                                            image_map[r["sample_id"]] = r["image_data"]
-                                except Exception:
-                                    pass
-                                loaded_in_batch += len(chunk)
-                                progress_tracker.update_progress(
-                                    task_id, current=done + loaded_in_batch,
-                                    message=f"加载图片 {done+1}-{done+loaded_in_batch}/{len(ids)}"
-                                )
+                        ds = lance.dataset(str(manifest_path))
+                        query_batch = get_config("layout", "query_batch", default=200)
+                        for qi in range(0, len(batch_ids), query_batch):
+                            if progress_tracker.is_stopped(task_id):
+                                break
+                            chunk = batch_ids[qi:qi + query_batch]
+                            ids_str = ",".join(repr(s) for s in chunk)
+                            try:
+                                recs = ds.to_table(
+                                    columns=["sample_id", "image_data"],
+                                    filter=f"sample_id IN ({ids_str})",
+                                ).to_pylist()
+                                for r in recs:
+                                    if r.get("image_data"):
+                                        image_map[r["sample_id"]] = r["image_data"]
+                            except Exception:
+                                pass
+                            loaded_in_batch += len(chunk)
+                            progress_tracker.update_progress(
+                                task_id, current=done + loaded_in_batch,
+                                message=f"加载图片 {done+1}-{done+loaded_in_batch}/{len(ids)}"
+                            )
                     except Exception as e:
                         print(f"[layout] 加载图片失败 batch {batch_start}: {e}", file=sys.stderr)
 
@@ -3085,7 +3083,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                             )
                             try:
                                 all_blocks_list = layout.detect_layout_batch(tmp_paths)
-                                for sid, blocks in zip(valid_sids, all_blocks_list):
+                                for si, (sid, blocks) in enumerate(zip(valid_sids, all_blocks_list)):
                                     result_entry = {
                                         "sample_id": sid,
                                         "blocks": [
@@ -3098,6 +3096,15 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                                     if not write_lance:
                                         all_results.append(result_entry)
                                     done += 1
+                                    if (si + 1) % 50 == 0:
+                                        progress_tracker.update_progress(
+                                            task_id, current=done,
+                                            message=f"layout 推理 {done}/{len(ids)}"
+                                        )
+                                progress_tracker.update_progress(
+                                    task_id, current=done,
+                                    message=f"layout 推理 {done}/{len(ids)}，写入中..."
+                                )
                             except Exception as e:
                                 # 批量失败时回退到逐张
                                 print(f"[layout] batch failed, fallback to single: {e}", file=sys.stderr)
