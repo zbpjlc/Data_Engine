@@ -5,9 +5,9 @@ sources:
 - id: data_disk
   root_path: /media/ubuntu/Data4/金融数据
   enabled: true
-- id: data_disk_2
-  root_path: /media/ubuntu/Data4/专业课教材合集
-  enabled: true 
+# - id: data_disk_2
+#   root_path: /media/ubuntu/Data4/专业课教材合集
+#   enabled: true 
 
 # sources:
 # - id: base_disk
