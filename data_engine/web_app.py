@@ -1932,51 +1932,50 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
                 "bucket_sizes": {}, "total_sampled": 0, "buckets": {},
             }
 
-        with _lance_write_lock:
-            ds = lance.dataset(str(manifest_path))
+        ds = lance.dataset(str(manifest_path))
 
-            indices = ds.list_indices()
-            index_name = None
-            for idx in indices:
-                name = idx.get("name", "") if isinstance(idx, dict) else getattr(idx, "name", "")
-                if name:
-                    index_name = name
-                    break
+        indices = ds.list_indices()
+        index_name = None
+        for idx in indices:
+            name = idx.get("name", "") if isinstance(idx, dict) else getattr(idx, "name", "")
+            if name:
+                index_name = name
+                break
 
-            if not index_name:
-                return {
-                    "source_id": source_id, "batch_id": batch_id,
-                    "count_per_bucket": count, "bucket_count": 0,
-                    "bucket_sizes": {}, "total_sampled": 0, "buckets": {},
-                    "error": "未找到向量索引，请先构建索引",
-                }
+        if not index_name:
+            return {
+                "source_id": source_id, "batch_id": batch_id,
+                "count_per_bucket": count, "bucket_count": 0,
+                "bucket_sizes": {}, "total_sampled": 0, "buckets": {},
+                "error": "未找到向量索引，请先构建索引",
+            }
 
-            stats = ds.index_statistics(index_name)
-            indices_data = stats.get("indices", [{}])
-            partitions = indices_data[0].get("partitions", []) if indices_data else []
-            centroids = indices_data[0].get("centroids", []) if indices_data else []
+        stats = ds.index_statistics(index_name)
+        indices_data = stats.get("indices", [{}])
+        partitions = indices_data[0].get("partitions", []) if indices_data else []
+        centroids = indices_data[0].get("centroids", []) if indices_data else []
 
-            buckets = {}
-            bucket_sizes = {}
-            for i, part_info in enumerate(partitions):
-                part_size = part_info.get("size", 0)
-                bucket_sizes[f"P{i}"] = part_size
-                if part_size == 0 or not centroids:
-                    continue
-                k = min(count, part_size)
-                try:
-                    centroid = centroids[i]
-                    query_vec = pa.array(centroid, type=pa.float32())
-                    scanner = ds.scanner(
-                        nearest={"column": "embedding", "q": query_vec, "k": k},
-                        disable_scoring_autoprojection=True,
-                    )
-                    tbl = scanner.to_table()
-                    cols = [c for c in ["sample_id", "difficulty", "page_image", "input_type"] if c in tbl.column_names]
-                    rows = tbl.select(cols).to_pylist()
-                    buckets[f"P{i}"] = rows
-                except Exception as e:
-                    print(f"[bucket-samples] P{i} error: {e}", file=sys.stderr)
+        buckets = {}
+        bucket_sizes = {}
+        for i, part_info in enumerate(partitions):
+            part_size = part_info.get("size", 0)
+            bucket_sizes[f"P{i}"] = part_size
+            if part_size == 0 or not centroids:
+                continue
+            k = min(count, part_size)
+            try:
+                centroid = centroids[i]
+                query_vec = pa.array(centroid, type=pa.float32())
+                scanner = ds.scanner(
+                    nearest={"column": "embedding", "q": query_vec, "k": k},
+                    disable_scoring_autoprojection=True,
+                )
+                tbl = scanner.to_table()
+                cols = [c for c in ["sample_id", "difficulty", "page_image", "input_type"] if c in tbl.column_names]
+                rows = tbl.select(cols).to_pylist()
+                buckets[f"P{i}"] = rows
+            except Exception as e:
+                print(f"[bucket-samples] P{i} error: {e}", file=sys.stderr)
 
         total_sampled = sum(len(v) for v in buckets.values())
         result = {
