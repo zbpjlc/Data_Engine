@@ -3002,7 +3002,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
 
             # 过滤掉已处理的
             pending_ids = [sid for sid in ids if sid not in done_ids]
-            done = len(done_ids)
+            done = len(ids) - len(pending_ids)
             print(f"[layout] mode={mode_label} total={len(ids)} done={done} pending={len(pending_ids)}", file=sys.stderr)
 
             if not pending_ids:
