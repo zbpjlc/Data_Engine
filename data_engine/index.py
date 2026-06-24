@@ -56,6 +56,15 @@ def load_index_stats(manifest_path: Path) -> dict[str, Any] | None:
         return None
 
 
+_PHASE_ZH = {
+    "Assigning partitions and computing residuals": "分配分区并计算残差",
+    "Computing PQ residuals": "计算 PQ 残差",
+    "Training IVF centroids": "训练 IVF 聚类中心",
+    "Training PQ codebooks": "训练 PQ 码本",
+    "Computing IVF partitions": "计算 IVF 分区",
+}
+
+
 def _create_index_with_progress(ds, task_id: str, total_rows: int, **kwargs) -> None:
     """调用 ds.create_index 并捕获 tqdm 输出，实时更新 progress_tracker。
     
@@ -89,10 +98,11 @@ def _create_index_with_progress(ds, task_id: str, total_rows: int, **kwargs) -> 
             pct = int(m.group(2))
             cur = m.group(3)
             tot = m.group(4)
+            phase_zh = _PHASE_ZH.get(phase, phase)
             if pct >= 100:
-                msg = f"{phase} 完成，写入中..."
+                msg = f"{phase_zh} 完成，写入中..."
             else:
-                msg = f"{phase} {pct}% ({cur}/{tot})"
+                msg = f"{phase_zh} {pct}% ({cur}/{tot})"
             progress_tracker.update_progress(
                 task_id,
                 current=int(cur),
