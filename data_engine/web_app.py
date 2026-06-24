@@ -1825,6 +1825,8 @@ def _merge_all_bucket_samples(registry, count: int, force: bool) -> dict:
                 if cpath.exists():
                     try:
                         cached = json.loads(cpath.read_text(encoding="utf-8"))
+                        if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
+                            continue
                         total = cached.get("total_sampled", 0)
                         if total > 0:
                             merged_total += total
@@ -1877,7 +1879,11 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
         if not force:
             if cache_path.exists():
                 try:
-                    return json.loads(cache_path.read_text(encoding="utf-8"))
+                    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                    if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
+                        pass
+                    else:
+                        return cached
                 except Exception:
                     pass
 
@@ -1904,6 +1910,8 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
                         if cpath.exists():
                             try:
                                 cached = json.loads(cpath.read_text(encoding="utf-8"))
+                                if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
+                                    continue
                                 for k, v in (cached.get("buckets") or {}).items():
                                     merged_buckets[f"{b.source_id}/{b.batch_id}/{k}"] = v
                                 for k, v in (cached.get("bucket_sizes") or {}).items():
@@ -2024,6 +2032,8 @@ async def get_bucket_samples_batch(request: Request, full: bool = False):
                 cache_path = batch_dir / "artifacts" / "bucket_samples.json"
                 if cache_path.exists():
                     cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                    if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
+                        continue
                     total = cached.get("total_sampled", 0)
                     if total > 0:
                         if full:
@@ -2083,7 +2093,7 @@ async def get_difficulty_aware_samples(
         manifests_dir = batch_dir / "manifests"
 
         # 检查缓存
-        cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+        cache_path = batch_dir / "artifacts" / "element_bucket_samples.json"
         if not force and cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -2551,9 +2561,10 @@ async def run_layout_preview(request: Request):
     """预览 layout 结果：优先读 Lance 缓存，无缓存时才跑模型"""
     try:
         body = await request.json()
-        source_id: str = body["source_id"]
-        batch_id: str = body["batch_id"]
-        sample_ids: list[str] = body["sample_ids"]
+        source_id: str = body.get("source_id", "")
+        batch_id: str = body.get("batch_id", "")
+        sample_ids: list[str] = body.get("sample_ids", [])
+        print(f"[layout-preview] source_id={source_id!r} batch_id={batch_id!r} sample_ids={sample_ids[:3]}", file=sys.stderr)
 
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
@@ -2685,6 +2696,9 @@ async def run_layout_preview(request: Request):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[layout-preview] ERROR: {e}", file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
 
 

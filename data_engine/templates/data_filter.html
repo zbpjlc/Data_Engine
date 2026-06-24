@@ -991,6 +991,7 @@
                     // 合并 buckets
                     for (const [k, v] of Object.entries(d.buckets || {})) {
                         const key = d.source_id && d.batch_id ? `${d.source_id}/${d.batch_id}/${k}` : k;
+                        if (Array.isArray(v)) v.forEach(s => { if (typeof s === 'object') { s._source_id = d.source_id; s._batch_id = d.batch_id; } });
                         merged.buckets[key] = v;
                     }
                     // 合并 bucket_sizes
@@ -998,7 +999,17 @@
                         const key = d.source_id && d.batch_id ? `${d.source_id}/${d.batch_id}/${k}` : k;
                         merged.bucket_sizes[key] = v;
                     }
+                    // 若 bucket_sizes 为空但 buckets 有数据，从 buckets 反推
+                    if (Object.keys(d.bucket_sizes || {}).length === 0 && Object.keys(d.buckets || {}).length > 0) {
+                        for (const [k, v] of Object.entries(d.buckets)) {
+                            const key = d.source_id && d.batch_id ? `${d.source_id}/${d.batch_id}/${k}` : k;
+                            if (!(key in merged.bucket_sizes)) {
+                                merged.bucket_sizes[key] = Array.isArray(v) ? v.length : 0;
+                            }
+                        }
+                    }
                     merged.total_sampled += d.total_sampled || 0;
+                    merged.bucket_count = Math.max(merged.bucket_count, d.bucket_count || 0);
                     merged.batch_info.push({
                         source_id: d.source_id,
                         batch_id: d.batch_id,
@@ -1006,8 +1017,8 @@
                         partition_tiers: d.partition_tiers,
                         strategy: d.strategy,
                     });
-                    if (d.strategy === 'difficulty_aware') {
-                        merged.strategy = 'difficulty_aware';
+                    if (d.strategy === 'difficulty_aware' || d.strategy === 'element_cluster') {
+                        merged.strategy = d.strategy;
                         merged.ratios = d.ratios;
                         if (!merged.partition_tiers) merged.partition_tiers = {easy:0, medium:0, hard:0};
                         for (const [t, n] of Object.entries(d.partition_tiers || {})) {
@@ -1015,7 +1026,14 @@
                         }
                     }
                 });
-                merged.bucket_count = Object.keys(merged.bucket_sizes).length;
+                merged.bucket_count = merged.bucket_count || Object.keys(merged.bucket_sizes).length || Object.keys(merged.buckets).length;
+
+                if (merged.tier_summary && !merged.partition_tiers) {
+                    merged.partition_tiers = {};
+                    for (const [t, info] of Object.entries(merged.tier_summary)) {
+                        merged.partition_tiers[t] = info.blocks || 0;
+                    }
+                }
 
                 bucketSampleData = merged;
                 document.getElementById('bucket-count').value = merged.count_per_bucket;
@@ -1405,6 +1423,12 @@
                         return;
                     }
                     bucketSampleData = data;
+                    if (data.tier_summary && !data.partition_tiers) {
+                        data.partition_tiers = {};
+                        for (const [t, info] of Object.entries(data.tier_summary)) {
+                            data.partition_tiers[t] = info.blocks || 0;
+                        }
+                    }
                     document.getElementById('bucket-count').value = data.count_per_bucket || 10;
                     try {
                         renderBucketSummary(data);
@@ -1464,9 +1488,12 @@
                 let allBucketSizes = {};
                 let totalSampled = 0;
                 let totalCount = 0;
-                results.forEach(data => {
+                results.forEach((data, i) => {
                     if (!data) return;
-                    for (const [k, v] of Object.entries(data.buckets || {})) allBuckets[k] = v;
+                    for (const [k, v] of Object.entries(data.buckets || {})) {
+                        if (Array.isArray(v)) v.forEach(s => { if (typeof s === 'object') { s._source_id = targets[i].source_id; s._batch_id = targets[i].batch_id; } });
+                        allBuckets[k] = v;
+                    }
                     for (const [k, v] of Object.entries(data.bucket_sizes || {})) allBucketSizes[k] = v;
                     totalSampled += data.total_sampled || 0;
                     totalCount = data.count_per_bucket || count;
@@ -1549,6 +1576,7 @@
                         if (data.error) { console.warn(`[${b.batch_id}] ${data.error}`); return; }
                         // 合并结果，key 加 batch 前缀避免冲突
                         for (const [k, v] of Object.entries(data.buckets || {})) {
+                            if (Array.isArray(v)) v.forEach(s => { if (typeof s === 'object') { s._source_id = b.source_id; s._batch_id = b.batch_id; } });
                             allBuckets[`${b.source_id}/${b.batch_id}/${k}`] = v;
                         }
                         for (const [k, v] of Object.entries(data.bucket_sizes || {})) {
@@ -1623,7 +1651,7 @@
                     }
                 }
             });
-            const totalPartitions = (pt.easy||0) + (pt.medium||0) + (pt.hard||0) || data.bucket_count || 0;
+            const totalPartitions = (pt.easy||0) + (pt.medium||0) + (pt.hard||0) || data.bucket_count || Object.keys(data.buckets || {}).length || 0;
 
             let html = '';
             html += `<div class="col-span-3 text-sm text-gray-600 mb-2">
@@ -1699,13 +1727,13 @@
         const TIER_LABELS = {easy:'Easy', medium:'Medium', hard:'Hard', unlabeled:'未标注'};
 
         function renderBucketSummary(data) {
-            console.log('[renderBucketSummary] called, total_sampled:', data.total_sampled, 'batch_info:', data.batch_info?.length, 'buckets:', Object.keys(data.buckets||{}).length);
+            console.log('[renderBucketSummary] called, total_sampled:', data.total_sampled, 'batch_info:', data.batch_info?.length, 'buckets:', Object.keys(data.buckets||{}).length, 'bucket_count:', data.bucket_count);
             document.getElementById('bucket-empty').classList.add('hidden');
             document.getElementById('bucket-summary').classList.remove('hidden');
             document.getElementById('bucket-results').classList.remove('hidden');
 
             // 不自动切换 Tab，只在当前 Tab 内渲染
-            const isDiff = data.strategy === 'difficulty_aware' || data.partition_tiers || (data.batch_info && data.batch_info.some(b => b.partition_tiers));
+            const isDiff = data.strategy === 'difficulty_aware' || data.strategy === 'element_cluster' || data.partition_tiers || data.tier_summary || (data.batch_info && data.batch_info.some(b => b.partition_tiers));
 
             // 难度感知数据渲染到 diff-summary 区域
             if (isDiff) {
@@ -1737,7 +1765,7 @@
                 }
             }
 
-            const totalPartitions = mergedTiers.easy + mergedTiers.medium + mergedTiers.hard || data.bucket_count || 0;
+            const totalPartitions = mergedTiers.easy + mergedTiers.medium + mergedTiers.hard || data.bucket_count || Object.keys(data.buckets || {}).length || 0;
             const ratios = data.ratios || {easy: 0.5, medium: 1.0, hard: 2.0};
 
             let html = '';
@@ -1827,10 +1855,12 @@
                         const sid = typeof s === 'string' ? s : s.sample_id;
                         const hasLayout = typeof s === 'object' && s._layout_blocks && s._layout_blocks.length > 0;
                         const blockInfo = hasLayout ? `<div class="text-xs text-green-700 mb-1">${s._layout_blocks.length} blocks</div>` : '';
+                        const _sid = (typeof s === 'object' && s._source_id) ? s._source_id : data.source_id;
+                        const _bid = (typeof s === 'object' && s._batch_id) ? s._batch_id : data.batch_id;
                         shtml += `<div class="border rounded-lg p-3 bg-white">
                             <div class="text-xs font-mono text-gray-600 truncate mb-1" title="${sid}">${sid}</div>
                             ${blockInfo}
-                            <button onclick="viewLayoutSingle('${data.source_id}','${data.batch_id}','${sid}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${hasLayout ? '查看' : 'Layout'}</button>
+                            <button onclick="viewLayoutSingle('${_sid}','${_bid}','${sid}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${hasLayout ? '查看' : 'Layout'}</button>
                         </div>`;
                     }
                     shtml += '</div>';
@@ -1894,6 +1924,8 @@
                     const blockInfo = hasLayout
                         ? `<div class="text-xs text-green-700 mb-1">${s._layout_blocks.length} blocks: ${[...new Set(s._layout_blocks.map(b=>b.block_type))].join(', ')}</div>`
                         : '';
+                    const _sid2 = s._source_id || data.source_id;
+                    const _bid2 = s._batch_id || data.batch_id;
                     html += `<div class="border rounded-lg p-3 bg-white">
                         <div class="flex items-center justify-between mb-1">
                             <span class="text-xs font-mono text-gray-600 truncate" title="${s.sample_id}">${s.sample_id}</span>
@@ -1901,7 +1933,7 @@
                         </div>
                         <div class="text-xs text-gray-500 mb-1">${s.input_type || '-'}</div>
                         ${blockInfo}
-                        <button onclick="viewLayoutSingle('${data.source_id}','${data.batch_id}','${s.sample_id}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${hasLayout ? '查看 Layout' : 'Layout 预览'}</button>
+                        <button onclick="viewLayoutSingle('${_sid2}','${_bid2}','${s.sample_id}')" class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded hover:bg-blue-200">${hasLayout ? '查看 Layout' : 'Layout 预览'}</button>
                     </div>`;
                 }
                 html += '</div>';
@@ -2002,15 +2034,15 @@
         }
 
         function loadLayoutResults(sourceId, batchId) {
-            if (!sourceId) return;
-
             // 确定要查询的批次
             let queryTargets = [];
             if (batchId) {
                 queryTargets = [{source_id: sourceId, batch_id: batchId}];
-            } else {
-                // 全部批次
+            } else if (sourceId && sourceId !== 'all') {
                 queryTargets = batchData.filter(b => b.source_id === sourceId);
+            } else {
+                queryTargets = (bucketSampleData?.batch_info || []).map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+                if (!queryTargets.length) queryTargets = batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
             }
             if (!queryTargets.length) return;
 
@@ -2052,21 +2084,42 @@
             body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
             modal.classList.remove('hidden');
 
-            fetch('/api/layout-preview', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({source_id: sourceId, batch_id: batchId, sample_ids: [sampleId]}),
-            })
-            .then(r => r.json())
-            .then(data => {
+            function doFetch(sid, bid) {
+                return fetch('/api/layout-preview', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({source_id: sid, batch_id: bid, sample_ids: [sampleId]}),
+                }).then(r => r.json()).catch(() => null);
+            }
+
+            let fetchPromise;
+            if (sourceId && sourceId !== 'all' && batchId) {
+                fetchPromise = doFetch(sourceId, batchId);
+            } else {
+                const bi = bucketSampleData?.batch_info || [];
+                if (bi.length > 0) {
+                    fetchPromise = Promise.all(bi.map(b => doFetch(b.source_id, b.batch_id)))
+                        .then(results => {
+                            for (const r of results) {
+                                if (r && r.results && r.results.length > 0 && !r.results[0].error) return r;
+                            }
+                            return results[0] || {results: [{error: '未找到该样本'}]};
+                        });
+                } else if (sourceId && sourceId !== 'all') {
+                    fetchPromise = doFetch(sourceId, '');
+                } else {
+                    fetchPromise = Promise.resolve({results: [{error: '无批次信息，请选择具体批次'}]});
+                }
+            }
+
+            fetchPromise.then(data => {
                 const result = (data.results || [])[0] || {};
                 if (result.error) {
                     body.innerHTML = `<div class="text-red-500 text-center">${result.error}</div>`;
                     return;
                 }
                 renderLayoutPreview(body, result.image_base64, result.blocks || [], sampleId);
-            })
-            .catch(err => { body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`; });
+            }).catch(err => { body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`; });
         }
 
         const BLOCK_COLORS = {
