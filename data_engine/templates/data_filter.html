@@ -2266,6 +2266,16 @@
                 // 立即显示启动状态，不等 fetch
                 this.textContent = '启动中...';
 
+                // 清空该模型下正在运行（非完成）的旧进度条
+                const tasksDiv = document.getElementById(`${model}-tasks`);
+                if (tasksDiv) {
+                    tasksDiv.querySelectorAll('[id^="task-"]').forEach(el => {
+                        if (!el.innerHTML.includes('✅') && !el.innerHTML.includes('❌') && !el.innerHTML.includes('⏹')) {
+                            el.remove();
+                        }
+                    });
+                }
+
                 // 为每个批次启动独立的 OCR 任务
                 let started = 0;
                 const testMode = (model === 'self_ocr' && document.getElementById('self-ocr-test-mode')?.checked) ? '&test_mode=true' : '';
@@ -2296,9 +2306,12 @@
         document.querySelectorAll('.btn-ocr-stop').forEach(btn => {
             btn.addEventListener('click', function() {
                 const model = this.dataset.model;
-                fetch('/api/stop', {
+                const src = getSourceId();
+                const bid = getBatchId();
+                if (!src) { showToast('请先选择数据源', 'warning'); return; }
+                const url = bid ? `/api/stop/${encodeURIComponent(src)}?batch_id=${encodeURIComponent(bid)}` : `/api/stop/${encodeURIComponent(src)}`;
+                fetch(url, {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({task_id: `ocr_${model}_${getSourceId()}_${getBatchId()}`}),
                 }).catch(() => {});
             });
         });
@@ -3158,9 +3171,8 @@
                 const model = this.dataset.model;
                 const targets = getEoTargets();
                 targets.forEach(t => {
-                    fetch('/api/stop', {
+                    fetch(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`, {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({task_id: `el_ocr_${model}_${t.source_id}_${t.batch_id}`}),
                     }).catch(() => {});
                 });
             });

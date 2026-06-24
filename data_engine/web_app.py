@@ -737,7 +737,7 @@ async def stop_task(source_id: str, batch_id: str = None):
         raise HTTPException(status_code=400, detail="batch_id is required")
     
     stopped = []
-    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "layout_batch", "repair"]:
+    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "layout_batch", "repair", "ocr", "page_ocr", "el_ocr"]:
         task_id = f"{task_type}_{source_id}_{batch_id}"
         task = progress_tracker.get_task(task_id)
         if task and task.status.value in ["running", "pending"]:
@@ -3756,6 +3756,286 @@ async def get_element_sample_status(source_id: str, batch_id: str):
             "summary": data.get("summary", {}),
             "total_sampled": data.get("total_sampled", sum(s.get("sampled", 0) for s in data.get("summary", {}).values())),
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ocr/{source_id}")
+async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
+                   resume: bool = True, test_mode: bool = False):
+    """对抽样页面运行 Page OCR，结果写回 bucket_samples.json。"""
+    try:
+        prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
+        prefix = prefix_map.get(model)
+        if not prefix:
+            raise HTTPException(status_code=400, detail=f"未知模型: {model}")
+
+        task_id = f"ocr_{model}_{source_id}_{batch_id}"
+        existing = progress_tracker.get_task(task_id)
+        if existing and existing.status.value in ["running", "pending"]:
+            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
+            if task_id not in alive_threads:
+                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+            else:
+                return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
+
+        def execute():
+            try:
+                import tempfile, lance
+
+                source = registry.get(source_id)
+                batch_dir = source.resolve_batch_dir(batch_id)
+                manifests_dir = batch_dir / "artifacts"
+                cache_path = manifests_dir / "bucket_samples.json"
+
+                if not cache_path.exists():
+                    progress_tracker.fail_task(task_id, "bucket_samples.json 不存在，请先抽样")
+                    return
+
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                buckets = cached.get("buckets", {})
+                if not buckets:
+                    progress_tracker.fail_task(task_id, "抽样数据为空")
+                    return
+
+                # 收集所有 sample_id
+                all_samples = []
+                for tier, samples in buckets.items():
+                    for s in samples:
+                        sid = s if isinstance(s, str) else s.get("sample_id", "")
+                        if sid:
+                            all_samples.append((tier, sid))
+
+                if not all_samples:
+                    progress_tracker.fail_task(task_id, "无抽样样本")
+                    return
+
+                progress_tracker.update_progress(task_id, current=0, total=len(all_samples), message=f"{model}: 共 {len(all_samples)} 页面，准备中...")
+
+                # 读取 ingest.lance
+                ingest_dir = batch_dir / "manifests"
+                ingest_path = find_stage_manifest(ingest_dir, "ingest")
+                if not ingest_path:
+                    progress_tracker.fail_task(task_id, "ingest manifest 不存在")
+                    return
+
+                ds = lance.dataset(str(ingest_path))
+                print(f"[page-ocr] ingest rows: {ds.count_rows()}", file=sys.stderr)
+
+                # 一次性读取所有抽样页面的 image_data（filter 下推）
+                sampled_ids = {sid for _, sid in all_samples}
+                id_list = list(sampled_ids)
+                ids_str = ",".join(repr(s) for s in id_list)
+                img_map: dict[str, bytes] = {}
+                try:
+                    tbl = ds.to_table(
+                        columns=["sample_id", "image_data"],
+                        filter=f"sample_id IN ({ids_str})",
+                    )
+                    for row in tbl.to_pylist():
+                        sid = row.get("sample_id", "")
+                        if row.get("image_data"):
+                            img_map[sid] = row["image_data"]
+                except Exception as e:
+                    print(f"[page-ocr] batch load error: {e}", file=sys.stderr)
+
+                # 读取 layout block bboxes
+                lr_path = batch_dir / "artifacts" / "layout_results.json"
+                layout_map: dict[str, list] = {}  # sid -> [{"block_type", "bbox"}, ...]
+                if lr_path.exists():
+                    try:
+                        lr_data = json.loads(lr_path.read_text(encoding="utf-8"))
+                        for r in lr_data.get("results", []):
+                            sid = r.get("sample_id", "")
+                            blocks = r.get("blocks", [])
+                            if sid and blocks:
+                                layout_map[sid] = [b for b in blocks if "bbox" in b]
+                    except Exception as e:
+                        print(f"[page-ocr] layout_results.json 读取失败: {e}", file=sys.stderr)
+
+                print(f"[page-ocr] sampled={len(sampled_ids)}, img_map={len(img_map)}, layout_blocks={sum(len(v) for v in layout_map.values())}", file=sys.stderr)
+
+                # 初始化 OCR 引擎
+                if model == "paddleocr":
+                    from data_engine.ocr.paddle_ocr import PaddleOCREngine
+                    engine = PaddleOCREngine()
+                elif model == "glm_ocr":
+                    from data_engine.ocr.glm_ocr import GLMOCREngine
+                    engine = GLMOCREngine()
+                else:
+                    from data_engine.ocr.self_ocr import SelfOCREngine
+                    engine = SelfOCREngine(test_mode=test_mode and model == "self_ocr")
+
+                from data_engine.ocr.base import LayoutBlock
+
+                text_col = f"{prefix}_text"
+                conf_col = f"{prefix}_confidence"
+
+                # 断点续跑：检查已有结果
+                done_count = 0
+                if resume:
+                    for tier, samples in buckets.items():
+                        for s in samples:
+                            if isinstance(s, dict) and s.get(text_col):
+                                done_count += 1
+
+                remaining = len(all_samples) - done_count
+                print(f"[page-ocr] {model}: sampled={len(all_samples)}, already_done={done_count}, remaining={remaining}", file=sys.stderr)
+                if remaining <= 0:
+                    progress_tracker.complete_task(task_id, f"{model} 所有 {len(all_samples)} 个页面已完成，无需重跑")
+                    return
+
+                progress_tracker.update_progress(
+                    task_id, current=done_count, total=len(all_samples),
+                    message=f"{model}: 共 {len(all_samples)} 个页面（跳过 {done_count} 已完成，待处理 {remaining}）",
+                )
+
+                tmp_dir = tempfile.mkdtemp(prefix="page_ocr_")
+                processed = 0
+                errors = 0
+                save_interval = int(get_config("ocr", "save_interval", default=10))
+                max_workers = int(get_config("ocr", "page_concurrency", default=8))
+
+                # 收集待处理任务：每个 layout block 为一个 OCR 任务
+                tasks = []
+                for tier, samples in buckets.items():
+                    for idx, s in enumerate(samples):
+                        sid = s if isinstance(s, str) else s.get("sample_id", "")
+                        if not sid:
+                            continue
+                        if isinstance(s, dict) and resume and s.get(text_col):
+                            done_count += 1
+                            processed += 1
+                            continue
+                        img_bytes = img_map.get(sid)
+                        if not img_bytes:
+                            errors += 1
+                            done_count += 1
+                            processed += 1
+                            continue
+                        blocks = layout_map.get(sid, [])
+                        if not blocks:
+                            # 无 layout 结果，跳过此页面
+                            print(f"[page-ocr] skip {sid}: 无 layout 结果，请先运行 pp-layout", file=sys.stderr)
+                            errors += 1
+                            done_count += 1
+                            processed += 1
+                            continue
+                        tasks.append((tier, idx, sid, s, img_bytes, blocks))
+
+                progress_tracker.update_progress(
+                    task_id, current=done_count, total=len(all_samples),
+                    message=f"{model}: 待处理 {len(tasks)} 页面，并发 {max_workers}...",
+                )
+
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def _ocr_one(tier, idx, sid, s, img_bytes, blocks):
+                    if progress_tracker.is_stopped(task_id):
+                        return None
+                    tmp_path = Path(tmp_dir) / f"{sid}.png"
+                    try:
+                        if isinstance(img_bytes, bytes):
+                            tmp_path.write_bytes(img_bytes)
+                        elif isinstance(img_bytes, str):
+                            tmp_path.write_bytes(img_bytes.encode("latin-1"))
+                        else:
+                            tmp_path.write_bytes(bytes(img_bytes))
+
+                        from PIL import Image as PILImage
+                        import io
+                        img = PILImage.open(tmp_path)
+                        all_text = []
+                        total_conf = 0.0
+                        for b in blocks:
+                            bbox = b.get("bbox", [0, 0, 9999, 9999])
+                            x1, y1, x2, y2 = [int(c) for c in bbox]
+                            cropped = img.crop((x1, y1, x2, y2))
+                            buf = io.BytesIO()
+                            cropped.save(buf, format="PNG")
+                            crop_path = Path(tmp_dir) / f"{sid}_{b.get('block_type', 'text')}_{x1}_{y1}.png"
+                            crop_path.write_bytes(buf.getvalue())
+                            try:
+                                region = LayoutBlock(block_type=b.get("block_type", "text"), bbox=[0, 0, x2-x1, y2-y1], confidence=b.get("confidence", 1.0))
+                                results = engine.recognize_regions(crop_path, [region])
+                                r = results[0] if results else None
+                                if r and r.text_content:
+                                    all_text.append(r.text_content)
+                                    total_conf += (r.confidence or 0.0)
+                            except Exception:
+                                pass
+                            finally:
+                                crop_path.unlink(missing_ok=True)
+
+                        merged_text = "\n".join(all_text)
+                        avg_conf = total_conf / len(blocks) if blocks else 0.0
+                        return (tier, idx, sid, s, merged_text, avg_conf, None)
+                    except Exception as e:
+                        return (tier, idx, sid, s, "", 0.0, e)
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+
+                try:
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                        futures = {pool.submit(_ocr_one, *t): t for t in tasks}
+                        for future in as_completed(futures):
+                            if progress_tracker.is_stopped(task_id):
+                                pool.shutdown(wait=False, cancel_futures=True)
+                                break
+                            result = future.result()
+                            if not result:
+                                continue
+                            tier, idx, sid, s, merged_text, avg_conf, err = result
+                            if err:
+                                errors += 1
+                                if errors <= 5:
+                                    print(f"[page-ocr] {model} error {sid}: {err}", file=sys.stderr)
+                            else:
+                                text_val = merged_text
+                                conf_val = avg_conf
+                                if isinstance(s, str):
+                                    buckets[tier][idx] = {"sample_id": s, text_col: text_val, conf_col: conf_val}
+                                else:
+                                    s[text_col] = text_val
+                                    s[conf_col] = conf_val
+
+                            done_count += 1
+                            processed += 1
+                            if processed % save_interval == 0:
+                                cached["buckets"] = buckets
+                                cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+                            err_msg = f"（{errors} 错误）" if errors else ""
+                            progress_tracker.update_progress(task_id, current=done_count, message=f"{model}: {processed}/{len(all_samples)} {err_msg}")
+
+                finally:
+                    cached["buckets"] = buckets
+                    cached[f"{prefix}_ocr_at"] = datetime.now().isoformat(timespec='seconds')
+                    cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+                    import shutil
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+                if progress_tracker.is_stopped(task_id):
+                    progress_tracker.stop_task(task_id, f"已停止（已处理 {processed}/{len(all_samples)}）")
+                else:
+                    progress_tracker.complete_task(task_id, f"{model} 完成: {processed} 页面（跳过 {done_count - processed} 已完成{f'，{errors} 错误' if errors else ''}）")
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                progress_tracker.fail_task(task_id, str(e))
+
+        # 在线程外注册任务，确保前端轮询时能找到
+        progress_tracker.start_task(
+            task_id=task_id, task_type="page_ocr",
+            source_id=source_id, batch_id=batch_id,
+            total=0, message=f"{model}: 启动中..."
+        )
+
+        thread = threading.Thread(target=execute, name=task_id, daemon=True)
+        thread.start()
+        return {"message": f"Page OCR {model} 已启动", "task_id": task_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
