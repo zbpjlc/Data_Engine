@@ -2564,19 +2564,18 @@ async def run_layout_preview(request: Request):
 
         import base64
 
-        # 1. 从 Lance 读取已有的 layout 结果
+        # 1. 从 Lance 读取已有的 layout 结果（只读，无需写锁）
         cached_blocks: dict[str, list[dict]] = {}
         for cat in ("text", "formula", "table"):
             lp = manifests_dir / f"{cat}.lance"
             if lp.exists():
                 try:
-                    with _lance_write_lock:
-                        ds = lance.dataset(str(lp))
-                        ids_str = ",".join(repr(s) for s in sample_ids)
-                        rows = ds.to_table(
-                            columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"],
-                            filter=f"sample_id IN ({ids_str})",
-                        ).to_pylist()
+                    ds = lance.dataset(str(lp))
+                    ids_str = ",".join(repr(s) for s in sample_ids)
+                    rows = ds.to_table(
+                        columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"],
+                        filter=f"sample_id IN ({ids_str})",
+                    ).to_pylist()
                     for row in rows:
                         sid = row["sample_id"]
                         if sid not in cached_blocks:
@@ -2589,14 +2588,13 @@ async def run_layout_preview(request: Request):
                 except Exception:
                     pass
 
-        # 2. 从 ingest.lance 读取图片（仅需要有缓存或需要跑模型的样本）
-        with _lance_write_lock:
-            ds = lance.dataset(str(manifest_path))
-            ids_str = ",".join(repr(s) for s in sample_ids)
-            recs = ds.to_table(
-                columns=["sample_id", "image_data", "difficulty"],
-                filter=f"sample_id IN ({ids_str})",
-            ).to_pylist()
+        # 2. 从 ingest.lance 读取图片（只读，无需写锁）
+        ds = lance.dataset(str(manifest_path))
+        ids_str = ",".join(repr(s) for s in sample_ids)
+        recs = ds.to_table(
+            columns=["sample_id", "image_data", "difficulty"],
+            filter=f"sample_id IN ({ids_str})",
+        ).to_pylist()
         record_map = {r["sample_id"]: r for r in recs}
 
         # 3. 确定哪些样本需要跑模型
