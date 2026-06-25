@@ -733,21 +733,23 @@ async def start_embed(source_id: str, batch_id: str = None):
 @app.post("/api/stop/{source_id}")
 async def stop_task(source_id: str, batch_id: str = None):
     """停止运行中的任务"""
-    if not batch_id:
-        raise HTTPException(status_code=400, detail="batch_id is required")
-    
+    from data_engine.progress_tracker import TaskStatus
     stopped = []
-    for task_type in ["ingest", "embed", "cluster", "element_sample", "cmcv", "layout_batch", "repair", "ocr", "page_ocr", "el_ocr"]:
-        task_id = f"{task_type}_{source_id}_{batch_id}"
-        task = progress_tracker.get_task(task_id)
-        if task and task.status.value in ["running", "pending"]:
-            progress_tracker.request_stop(task_id)
-            # 检测死线程：如果线程已不存在，直接标记为 stopped
-            alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
-            if task_id not in alive_threads:
-                progress_tracker.stop_task(task_id, "线程已终止，任务异常停止")
-            stopped.append(task_id)
-    
+    alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
+
+    all_tasks = progress_tracker.get_all_tasks()
+    for tid, task in all_tasks.items():
+        if source_id and source_id not in tid:
+            continue
+        if batch_id and batch_id not in tid:
+            continue
+        if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+            continue
+        progress_tracker.request_stop(tid)
+        if tid not in alive_threads:
+            progress_tracker.stop_task(tid, "线程已终止，任务异常停止")
+        stopped.append(tid)
+
     if stopped:
         return {"message": f"已发送停止信号: {', '.join(stopped)}", "status": "stopping"}
     return {"message": "没有运行中的任务", "status": "idle"}
@@ -3903,10 +3905,12 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                         sid = s if isinstance(s, str) else s.get("sample_id", "")
                         if not sid:
                             continue
-                        if isinstance(s, dict) and resume and s.get(text_col):
-                            done_count += 1
-                            processed += 1
-                            continue
+                        if isinstance(s, dict) and resume:
+                            blocks = s.get("blocks", [])
+                            if blocks and all(b.get(text_col) for b in blocks):
+                                done_count += 1
+                                processed += 1
+                                continue
                         img_bytes = img_map.get(sid)
                         if not img_bytes:
                             errors += 1
@@ -3945,33 +3949,32 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                         from PIL import Image as PILImage
                         import io
                         img = PILImage.open(tmp_path)
-                        all_text = []
-                        total_conf = 0.0
-                        for b in blocks:
+                        block_results = []
+                        for bi, b in enumerate(blocks):
                             bbox = b.get("bbox", [0, 0, 9999, 9999])
                             x1, y1, x2, y2 = [int(c) for c in bbox]
                             cropped = img.crop((x1, y1, x2, y2))
                             buf = io.BytesIO()
                             cropped.save(buf, format="PNG")
-                            crop_path = Path(tmp_dir) / f"{sid}_{b.get('block_type', 'text')}_{x1}_{y1}.png"
+                            crop_path = Path(tmp_dir) / f"{sid}_{bi}.png"
                             crop_path.write_bytes(buf.getvalue())
+                            br = {"block_idx": bi, "block_type": b.get("block_type", "text"), "bbox": [round(c, 1) for c in bbox]}
                             try:
                                 region = LayoutBlock(block_type=b.get("block_type", "text"), bbox=[0, 0, x2-x1, y2-y1], confidence=b.get("confidence", 1.0))
                                 results = engine.recognize_regions(crop_path, [region])
                                 r = results[0] if results else None
-                                if r and r.text_content:
-                                    all_text.append(r.text_content)
-                                    total_conf += (r.confidence or 0.0)
+                                br[text_col] = (r.text_content or "") if r else ""
+                                br[conf_col] = r.confidence if r else 0.0
                             except Exception:
-                                pass
+                                br[text_col] = ""
+                                br[conf_col] = 0.0
                             finally:
                                 crop_path.unlink(missing_ok=True)
+                            block_results.append(br)
 
-                        merged_text = "\n".join(all_text)
-                        avg_conf = total_conf / len(blocks) if blocks else 0.0
-                        return (tier, idx, sid, s, merged_text, avg_conf, None)
+                        return (tier, idx, sid, s, block_results, None)
                     except Exception as e:
-                        return (tier, idx, sid, s, "", 0.0, e)
+                        return (tier, idx, sid, s, [], e)
                     finally:
                         tmp_path.unlink(missing_ok=True)
 
@@ -3985,19 +3988,26 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                             result = future.result()
                             if not result:
                                 continue
-                            tier, idx, sid, s, merged_text, avg_conf, err = result
+                            tier, idx, sid, s, block_results, err = result
                             if err:
                                 errors += 1
                                 if errors <= 5:
                                     print(f"[page-ocr] {model} error {sid}: {err}", file=sys.stderr)
                             else:
-                                text_val = merged_text
-                                conf_val = avg_conf
+                                # 合并到已有 blocks（按 block_idx 匹配）
                                 if isinstance(s, str):
-                                    buckets[tier][idx] = {"sample_id": s, text_col: text_val, conf_col: conf_val}
+                                    buckets[tier][idx] = {"sample_id": s, "blocks": block_results}
                                 else:
-                                    s[text_col] = text_val
-                                    s[conf_col] = conf_val
+                                    existing_blocks = s.get("blocks", [])
+                                    if existing_blocks:
+                                        for br in block_results:
+                                            bi = br.get("block_idx", 0)
+                                            if bi < len(existing_blocks):
+                                                existing_blocks[bi].update(br)
+                                            else:
+                                                existing_blocks.append(br)
+                                    else:
+                                        s["blocks"] = block_results
 
                             done_count += 1
                             processed += 1

@@ -223,6 +223,7 @@
                             <div id="paddleocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
                             <div class="flex gap-1 flex-shrink-0">
                                 <button class="btn-ocr-run px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" data-model="paddleocr">运行</button>
+                                <button class="btn-ocr-rerun px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600" data-model="paddleocr">重跑</button>
                                 <button class="btn-ocr-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="paddleocr">停止</button>
                             </div>
                         </div>
@@ -234,6 +235,7 @@
                             <div id="glm_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
                             <div class="flex gap-1 flex-shrink-0">
                                 <button class="btn-ocr-run px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700" data-model="glm_ocr">运行</button>
+                                <button class="btn-ocr-rerun px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600" data-model="glm_ocr">重跑</button>
                                 <button class="btn-ocr-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="glm_ocr">停止</button>
                             </div>
                         </div>
@@ -249,6 +251,7 @@
                             </label>
                             <div class="flex gap-1 flex-shrink-0">
                                 <button class="btn-ocr-run px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700" data-model="self_ocr">运行</button>
+                                <button class="btn-ocr-rerun px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600" data-model="self_ocr">重跑</button>
                                 <button class="btn-ocr-stop px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300 hidden" data-model="self_ocr">停止</button>
                             </div>
                         </div>
@@ -2266,15 +2269,9 @@
                 // 立即显示启动状态，不等 fetch
                 this.textContent = '启动中...';
 
-                // 清空该模型下正在运行（非完成）的旧进度条
+                // 清空该模型下所有旧进度条
                 const tasksDiv = document.getElementById(`${model}-tasks`);
-                if (tasksDiv) {
-                    tasksDiv.querySelectorAll('[id^="task-"]').forEach(el => {
-                        if (!el.innerHTML.includes('✅') && !el.innerHTML.includes('❌') && !el.innerHTML.includes('⏹')) {
-                            el.remove();
-                        }
-                    });
-                }
+                if (tasksDiv) tasksDiv.innerHTML = '';
 
                 // 为每个批次启动独立的 OCR 任务
                 let started = 0;
@@ -2313,6 +2310,43 @@
                 fetch(url, {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
                 }).catch(() => {});
+            });
+        });
+
+        document.querySelectorAll('.btn-ocr-rerun').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const model = this.dataset.model;
+                const selectedBatches = getSelectedOcrBatches();
+                if (selectedBatches.length === 0) { showToast('请勾选已抽样的批次', 'warning'); return; }
+                if (!confirm(`确定要清空 ${model} 已有结果并全部重跑吗？`)) return;
+
+                this.textContent = '启动中...';
+                const tasksDiv = document.getElementById(`${model}-tasks`);
+                if (tasksDiv) {
+                    tasksDiv.querySelectorAll('[id^="task-"]').forEach(el => {
+                        if (!el.innerHTML.includes('✅') && !el.innerHTML.includes('❌') && !el.innerHTML.includes('⏹')) el.remove();
+                    });
+                }
+
+                let started = 0;
+                const testMode = (model === 'self_ocr' && document.getElementById('self-ocr-test-mode')?.checked) ? '&test_mode=true' : '';
+                selectedBatches.forEach(b => {
+                    fetch(`/api/ocr/${encodeURIComponent(b.source_id)}?model=${model}&batch_id=${encodeURIComponent(b.batch_id)}&resume=false${testMode}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                    })
+                    .then(r => r.json())
+                    .then(data => {
+                        started++;
+                        if (data.task_id) pollOcrModel(model, data.task_id, null);
+                        if (started >= selectedBatches.length) this.textContent = '重跑';
+                    })
+                    .catch(err => {
+                        started++;
+                        console.error('[OCR] 重跑失败:', err);
+                        if (started >= selectedBatches.length) this.textContent = '重跑';
+                    });
+                });
             });
         });
 
@@ -2368,6 +2402,14 @@
 
         function renderTaskBar(model, taskId, task, barColor) {
             const tasksDiv = document.getElementById(`${model}-tasks`);
+            // 过滤：只显示匹配当前数据源/批次的任务
+            const curSrc = getSourceId();
+            const curBid = getBatchId();
+            const taskSrc = taskId.split('_').slice(2, -1).join('_');
+            const taskBid = taskId.split('_').slice(-1)[0];
+            if (curSrc && taskSrc && curSrc !== taskSrc) return;
+            if (curBid && taskBid && curBid !== taskBid) return;
+
             let taskEl = document.getElementById(`task-${taskId}`);
             if (!taskEl) {
                 taskEl = document.createElement('div');
