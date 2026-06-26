@@ -94,7 +94,6 @@ class PaddleOCREngine(BaseOCREngine):
                 ],
                 "max_tokens": 2048,
                 "temperature": 0,
-                "extra_body": {"task": task},
             }
             if self._model:
                 payload["model"] = self._model
