@@ -12,8 +12,55 @@ os.environ["TORCH_NUM_THREADS"] = "1"
 import sys
 import json
 import gc
+import threading
+import resource
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
+
+# 启动时提高文件描述符限制
+try:
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    print(f"[init] FD limit: {soft} -> {hard}", file=sys.stderr)
+except Exception:
+    pass
+
+
+class LanceDatasetCache:
+    """LRU cache for lance.dataset() to avoid FD exhaustion."""
+    def __init__(self, max_size=8):
+        self._cache = OrderedDict()
+        self._max_size = max_size
+        self._lock = threading.Lock()
+
+    def get(self, path: str):
+        key = str(path)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+        ds = lance.dataset(key)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            if len(self._cache) >= self._max_size:
+                old_key, old_ds = self._cache.popitem(last=False)
+                try: del old_ds
+                except: pass
+                gc.collect()
+            self._cache[key] = ds
+            return ds
+
+    def invalidate(self, path: str = None):
+        with self._lock:
+            if path: self._cache.pop(str(path), None)
+            else: self._cache.clear()
+            gc.collect()
+
+
+_lance_cache = LanceDatasetCache(max_size=8)
 from typing import Any
 import shutil
 import pyarrow as pa
@@ -2315,7 +2362,7 @@ async def get_difficulty_aware_samples(
 # ─── Judge-and-Refine (Hard Case 自动纠错) ──────────────────────────────────
 
 @app.get("/api/hard-cases/{source_id}/{batch_id}")
-async def get_hard_cases(source_id: str, batch_id: str):
+async def get_hard_cases_detail(source_id: str, batch_id: str):
     """获取需要 Judge-and-Refine 的 Hard block 列表。"""
     try:
         source = registry.get(source_id)
@@ -3762,6 +3809,330 @@ async def get_element_sample_status(source_id: str, batch_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/page-cmcv/{source_id}/{batch_id}")
+async def page_cmcv_classify(
+    source_id: str,
+    batch_id: str,
+):
+    """从 bucket_samples.json 读取每个 sample 的 blocks，按 block 比较多模型 OCR 一致性，
+    判定 easy/medium/hard。分类模式，不做采样。
+    """
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        ingest_path = batch_dir / "manifests" / "ingest.lance"
+        cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+
+        if not cache_path.exists():
+            raise HTTPException(status_code=400, detail="bucket_samples.json 不存在，请先运行 Page OCR")
+
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        buckets = cached.get("buckets", {})
+
+        # 检测可用的 OCR 模型列
+        model_cols = []
+        for prefix in ("paddle", "glm", "self"):
+            col = f"{prefix}_text"
+            # 检查是否有任何一个 sample 的 blocks 里有这个字段
+            for tier_samples in buckets.values():
+                for s in tier_samples:
+                    if isinstance(s, dict):
+                        for b in s.get("blocks", []):
+                            if b.get(col):
+                                model_cols.append(col)
+                                break
+                    if model_cols:
+                        break
+                if model_cols:
+                    break
+
+        if len(model_cols) < 2:
+            raise HTTPException(status_code=400, detail=f"需要至少 2 个模型的 OCR 结果做比较，当前只有 {model_cols}")
+
+        # 获取每个 IVF 分区的实际大小
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        ingest_path = batch_dir / "manifests" / "ingest.lance"
+        partition_sizes = {}  # partition_name -> actual size
+        try:
+            with _lance_write_lock:
+                ds = lance.dataset(str(ingest_path))
+                stats = ds.index_statistics("idx_embedding_ivf")
+                parts = stats["indices"][0].get("partitions", [])
+                for i, p in enumerate(parts):
+                    partition_sizes[f"P{i}"] = p.get("size", 0)
+        except Exception as e:
+            print(f"[page-cmcv] 获取分区大小失败: {e}", file=sys.stderr)
+
+        # CMCV：对每个 sample 的每个 block 计算模型一致性
+        from data_engine.ocr.cmcv import text_similarity
+
+        PATTERN_TIER = {"all_agree": "easy", "partial_agree": "medium", "all_disagree": "hard"}
+        page_tiers = {}  # sid -> "easy"/"medium"/"hard"
+        block_details = {}  # sid -> [{"block_idx", "pattern", "similarities"}, ...]
+
+        for tier_name, tier_samples in buckets.items():
+            for s in tier_samples:
+                if not isinstance(s, dict):
+                    continue
+                sid = s.get("sample_id", "")
+                blocks = s.get("blocks", [])
+                if not sid or not blocks:
+                    continue
+
+                block_patterns = []
+                block_scores = []
+                for b in blocks:
+                    texts = [b.get(col, "") for col in model_cols]
+                    # 计算两两相似度
+                    sims = []
+                    for i in range(len(texts)):
+                        for j in range(i + 1, len(texts)):
+                            sims.append(text_similarity(texts[i], texts[j]))
+                    avg_sim = sum(sims) / len(sims) if sims else 1.0
+
+                    if avg_sim >= 0.8:
+                        pattern = "all_agree"
+                    elif avg_sim >= 0.4:
+                        pattern = "partial_agree"
+                    else:
+                        pattern = "all_disagree"
+
+                    block_patterns.append(pattern)
+                    block_scores.append({"block_idx": b.get("block_idx", 0), "pattern": pattern, "avg_similarity": round(avg_sim, 3)})
+
+                # 页面难度 = 所有 block 中最差的
+                if "all_disagree" in block_patterns:
+                    page_tier = "hard"
+                elif "partial_agree" in block_patterns:
+                    page_tier = "medium"
+                else:
+                    page_tier = "easy"
+
+                page_tiers[sid] = page_tier
+                # 给每个 block 标注 page 级别的 tier
+                for bs in block_scores:
+                    bs["_tier"] = page_tier
+                block_details[sid] = block_scores
+
+        # 按分区分组，每个分区内按难度分层
+        partition_tier_pages = {}  # P0 -> {easy: [...], medium: [...], hard: [...]}
+        for tier_name, tier_samples in buckets.items():
+            partition_tier_pages[tier_name] = {"easy": [], "medium": [], "hard": []}
+            for s in tier_samples:
+                if not isinstance(s, dict):
+                    continue
+                sid = s.get("sample_id", "")
+                if sid in page_tiers:
+                    partition_tier_pages[tier_name][page_tiers[sid]].append({
+                        "tier": tier_name, "sample_id": sid, "blocks": block_details.get(sid, [])
+                    })
+
+        # 全局 tier 统计
+        tier_counts = {"easy": 0, "medium": 0, "hard": 0}
+        for ptp in partition_tier_pages.values():
+            for ctier in ("easy", "medium", "hard"):
+                tier_counts[ctier] += len(ptp[ctier])
+        # 统计每个 tier 的实际 block 数
+        tier_block_counts = {"easy": 0, "medium": 0, "hard": 0}
+        for ptp in partition_tier_pages.values():
+            for ctier in ("easy", "medium", "hard"):
+                tier_block_counts[ctier] += sum(len(p.get("blocks", [])) for p in ptp[ctier])
+        total_blocks = sum(tier_block_counts.values())
+        total_pages = sum(tier_counts.values())
+
+        result = {
+            "source_id": source_id, "batch_id": batch_id,
+            "strategy": "page_cmcv_classify",
+            "tier_summary": tier_counts,
+            "tier_block_summary": tier_block_counts,
+            "total_sampled": sum(len(v) for ptp in partition_tier_pages.values() for v in ptp.values()),
+            "total_blocks": total_blocks,
+            "total_pages": total_pages,
+            "block_details": block_details,
+        }
+
+        cached["page_cmcv"] = result
+        cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/page-cmcv-sample/{source_id}/{batch_id}")
+async def page_cmcv_sample(
+    source_id: str,
+    batch_id: str,
+    easy_ratio: float = 0.5,
+    medium_ratio: float = 1.0,
+    hard_ratio: float = 2.0,
+    force: bool = False,
+):
+    """基于 Page CMCV 分类结果，按分区+比例从 ingest.lance 抽取原始页面图片。"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        ingest_path = batch_dir / "manifests" / "ingest.lance"
+        cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+
+        if not cache_path.exists():
+            raise HTTPException(status_code=400, detail="bucket_samples.json 不存在，请先运行 Page OCR")
+
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        buckets = cached.get("buckets", {})
+
+        # 检测可用的 OCR 模型列
+        model_cols = []
+        for prefix in ("paddle", "glm", "self"):
+            col = f"{prefix}_text"
+            for tier_samples in buckets.values():
+                for s in tier_samples:
+                    if isinstance(s, dict):
+                        for b in s.get("blocks", []):
+                            if b.get(col):
+                                model_cols.append(col)
+                                break
+                    if model_cols:
+                        break
+                if model_cols:
+                    break
+
+        if len(model_cols) < 2:
+            raise HTTPException(status_code=400, detail=f"需要至少 2 个模型的 OCR 结果做比较，当前只有 {model_cols}")
+
+        from data_engine.ocr.cmcv import text_similarity
+
+        page_tiers = {}
+        for tier_name, tier_samples in buckets.items():
+            for s in tier_samples:
+                if not isinstance(s, dict):
+                    continue
+                sid = s.get("sample_id", "")
+                blocks = s.get("blocks", [])
+                if not sid or not blocks:
+                    continue
+                block_patterns = []
+                for b in blocks:
+                    texts = [b.get(col, "") for col in model_cols]
+                    sims = []
+                    for i in range(len(texts)):
+                        for j in range(i + 1, len(texts)):
+                            sims.append(text_similarity(texts[i], texts[j]))
+                    avg_sim = sum(sims) / len(sims) if sims else 1.0
+                    if avg_sim >= 0.8:
+                        block_patterns.append("all_agree")
+                    elif avg_sim >= 0.4:
+                        block_patterns.append("partial_agree")
+                    else:
+                        block_patterns.append("all_disagree")
+                if "all_disagree" in block_patterns:
+                    page_tiers[sid] = "hard"
+                elif "partial_agree" in block_patterns:
+                    page_tiers[sid] = "medium"
+                else:
+                    page_tiers[sid] = "easy"
+
+        partition_tier_pages = {}
+        for tier_name, tier_samples in buckets.items():
+            partition_tier_pages[tier_name] = {"easy": [], "medium": [], "hard": []}
+            for s in tier_samples:
+                if not isinstance(s, dict):
+                    continue
+                sid = s.get("sample_id", "")
+                if sid in page_tiers:
+                    partition_tier_pages[tier_name][page_tiers[sid]].append({
+                        "tier": tier_name, "sample_id": sid,
+                    })
+
+        ratios = {"easy": easy_ratio, "medium": medium_ratio, "hard": hard_ratio}
+        sampled = {"easy": [], "medium": [], "hard": []}
+        partition_stats = {}
+
+        import random, gc
+
+        _ds = _lance_cache.get(str(ingest_path))
+        stats = _ds.index_statistics("idx_embedding_ivf")
+        parts = stats["indices"][0].get("partitions", [])
+        centroids = stats["indices"][0].get("centroids", [])
+
+        for i, part_info in enumerate(parts):
+            part_size = part_info.get("size", 0)
+            if part_size == 0:
+                continue
+            tier_name = f"P{i}"
+            ptp = partition_tier_pages.get(tier_name, {"easy": [], "medium": [], "hard": []})
+            sampled_in_partition = len(ptp["easy"]) + len(ptp["medium"]) + len(ptp["hard"])
+            if sampled_in_partition == 0:
+                continue
+            easy_ratio_est = len(ptp["easy"]) / sampled_in_partition
+            med_ratio_est = len(ptp["medium"]) / sampled_in_partition
+            hard_ratio_est = len(ptp["hard"]) / sampled_in_partition
+            ps = {"sampled_in_partition": sampled_in_partition, "actual_size": part_size,
+                  "easy_ratio": round(easy_ratio_est, 3), "medium_ratio": round(med_ratio_est, 3),
+                  "hard_ratio": round(hard_ratio_est, 3), "sampled_easy": 0, "sampled_medium": 0, "sampled_hard": 0}
+            centroid = centroids[i]
+            query_vec = pa.array(centroid, type=pa.float32())
+            total_target = 0
+            for ctier, pct in ratios.items():
+                est_ratio = {"easy": easy_ratio_est, "medium": med_ratio_est, "hard": hard_ratio_est}[ctier]
+                if pct >= 100:
+                    total_target += int(part_size * est_ratio)
+                else:
+                    total_target += max(1, int(part_size * est_ratio * pct / 100))
+            total_target = max(total_target, part_size)
+            total_target = min(total_target, part_size)
+            try:
+                _ds2 = _lance_cache.get(str(ingest_path))
+                scanner = _ds2.scanner(
+                    nearest={"column": "embedding", "q": query_vec, "k": total_target},
+                    disable_scoring_autoprojection=True, columns=["sample_id", "difficulty", "input_type"],
+                )
+                tbl = scanner.to_table()
+                candidates = tbl.to_pylist()
+                del tbl, scanner, _ds2
+                gc.collect()
+            except Exception as e:
+                print(f"[page-cmcv-sample] {tier_name} 采样失败: {e}", file=sys.stderr)
+                continue
+            for ctier, pct in ratios.items():
+                est_ratio = {"easy": easy_ratio_est, "medium": med_ratio_est, "hard": hard_ratio_est}[ctier]
+                if pct >= 100:
+                    target = int(part_size * est_ratio)
+                else:
+                    target = max(1, int(part_size * est_ratio * pct / 100))
+                available = candidates
+                if len(available) <= target:
+                    chosen = available
+                else:
+                    chosen = random.sample(available, target)
+                for c in chosen:
+                    c["partition"] = tier_name
+                sampled[ctier].extend(chosen)
+                ps[f"sampled_{ctier}"] = len(chosen)
+            partition_stats[tier_name] = ps
+
+        result = {
+            "source_id": source_id, "batch_id": batch_id,
+            "strategy": "page_cmcv_sample",
+            "ratios": ratios,
+            "partition_stats": partition_stats,
+            "total_sampled": sum(len(v) for v in sampled.values()),
+            "buckets": {f"page_{t}": [s["sample_id"] for s in samples] for t, samples in sampled.items()},
+        }
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/ocr/{source_id}")
 async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                    resume: bool = True, test_mode: bool = False):
@@ -3881,25 +4252,9 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                             if isinstance(s, dict) and s.get(text_col):
                                 done_count += 1
 
-                remaining = len(all_samples) - done_count
-                print(f"[page-ocr] {model}: sampled={len(all_samples)}, already_done={done_count}, remaining={remaining}", file=sys.stderr)
-                if remaining <= 0:
-                    progress_tracker.complete_task(task_id, f"{model} 所有 {len(all_samples)} 个页面已完成，无需重跑")
-                    return
-
-                progress_tracker.update_progress(
-                    task_id, current=done_count, total=len(all_samples),
-                    message=f"{model}: 共 {len(all_samples)} 个页面（跳过 {done_count} 已完成，待处理 {remaining}）",
-                )
-
-                tmp_dir = tempfile.mkdtemp(prefix="page_ocr_")
-                processed = 0
-                errors = 0
-                save_interval = int(get_config("ocr", "save_interval", default=10))
-                max_workers = int(get_config("ocr", "page_concurrency", default=8))
-
-                # 收集待处理任务：每个 layout block 为一个 OCR 任务
+                # 收集待处理任务
                 tasks = []
+                skipped = 0
                 for tier, samples in buckets.items():
                     for idx, s in enumerate(samples):
                         sid = s if isinstance(s, str) else s.get("sample_id", "")
@@ -3908,29 +4263,35 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                         if isinstance(s, dict) and resume:
                             blocks = s.get("blocks", [])
                             if blocks and all(b.get(text_col) for b in blocks):
-                                done_count += 1
-                                processed += 1
+                                skipped += 1
                                 continue
                         img_bytes = img_map.get(sid)
                         if not img_bytes:
-                            errors += 1
-                            done_count += 1
-                            processed += 1
+                            skipped += 1
                             continue
                         blocks = layout_map.get(sid, [])
                         if not blocks:
-                            # 无 layout 结果，跳过此页面
-                            print(f"[page-ocr] skip {sid}: 无 layout 结果，请先运行 pp-layout", file=sys.stderr)
-                            errors += 1
-                            done_count += 1
-                            processed += 1
+                            print(f"[page-ocr] skip {sid}: 无 layout 结果", file=sys.stderr)
+                            skipped += 1
                             continue
                         tasks.append((tier, idx, sid, s, img_bytes, blocks))
 
+                remaining = len(tasks)
+                print(f"[page-ocr] {model}: total={len(all_samples)}, skipped={skipped}, to_process={remaining}", file=sys.stderr)
+                if remaining <= 0:
+                    progress_tracker.complete_task(task_id, f"{model} 所有 {len(all_samples)} 个页面已完成（跳过 {skipped}）")
+                    return
+
                 progress_tracker.update_progress(
-                    task_id, current=done_count, total=len(all_samples),
-                    message=f"{model}: 待处理 {len(tasks)} 页面，并发 {max_workers}...",
+                    task_id, current=skipped, total=len(all_samples),
+                    message=f"{model}: 共 {len(all_samples)} 页面（跳过 {skipped}，待处理 {remaining}）",
                 )
+
+                tmp_dir = tempfile.mkdtemp(prefix="page_ocr_")
+                processed = 0
+                errors = 0
+                save_interval = int(get_config("ocr", "save_interval", default=10))
+                max_workers = int(get_config("ocr", "page_concurrency", default=8))
 
                 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -3994,7 +4355,6 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                                 if errors <= 5:
                                     print(f"[page-ocr] {model} error {sid}: {err}", file=sys.stderr)
                             else:
-                                # 合并到已有 blocks（按 block_idx 匹配）
                                 if isinstance(s, str):
                                     buckets[tier][idx] = {"sample_id": s, "blocks": block_results}
                                 else:
@@ -4015,7 +4375,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                                 cached["buckets"] = buckets
                                 cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
                             err_msg = f"（{errors} 错误）" if errors else ""
-                            progress_tracker.update_progress(task_id, current=done_count, message=f"{model}: {processed}/{len(all_samples)} {err_msg}")
+                            progress_tracker.update_progress(task_id, current=skipped + processed, total=len(all_samples), message=f"{model}: {processed}/{remaining} {err_msg}")
 
                 finally:
                     cached["buckets"] = buckets
@@ -4027,7 +4387,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                 if progress_tracker.is_stopped(task_id):
                     progress_tracker.stop_task(task_id, f"已停止（已处理 {processed}/{len(all_samples)}）")
                 else:
-                    progress_tracker.complete_task(task_id, f"{model} 完成: {processed} 页面（跳过 {done_count - processed} 已完成{f'，{errors} 错误' if errors else ''}）")
+                    progress_tracker.complete_task(task_id, f"{model} 完成: {processed} 页面（跳过 {skipped}{f'，{errors} 错误' if errors else ''}）")
 
             except Exception as e:
                 import traceback
