@@ -13,18 +13,9 @@ import sys
 import json
 import gc
 import threading
-import resource
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
-
-# 启动时提高文件描述符限制
-try:
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-    print(f"[init] FD limit: {soft} -> {hard}", file=sys.stderr)
-except Exception:
-    pass
 
 
 class LanceDatasetCache:
@@ -4097,10 +4088,14 @@ async def page_cmcv_sample(
             ptp = partition_tier_pages.get(tier_name, {"easy": [], "medium": [], "hard": []})
             sampled_in_partition = len(ptp["easy"]) + len(ptp["medium"]) + len(ptp["hard"])
             if sampled_in_partition == 0:
-                continue
-            easy_ratio_est = len(ptp["easy"]) / sampled_in_partition
-            med_ratio_est = len(ptp["medium"]) / sampled_in_partition
-            hard_ratio_est = len(ptp["hard"]) / sampled_in_partition
+                # 无 CMCV 数据的分区：用全局平均比例估算
+                easy_ratio_est = 1/3
+                med_ratio_est = 1/3
+                hard_ratio_est = 1/3
+            else:
+                easy_ratio_est = len(ptp["easy"]) / sampled_in_partition
+                med_ratio_est = len(ptp["medium"]) / sampled_in_partition
+                hard_ratio_est = len(ptp["hard"]) / sampled_in_partition
             ps = {"sampled_in_partition": sampled_in_partition, "actual_size": part_size,
                   "easy_ratio": round(easy_ratio_est, 3), "medium_ratio": round(med_ratio_est, 3),
                   "hard_ratio": round(hard_ratio_est, 3), "sampled_easy": 0, "sampled_medium": 0, "sampled_hard": 0}
