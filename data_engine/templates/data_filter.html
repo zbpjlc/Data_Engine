@@ -211,7 +211,7 @@
                                 <div class="text-gray-400 text-xs">选择数据源后显示</div>
                             </div>
                         </div>
-                        <button id="btn-run-cmcv" class="px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium text-sm hidden">运行 CMCV</button>
+                        <button id="btn-run-cmcv" class="px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium text-sm hidden" style="display:none !important">运行 CMCV（已废弃，使用 Page CMCV）</button>
                     </div>
 
                     <!-- 三个模型按列显示 -->
@@ -283,7 +283,8 @@
                                 <div><label class="text-xs text-yellow-600">Medium %</label><input id="ratio-medium" type="number" value="1.0" min="0" max="100" step="0.1" class="w-full px-2 py-1 border rounded text-sm"></div>
                                 <div><label class="text-xs text-red-600">Hard %</label><input id="ratio-hard" type="number" value="2.0" min="0" max="100" step="0.1" class="w-full px-2 py-1 border rounded text-sm"></div>
                             </div>
-                            <button id="btn-diff-sample" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium">按难度抽样</button>
+                            <button id="btn-page-cmcv" class="w-full px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 font-medium">CMCV 分类</button>
+                            <button id="btn-page-cmcv-sample" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium hidden">按比例抽样</button>
                             <div class="text-xs text-gray-400">探针数 = 「抽样 & Layout」Tab 的每桶抽样数</div>
                         </div>
                         <div class="lg:col-span-2">
@@ -1020,8 +1021,7 @@
                         partition_tiers: d.partition_tiers,
                         strategy: d.strategy,
                     });
-                    if (d.strategy === 'difficulty_aware' || d.strategy === 'element_cluster') {
-                        merged.strategy = d.strategy;
+                    if (d.strategy === 'element_cluster') {
                         merged.ratios = d.ratios;
                         if (!merged.partition_tiers) merged.partition_tiers = {easy:0, medium:0, hard:0};
                         for (const [t, n] of Object.entries(d.partition_tiers || {})) {
@@ -1533,26 +1533,128 @@
             });
         });
 
-        // 难度感知抽样
-        document.getElementById('btn-diff-sample').addEventListener('click', function() {
+        // Page CMCV 分类
+        document.getElementById('btn-page-cmcv').addEventListener('click', function() {
+            console.log('[Page CMCV] classify clicked');
             const sourceId = selSource.value;
             const batchId = selBatch.value;
-            const baseCount = parseInt(document.getElementById('bucket-count').value) || 10;
+
+            let targets = [];
+            if (batchId && sourceId) {
+                const b = batchData.find(b => b.batch_id === batchId && b.source_id === sourceId);
+                if (b) targets.push(b);
+            } else if (batchId) {
+                const b = batchData.find(b => b.batch_id === batchId);
+                if (b) targets.push(b);
+            } else if (sourceId) {
+                targets = batchData.filter(b => b.source_id === sourceId);
+            } else {
+                targets = [...batchData];
+            }
+            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
+
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = `CMCV 分类中 (0/${targets.length})...`;
+
+            // 逐批调用 Page CMCV API（不抽样，只分类）
+            let allTierCounts = {easy: 0, medium: 0, hard: 0};
+            let allBlockDetails = {};
+            let totalPages = 0;
+            let done = 0;
+
+            const promises = targets.map(b => {
+                const url = `/api/page-cmcv/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}?easy_ratio=0&medium_ratio=0&hard_ratio=0&force=true`;
+                return fetch(url)
+                    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+                    .then(data => {
+                        if (data.error) { console.warn(`[${b.batch_id}] ${data.error}`); return; }
+                        for (const [t, n] of Object.entries(data.tier_summary || {})) {
+                            allTierCounts[t] = (allTierCounts[t] || 0) + n;
+                        }
+                        Object.assign(allBlockDetails, data.block_details || {});
+                        totalPages += data.total_pages || 0;
+                        done++;
+                        btn.textContent = `CMCV 分类中 (${done}/${targets.length})...`;
+                    })
+                    .catch(err => {
+                        console.error(`[${b.batch_id}] CMCV 分类失败:`, err);
+                        done++;
+                    });
+            });
+
+            Promise.all(promises).then(() => {
+                if (totalPages === 0) { showToast('无 Page OCR 数据', 'warning'); return; }
+
+                const ts = allTierCounts;
+                const blockCounts = {easy: 0, medium: 0, hard: 0};
+                const tierPageMap = {};
+                for (const [sid, details] of Object.entries(allBlockDetails)) {
+                    const pageTier = (Array.isArray(details) && details.length > 0 && details[0]._tier) || 'easy';
+                    blockCounts[pageTier] += details.length;
+                    tierPageMap[sid] = pageTier;
+                }
+                const totalBlocks = blockCounts.easy + blockCounts.medium + blockCounts.hard;
+
+                // 存储分类结果供抽样使用
+                window._pageCmcvClassification = { allTierCounts: ts, allBlockDetails, tierPageMap, totalBlocks };
+
+                document.getElementById('diff-empty').classList.add('hidden');
+                document.getElementById('diff-summary').classList.remove('hidden');
+                document.getElementById('diff-stats').innerHTML = `
+                    <div class="col-span-3 text-sm text-gray-600 mb-2">
+                        基于 <strong>${Object.keys(allBlockDetails).length > 0 ? '多模型' : '单模型'} OCR</strong> 的 block 级一致性分析
+                    </div>
+                    <div class="col-span-3 text-xs text-gray-500 mb-3 border-b pb-2">
+                        <strong>CMCV 分类结果</strong>：共 ${totalPages} 页（${totalBlocks} 个 block）
+                    </div>
+                    <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
+                        <div class="text-xs text-green-600">Easy</div>
+                        <div class="text-xl font-bold text-green-800">${ts.easy || 0} 页</div>
+                        <div class="text-xs text-gray-400">${blockCounts.easy} blocks</div>
+                    </div>
+                    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
+                        <div class="text-xs text-yellow-600">Medium</div>
+                        <div class="text-xl font-bold text-yellow-800">${ts.medium || 0} 页</div>
+                        <div class="text-xs text-gray-400">${blockCounts.medium} blocks</div>
+                    </div>
+                    <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+                        <div class="text-xs text-red-600">Hard</div>
+                        <div class="text-xl font-bold text-red-800">${ts.hard || 0} 页</div>
+                        <div class="text-xs text-gray-400">${blockCounts.hard} blocks</div>
+                    </div>`;
+                document.getElementById('diff-detail').innerHTML = `
+                    <div class="text-xs text-gray-400 mt-1">分类完成，可调整比例后点击「按比例抽样」</div>`;
+                document.getElementById('btn-page-cmcv-sample').classList.remove('hidden');
+            }).finally(() => {
+                btn.disabled = false;
+                btn.textContent = 'CMCV 分类';
+            });
+        });
+
+        // Step 2: 按比例抽样 — 调用后端 per-partition 抽样
+        document.getElementById('btn-page-cmcv-sample').addEventListener('click', function() {
+            console.log('[Page CMCV] sample clicked');
+            if (!window._pageCmcvClassification) { showToast('请先运行 CMCV 分类', 'warning'); return; }
+
+            const sourceId = selSource.value;
+            const batchId = selBatch.value;
+
             const easyRatio = parseFloat(document.getElementById('ratio-easy').value) || 0.5;
             const mediumRatio = parseFloat(document.getElementById('ratio-medium').value) || 1.0;
             const hardRatio = parseFloat(document.getElementById('ratio-hard').value) || 2.0;
 
-            // 确定要处理的批次列表
+            // 确定要抽样的批次列表
             let targets = [];
-            if (batchId) {
-                // 选了具体批次
+            if (batchId && sourceId) {
+                const b = batchData.find(b => b.batch_id === batchId && b.source_id === sourceId);
+                if (b) targets.push(b);
+            } else if (batchId) {
                 const b = batchData.find(b => b.batch_id === batchId);
                 if (b) targets.push(b);
             } else if (sourceId) {
-                // 选了数据源但全部批次
                 targets = batchData.filter(b => b.source_id === sourceId);
             } else {
-                // 全部数据源全部批次
                 targets = [...batchData];
             }
             if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
@@ -1560,79 +1662,194 @@
             const btn = this;
             btn.disabled = true;
             btn.textContent = `抽样中 (0/${targets.length})...`;
+            const progressDiv = document.getElementById('layout-progress');
+            progressDiv.classList.remove('hidden');
+            document.getElementById('layout-task-list').innerHTML = '';
 
-            // 逐批调 API，合并结果
-            let allBuckets = {};
-            let allBucketSizes = {};
-            let allDiffStats = {};
-            let allTierCounts = {easy: 0, medium: 0, hard: 0};
-            let totalSampled = 0;
             let done = 0;
-            const diffBatchInfo = [];  // 记录成功的批次信息
+            let allTierSummary = {easy: 0, medium: 0, hard: 0};
+            let allSampledCounts = {easy: 0, medium: 0, hard: 0};
 
             const promises = targets.map(b => {
-                let url = `/api/bucket-samples-difficulty/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`;
-                url += `?base_count=${baseCount}&easy_ratio=${easyRatio}&medium_ratio=${mediumRatio}&hard_ratio=${hardRatio}&force=true`;
+                const url = `/api/page-cmcv-sample/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}?easy_ratio=${easyRatio}&medium_ratio=${mediumRatio}&hard_ratio=${hardRatio}&force=true`;
                 return fetch(url)
                     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
                     .then(data => {
-                        if (data.error) { console.warn(`[${b.batch_id}] ${data.error}`); return; }
-                        // 合并结果，key 加 batch 前缀避免冲突
+                        if (data.error) { console.warn(`[${b.batch_id}] ${data.error}`); return data; }
+                        console.log(`[${b.batch_id}] sample result: total_sampled=${data.total_sampled}, buckets=${JSON.stringify({easy: (data.buckets?.page_easy||[]).length, medium: (data.buckets?.page_medium||[]).length, hard: (data.buckets?.page_hard||[]).length})}`);
+                        const ts = data.tier_summary || {};
+                        for (const [t, n] of Object.entries(ts)) {
+                            allTierSummary[t] = (allTierSummary[t] || 0) + n;
+                        }
                         for (const [k, v] of Object.entries(data.buckets || {})) {
-                            if (Array.isArray(v)) v.forEach(s => { if (typeof s === 'object') { s._source_id = b.source_id; s._batch_id = b.batch_id; } });
-                            allBuckets[`${b.source_id}/${b.batch_id}/${k}`] = v;
+                            const tier = k.includes('easy') ? 'easy' : k.includes('medium') ? 'medium' : 'hard';
+                            allSampledCounts[tier] += Array.isArray(v) ? v.length : 0;
                         }
-                        for (const [k, v] of Object.entries(data.bucket_sizes || {})) {
-                            allBucketSizes[`${b.source_id}/${b.batch_id}/${k}`] = v;
-                        }
-                        for (const [k, v] of Object.entries(data.bucket_diff_stats || {})) {
-                            allDiffStats[`${b.source_id}/${b.batch_id}/${k}`] = v;
-                        }
-                        for (const [t, n] of Object.entries(data.partition_tiers || {})) {
-                            allTierCounts[t] = (allTierCounts[t] || 0) + n;
-                        }
-                        totalSampled += data.total_sampled || 0;
-                        diffBatchInfo.push({
-                            source_id: b.source_id,
-                            batch_id: b.batch_id,
-                            total_sampled: data.total_sampled || 0,
-                            partition_tiers: data.partition_tiers,
-                        });
                         done++;
                         btn.textContent = `抽样中 (${done}/${targets.length})...`;
+                        return data;
                     })
                     .catch(err => {
-                        console.error(`[${b.batch_id}] 难度抽样失败:`, err);
+                        console.error(`[${b.batch_id}] 抽样失败:`, err);
                         done++;
                     });
             });
 
-            Promise.all(promises).then(() => {
-                bucketSampleData = {
-                    strategy: 'difficulty_aware',
-                    source_id: sourceId || 'all',
-                    batch_id: batchId || '',
-                    base_count: baseCount,
-                    ratios: {easy: easyRatio, medium: mediumRatio, hard: hardRatio},
-                    partition_tiers: allTierCounts,
-                    bucket_count: Object.keys(allBucketSizes).length,
-                    bucket_sizes: allBucketSizes,
-                    bucket_diff_stats: allDiffStats,
-                    total_sampled: totalSampled,
-                    buckets: allBuckets,
-                    batch_info: diffBatchInfo,
-                };
-                renderDiffSummary(bucketSampleData);
-                renderBucketResults(bucketSampleData);
-                document.getElementById('btn-run-layout').classList.remove('hidden');
-                updateOcrBatchSelect();
+            Promise.all(promises).then(results => {
+                console.log('[Page CMCV] sample results:', results.map(r => r ? {total: r.total_sampled, buckets: {easy: (r.buckets?.page_easy||[]).length}} : 'null'));
+                const totalSampledPages = allSampledCounts.easy + allSampledCounts.medium + allSampledCounts.hard;
+                const ts = allTierSummary;
+
+                // 从各批次的 partition_stats 计算估算的全量 easy/medium/hard 总数
+                let estEasy = 0, estMed = 0, estHard = 0;
+                let allPartitionStats = {};
+                // 收集所有批次的 partition_stats 并合并
+                for (const r of results) {
+                    if (r && r.partition_stats) {
+                        for (const [name, ps] of Object.entries(r.partition_stats)) {
+                            if (!allPartitionStats[name]) allPartitionStats[name] = ps;
+                            else {
+                                allPartitionStats[name].actual_size = (allPartitionStats[name].actual_size || 0) + (ps.actual_size || 0);
+                                allPartitionStats[name].easy_ratio = ps.easy_ratio || 0;
+                                allPartitionStats[name].medium_ratio = ps.medium_ratio || 0;
+                                allPartitionStats[name].hard_ratio = ps.hard_ratio || 0;
+                            }
+                        }
+                    }
+                }
+                for (const ps of Object.values(allPartitionStats)) {
+                    const sz = ps.actual_size || 0;
+                    estEasy += Math.round(sz * (ps.easy_ratio || 0));
+                    estMed += Math.round(sz * (ps.medium_ratio || 0));
+                    estHard += Math.round(sz * (ps.hard_ratio || 0));
+                }
+
+                const easyPct = estEasy > 0 ? (allSampledCounts.easy / estEasy * 100).toFixed(1) : '0';
+                const medPct = estMed > 0 ? (allSampledCounts.medium / estMed * 100).toFixed(1) : '0';
+                const hardPct = estHard > 0 ? (allSampledCounts.hard / estHard * 100).toFixed(1) : '0';
+
+                const blockCounts = {easy: 0, medium: 0, hard: 0};
+                const tierPageMap = {};
+                const cls = window._pageCmcvClassification;
+                if (cls) {
+                    for (const [sid, details] of Object.entries(cls.allBlockDetails)) {
+                        const pageTier = (Array.isArray(details) && details.length > 0 && details[0]._tier) || 'easy';
+                        blockCounts[pageTier] += details.length;
+                        tierPageMap[sid] = pageTier;
+                    }
+                }
+
+                // 存储抽样结果供重复点击使用
+                window._pageCmcvSampling = { allSampledCounts, estEasy, estMed, estHard, easyPct, medPct, hardPct, blockCounts };
+
+                // 重建完整显示（分类 + 抽样）
+                const clsData = window._pageCmcvClassification || {};
+                const clsTs = clsData.allTierCounts || {};
+                const clsBlockCounts = cls.blockCounts || {};
+                const totalPages = (clsTs.easy || 0) + (clsTs.medium || 0) + (clsTs.hard || 0);
+                const totalSampledNow = allSampledCounts.easy + allSampledCounts.medium + allSampledCounts.hard;
+
+                const statsDiv = document.getElementById('diff-stats');
+                statsDiv.innerHTML = `
+                        <div class="col-span-3 text-sm text-gray-600 mb-2">
+                            基于 <strong>多模型 OCR</strong> 的 block 级一致性分析
+                        </div>
+                        <div class="col-span-3 text-xs text-gray-500 mb-3 border-b pb-2">
+                            <strong>CMCV 分类结果</strong>：共 ${totalPages} 页（${totalSampledNow} 个 block）
+                        </div>
+                        <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
+                            <div class="text-xs text-green-600">Easy</div>
+                            <div class="text-xl font-bold text-green-800">${clsTs.easy || 0} 页</div>
+                            <div class="text-xs text-gray-400">${clsBlockCounts.easy || 0} blocks</div>
+                        </div>
+                        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
+                            <div class="text-xs text-yellow-600">Medium</div>
+                            <div class="text-xl font-bold text-yellow-800">${clsTs.medium || 0} 页</div>
+                            <div class="text-xs text-gray-400">${clsBlockCounts.medium || 0} blocks</div>
+                        </div>
+                        <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+                            <div class="text-xs text-red-600">Hard</div>
+                            <div class="text-xl font-bold text-red-800">${clsTs.hard || 0} 页</div>
+                            <div class="text-xs text-gray-400">${clsBlockCounts.hard || 0} blocks</div>
+                        </div>
+                        <div class="col-span-3 text-xs text-gray-500 mt-3 mb-2 border-b pb-2">
+                            <strong>按分区抽样结果</strong>：按 easy:${easyRatio}% medium:${mediumRatio}% hard:${hardRatio}% 从各分区抽样
+                        </div>
+                        <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
+                            <div class="text-xs text-green-600">Easy</div>
+                            <div class="text-xl font-bold text-green-800">${allSampledCounts.easy} 页</div>
+                            <div class="text-xs text-gray-400">估算 ${estEasy.toLocaleString()} 页 · ${easyPct}%</div>
+                        </div>
+                        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
+                            <div class="text-xs text-yellow-600">Medium</div>
+                            <div class="text-xl font-bold text-yellow-800">${allSampledCounts.medium} 页</div>
+                            <div class="text-xs text-gray-400">估算 ${estMed.toLocaleString()} 页 · ${medPct}%</div>
+                        </div>
+                        <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+                            <div class="text-xs text-red-600">Hard</div>
+                            <div class="text-xl font-bold text-red-800">${allSampledCounts.hard} 页</div>
+                            <div class="text-xs text-gray-400">估算 ${estHard.toLocaleString()} 页 · ${hardPct}%</div>
+                        </div>`;
+
+                document.getElementById('diff-detail').innerHTML = `
+                    <button id="btn-page-cmcv-layout" class="mt-3 px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 font-medium text-sm">对抽样结果运行 pp-layout 并写入 Lance</button>`;
             }).finally(() => {
                 btn.disabled = false;
-                btn.textContent = '按难度抽样';
+                btn.textContent = '按比例抽样';
+                progressDiv.classList.add('hidden');
+            });
+        });
+
+        // Page CMCV layout 按钮：运行 pp-layout 并写入 text/formula/table.lance
+        document.addEventListener('click', function(e) {
+            if (e.target.id !== 'btn-page-cmcv-layout') return;
+            if (!bucketSampleData) { showToast('请先运行 Page CMCV', 'warning'); return; }
+
+            const batchInfo = bucketSampleData.batch_info || [];
+            let targets = [];
+            if (batchInfo.length > 0) {
+                targets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            } else if (bucketSampleData.source_id && bucketSampleData.source_id !== 'all') {
+                targets = [{source_id: bucketSampleData.source_id, batch_id: bucketSampleData.batch_id}];
+            } else {
+                targets = [{source_id: 'all', batch_id: ''}];
+            }
+
+            const btn = e.target;
+            btn.disabled = true;
+            btn.textContent = `Layout 启动中 (0/${targets.length})...`;
+            const progressDiv = document.getElementById('layout-progress');
+            progressDiv.classList.remove('hidden');
+            document.getElementById('layout-task-list').innerHTML = '';
+
+            let done = 0;
+            targets.forEach(t => {
+                fetch('/api/layout-batch', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ source_id: t.source_id, batch_id: t.batch_id, write_lance: true }),
+                })
+                .then(r => r.json())
+                .then(data => {
+                    done++;
+                    btn.textContent = `Layout 启动中 (${done}/${targets.length})...`;
+                    if (data.task_id) pollLayoutBatch(data.task_id, 0, btn);
+                    if (data.task_ids) data.task_ids.forEach(tid => pollLayoutBatch(tid, 0, btn));
+                    if (done >= targets.length) { btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout 并写入 Lance'; }
+                })
+                .catch(err => {
+                    done++;
+                    console.error('[page-cmcv-layout] failed:', err);
+                    if (done >= targets.length) { btn.disabled = false; btn.textContent = '对抽样结果运行 pp-layout 并写入 Lance'; }
+                });
             });
         });
 
         function renderDiffSummary(data) {
+            if (data !== bucketSampleData) {
+                console.warn('[renderDiffSummary] SKIP: data !== bucketSampleData', data.total_sampled, 'vs', bucketSampleData?.total_sampled);
+                return;
+            }
+            console.log('[renderDiffSummary] RENDER:', data.strategy, 'total_sampled:', data.total_sampled, 'partition_tiers:', data.partition_tiers);
             document.getElementById('diff-empty').classList.add('hidden');
             document.getElementById('diff-summary').classList.remove('hidden');
             const statsDiv = document.getElementById('diff-stats');
@@ -1736,13 +1953,11 @@
             document.getElementById('bucket-results').classList.remove('hidden');
 
             // 不自动切换 Tab，只在当前 Tab 内渲染
-            const isDiff = data.strategy === 'difficulty_aware' || data.strategy === 'element_cluster' || data.partition_tiers || data.tier_summary || (data.batch_info && data.batch_info.some(b => b.partition_tiers));
+            const isDiff = data.strategy === 'difficulty_aware' || data.strategy === 'element_cluster' || data.strategy === 'page_cmcv';
 
-            // 难度感知数据渲染到 diff-summary 区域
+            // 难度感知数据：Page CMCV 和 Element CMCV 由各自的 handler 直接调用 renderDiffSummary
+            // renderBucketSummary 不再调用 renderDiffSummary，避免用旧数据覆盖
             if (isDiff) {
-                document.getElementById('diff-empty').classList.add('hidden');
-                document.getElementById('diff-summary').classList.remove('hidden');
-                renderDiffSummary(data);
                 return;
             }
             document.getElementById('bucket-summary').classList.remove('hidden');
@@ -2405,8 +2620,8 @@
             // 过滤：只显示匹配当前数据源/批次的任务
             const curSrc = getSourceId();
             const curBid = getBatchId();
-            const taskSrc = taskId.split('_').slice(2, -1).join('_');
-            const taskBid = taskId.split('_').slice(-1)[0];
+            const taskSrc = task.source_id || '';
+            const taskBid = task.batch_id || '';
             if (curSrc && taskSrc && curSrc !== taskSrc) return;
             if (curBid && taskBid && curBid !== taskBid) return;
 
@@ -2482,34 +2697,50 @@
                 sourceId = batches[0].source_id;
                 batchId = batches[0].batch_id;
             }
-            fetch(`/api/cmcv/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/results`)
-                .then(r => r.json())
-                .then(data => {
-                    const pages = data.pages || [];
-                    if (!pages.length) return;
+
+            // 优先从 Page OCR 数据（bucket_samples.json）加载
+            if (bucketSampleData && (bucketSampleData.strategy === 'page_cmcv' || bucketSampleData.source_id === sourceId)) {
+                const buckets = bucketSampleData.buckets || {};
+                const pages = [];
+                let totalBlocks = 0;
+                for (const [tier, samples] of Object.entries(buckets)) {
+                    if (!Array.isArray(samples)) continue;
+                    for (const s of samples) {
+                        const blocks = (s.blocks || []).filter(b => b.paddle_text || b.glm_text || b.self_text);
+                        if (blocks.length > 0) {
+                            pages.push({sample_id: s.sample_id || s, tier, blocks});
+                            totalBlocks += blocks.length;
+                        }
+                    }
+                }
+                if (pages.length > 0) {
                     document.getElementById('ocr-empty').classList.add('hidden');
                     document.getElementById('ocr-results').classList.remove('hidden');
-                    document.getElementById('ocr-total-blocks').textContent = data.total_blocks || 0;
+                    document.getElementById('ocr-total-blocks').textContent = totalBlocks;
                     document.getElementById('ocr-total-samples').textContent = pages.length;
 
                     let currentIdx = 0;
                     function showSample() {
                         const page = pages[currentIdx];
-                        const blocks = page.blocks || [];
-                        let html = `<div class="mb-2 text-sm font-medium">${page.sample_id} — ${blocks.length} blocks</div>`;
+                        const blocks = page.blocks;
+                        let html = `<div class="mb-2 text-sm font-medium">${page.sample_id} — ${blocks.length} blocks <span class="text-gray-400">(${page.tier})</span></div>`;
                         html += '<div class="space-y-2 max-h-[60vh] overflow-y-auto">';
                         blocks.forEach(b => {
-                            const pat = b.consistency_pattern || '-';
-                            const patColor = pat === 'all_agree' ? 'text-green-700' : pat === 'partial_agree' ? 'text-yellow-700' : 'text-red-700';
+                            const pt = (b.paddle_text || '').substring(0, 100);
+                            const gt = (b.glm_text || '').substring(0, 100);
+                            const st = (b.self_text || '').substring(0, 100);
+                            const pc = b.paddle_confidence ? ` ${Math.round(b.paddle_confidence*100)}%` : '';
+                            const gc = b.glm_confidence ? ` ${Math.round(b.glm_confidence*100)}%` : '';
+                            const sc = b.self_confidence ? ` ${Math.round(b.self_confidence*100)}%` : '';
                             html += `<div class="border rounded p-2 bg-white text-xs">
                                 <div class="flex justify-between mb-1">
-                                    <span class="font-medium">${b.block_type} #${b.block_idx}</span>
-                                    <span class="${patColor} font-medium">${pat}</span>
+                                    <span class="font-medium">${b.block_type || 'text'} #${b.block_idx}</span>
+                                    <span class="text-gray-400">${b.bbox ? b.bbox.map(v=>Math.round(v)).join(',') : ''}</span>
                                 </div>
                                 <div class="grid grid-cols-3 gap-2">
-                                    <div><span class="text-blue-600">Paddle:</span> ${(b.paddle_text || '').substring(0, 80)}</div>
-                                    <div><span class="text-green-600">GLM:</span> ${(b.glm_text || '').substring(0, 80)}</div>
-                                    <div><span class="text-purple-600">Self:</span> ${(b.self_text || '').substring(0, 80)}</div>
+                                    <div><span class="text-blue-600">Paddle${pc}:</span> ${pt || '<i>空</i>'}</div>
+                                    <div><span class="text-green-600">GLM${gc}:</span> ${gt || '<i>空</i>'}</div>
+                                    <div><span class="text-purple-600">Self${sc}:</span> ${st || '<i>空</i>'}</div>
                                 </div>
                             </div>`;
                         });
@@ -2523,8 +2754,9 @@
                     document.getElementById('ocr-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showSample(); } };
                     document.getElementById('ocr-next').onclick = () => { if (currentIdx < pages.length - 1) { currentIdx++; showSample(); } };
                     showSample();
-                })
-                .catch(() => {});
+                    return;
+                }
+            }
         }
 
         // CMCV
