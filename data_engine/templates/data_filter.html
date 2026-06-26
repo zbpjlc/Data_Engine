@@ -560,95 +560,6 @@
                     </div>
                 </div>
             </div>
-
-            <!-- 高级筛选器 -->
-            <div class="bg-white rounded-lg shadow p-6 mb-8">
-                <h2 class="text-lg font-semibold text-gray-900 mb-6">数据筛选</h2>
-                
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    <!-- 数据源筛选 -->
-                    <div class="space-y-4">
-                        <h3 class="text-md font-medium text-gray-700">数据源</h3>
-                        <div class="space-y-2">
-                            {% for source in sources %}
-                            <label class="flex items-center">
-                                <input type="checkbox" value="{{ source.source_id }}" class="source-checkbox mr-2">
-                                <span class="text-sm text-gray-700">{{ source.source_id }}</span>
-                                <span class="text-xs text-gray-500 ml-2">({{ source.batch_count }} 批次)</span>
-                            </label>
-                            {% endfor %}
-                        </div>
-                    </div>
-
-                    <!-- 批次筛选 -->
-                    <div class="space-y-4">
-                        <h3 class="text-md font-medium text-gray-700">批次</h3>
-                        <div class="space-y-2 max-h-48 overflow-y-auto">
-                            {% for batch in batches %}
-                            <label class="flex items-center">
-                                <input type="checkbox" value="{{ batch.batch_id }}" class="batch-checkbox mr-2">
-                                <span class="text-sm text-gray-700">{{ batch.batch_id }}</span>
-                                <span class="text-xs text-gray-500 ml-2">({{ batch.sample_count }} 样本)</span>
-                            </label>
-                            {% endfor %}
-                        </div>
-                    </div>
-
-                    <!-- 处理状态筛选 -->
-                    <div class="space-y-4">
-                        <h3 class="text-md font-medium text-gray-700">数据状态</h3>
-                        <div class="space-y-2">
-                            <label class="flex items-center">
-                                <input type="checkbox" value="has_embedding" class="status-checkbox mr-2">
-                                <span class="text-sm text-gray-700">已有向量</span>
-                            </label>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 操作按钮 -->
-                <div class="flex justify-between items-center mt-6 pt-6 border-t border-gray-200">
-                    <div class="space-x-4">
-                        <button id="select-all" class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700">全选</button>
-                        <button id="clear-all" class="px-4 py-2 bg-gray-400 text-white rounded-md hover:bg-gray-500">清空</button>
-                    </div>
-                    <div class="space-x-4">
-                        <button id="apply-filter" class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">应用筛选</button>
-                        <button id="export-data" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700">导出数据</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 筛选结果 -->
-            <div class="bg-white rounded-lg shadow">
-                <div class="px-6 py-4 border-b border-gray-200">
-                    <h2 class="text-lg font-semibold text-gray-900">筛选结果</h2>
-                </div>
-                <div class="p-6">
-                    <div id="filter-summary" class="mb-4 text-sm text-gray-600">
-                        请选择筛选条件后点击"应用筛选"
-                    </div>
-                    <div id="results-table" class="overflow-x-auto">
-                        <table class="min-w-full divide-y divide-gray-200">
-                            <thead class="bg-gray-50">
-                                <tr>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">样本ID</th>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">数据源</th>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">批次</th>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">类型</th>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">难度</th>
-                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">操作</th>
-                                </tr>
-                            </thead>
-                            <tbody id="results-body" class="bg-white divide-y divide-gray-200">
-                                <tr>
-                                    <td colspan="6" class="px-6 py-12 text-center text-gray-500">暂无数据</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
         </main>
     </div>
 
@@ -789,7 +700,7 @@
         const PollManager = {
             _subs: new Map(),   // taskId → {onProgress, onComplete, onFail}
             _timer: null,
-            _interval: 1500,
+            _interval: 3000,
 
             // 订阅某个任务的进度更新
             subscribe(taskId, cbs) {
@@ -836,7 +747,7 @@
 
         // 单独任务轮询器（用于非 /api/progress 端点，如 /api/tasks/{id}）
         class TaskPoller {
-            constructor(endpoint, cbs, interval = 2000) {
+            constructor(endpoint, cbs, interval = 3000) {
                 this.endpoint = endpoint;
                 this.cbs = cbs;
                 this.interval = interval;
@@ -1671,7 +1582,7 @@
             let done = 0;
 
             const promises = targets.map(b => {
-                const url = `/api/page-cmcv/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}?easy_ratio=0&medium_ratio=0&hard_ratio=0&force=true`;
+                const url = `/api/page-cmcv/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`;
                 return fetch(url)
                     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
                     .then(data => {
@@ -1907,9 +1818,7 @@
                             <div class="text-xl font-bold text-red-800">${allSampledCounts.hard} 页</div>
                             <div class="text-xs text-gray-400">估算 ${estHard.toLocaleString()} 页 · ${hardPct}%</div>
                         </div>`;
-
-                document.getElementById('diff-detail').innerHTML = `
-                    <button id="btn-page-cmcv-layout" class="mt-3 px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 font-medium text-sm">对抽样结果运行 pp-layout 并写入 Lance</button>`;
+                document.getElementById('btn-page-cmcv-layout').classList.remove('hidden');
             }).finally(() => {
                 btn.disabled = false;
                 btn.textContent = '按比例抽样';
@@ -1920,6 +1829,7 @@
         // Page CMCV layout 按钮：对按比例抽样结果运行 pp-layout 并写入 text/formula/table.lance
         document.addEventListener('click', function(e) {
             if (e.target.id !== 'btn-page-cmcv-layout') return;
+            if (e.target.disabled) return;
             const sampling = window._pageCmcvSampling;
             if (!sampling || !sampling.sampledIds || sampling.sampledIds.length === 0) {
                 showToast('请先运行按比例抽样', 'warning'); return;
@@ -2025,7 +1935,7 @@
                                 : `失败：${data.message || '未知错误'}`;
                             return;
                         }
-                        setTimeout(poll, 2000);
+                        setTimeout(poll, 3000);
                     })
                     .catch(() => setTimeout(poll, 3000));
             }
@@ -3049,79 +2959,6 @@
 
 
 
-        // ── 筛选 / 导出 ──────────────────────────────────────────────────────
-        document.getElementById('select-all').addEventListener('click', () => document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true));
-        document.getElementById('clear-all').addEventListener('click', () => document.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false));
-
-        document.getElementById('apply-filter').addEventListener('click', function() {
-            const sources = Array.from(document.querySelectorAll('.source-checkbox:checked')).map(cb => cb.value);
-            const batches = Array.from(document.querySelectorAll('.batch-checkbox:checked')).map(cb => cb.value);
-            const statuses = Array.from(document.querySelectorAll('.status-checkbox:checked')).map(cb => cb.value);
-            if (sources.length === 0 && batches.length === 0 && statuses.length === 0) { showToast('请至少选择一个筛选条件', 'warning'); return; }
-            const params = new URLSearchParams();
-            if (sources.length) params.set('sources', sources.join(','));
-            if (batches.length) params.set('batches', batches.join(','));
-            if (statuses.length) params.set('statuses', statuses.join(','));
-            params.set('page', '1'); params.set('page_size', '10');
-            fetch(`/api/filter-data?${params}`).then(r => r.json()).then(data => displayResults(data)).catch(() => showToast('筛选失败', 'error'));
-        });
-
-        document.getElementById('export-data').addEventListener('click', function() {
-            const rows = document.querySelectorAll('#results-body tr');
-            if (!rows.length || rows[0].querySelector('td[colspan]')) { showToast('没有数据可导出', 'warning'); return; }
-            let csv = 'Sample ID,Source ID,Batch ID,Type,Difficulty\n';
-            rows.forEach(r => csv += Array.from(r.querySelectorAll('td')).map(c => c.textContent.trim()).join(',') + '\n');
-            const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([csv], {type:'text/csv'})), download: 'filtered_data.csv' });
-            a.click();
-        });
-
-        let currentPage = 1, currentFilters = {};
-        function displayResults(data) {
-            currentPage = data.page; currentFilters = data;
-            document.getElementById('filter-summary').innerHTML = `找到 <strong>${data.total}</strong> 个样本，显示第 <strong>${data.page}</strong> 页，共 <strong>${data.total_pages}</strong> 页`;
-            const tbody = document.getElementById('results-body');
-            tbody.innerHTML = '';
-            const frag = document.createDocumentFragment();
-            data.samples.forEach(s => {
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${s.sample_id}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.source_id}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.batch_id}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.input_type}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${s.difficulty || 'N/A'}</td>
-                    <td class="px-6 py-4 whitespace-nowrap"><button onclick="showToast('${s.sample_id}', 'info')" class="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700">查看</button></td>`;
-                frag.appendChild(tr);
-            });
-            tbody.appendChild(frag);
-            addPagination(data);
-        }
-
-        function addPagination(data) {
-            const old = document.getElementById('pagination-controls');
-            if (old) old.remove();
-            if (data.total_pages <= 1) return;
-            const div = document.createElement('div');
-            div.id = 'pagination-controls';
-            div.className = 'flex justify-between items-center mt-4 pt-4 border-t border-gray-200';
-            div.innerHTML = `
-                <div class="text-sm text-gray-700">第 ${data.page} 页，共 ${data.total_pages} 页</div>
-                <div class="flex space-x-2">
-                    <button onclick="changePage(${data.page-1})" ${data.page<=1?'disabled':''} class="px-4 py-2 bg-gray-300 text-gray-700 rounded ${data.page<=1?'opacity-50 cursor-not-allowed':'hover:bg-gray-400'}">上一页</button>
-                    <button onclick="changePage(${data.page+1})" ${data.page>=data.total_pages?'disabled':''} class="px-4 py-2 bg-gray-300 text-gray-700 rounded ${data.page>=data.total_pages?'opacity-50 cursor-not-allowed':'hover:bg-gray-400'}">下一页</button>
-                </div>`;
-            document.getElementById('results-table').appendChild(div);
-        }
-
-        function changePage(page) {
-            const params = new URLSearchParams();
-            if (currentFilters.sources) params.set('sources', currentFilters.sources);
-            if (currentFilters.batches) params.set('batches', currentFilters.batches);
-            if (currentFilters.statuses) params.set('statuses', currentFilters.statuses);
-            params.set('page', page); params.set('page_size', '10');
-            fetch(`/api/filter-data?${params}`).then(r => r.json()).then(data => displayResults(data));
-        }
-
         // === Element-Type Clusters (Element-Level card, input from Page_CMCV) ===
 
         function renderEcBatchSelect() {
@@ -3321,11 +3158,11 @@
                             progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — ${data.message || '处理中'} <span class="text-gray-400">${pct}%</span>${timeStr}`;
                             const ecBar = document.getElementById('ec-progress-bar');
                             if (ecBar) ecBar.style.width = pct + '%';
-                            setTimeout(check, 2000);
+                            setTimeout(check, 3000);
                         }
                     }).catch(() => setTimeout(check, 3000));
                 };
-                setTimeout(check, 2000);
+                setTimeout(check, 3000);
             }
 
             runBatch(0);
@@ -3719,7 +3556,7 @@
                             ecmcvBar.style.width = '0%';
                             ecmcvBtn.disabled = false;
                         }
-                    }, 2000).start();
+                    }, 3000).start();
                 }
             } catch (e) {
                 ecmcvProgress.classList.add('hidden');
