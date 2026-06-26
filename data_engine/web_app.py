@@ -2913,7 +2913,6 @@ def _write_layout_to_category_lances(
         bt = b.get("block_type", "text")
         if bt in SKIP_BLOCK_TYPES:
             return None
-        # 裁剪 block 图片（如 image_map 可用）
         cropped_img = _crop_block_image(sid, b.get("bbox", []))
         row = {
             "sample_id": sid,
@@ -2922,20 +2921,23 @@ def _write_layout_to_category_lances(
             "bbox_json": json.dumps(b.get("bbox", [])),
             "layout_confidence": float(b.get("confidence", 0)),
             "embedding": None,
+            "consistency_pattern": None,
+            "block_diff_json": None,
             "schema_version": "v1",
             "created_at": now,
+            "judged": None, "corrected": None, "needs_expert": None,
+            "judge_refined_text": None, "judge_refined_table": None,
+            "judge_refined_formula": None, "judge_confidence": None,
+            "judge_rounds": None, "judge_error_locations": None,
         }
         if bt in FORMULA_BLOCK_TYPES:
-            row.update({"image_data": cropped_img,
-                        "consistency_pattern": None})
+            row["image_data"] = cropped_img
             return "formula", row
         elif bt in TABLE_BLOCK_TYPES:
-            row.update({"image_data": cropped_img,
-                        "consistency_pattern": None})
+            row["image_data"] = cropped_img
             return "table", row
         else:
-            row.update({"image_data": cropped_img,
-                        "consistency_pattern": None})
+            row["image_data"] = cropped_img
             return "text", row
 
     def _flush_chunk(buffers: dict[str, list[dict]], mode_map: dict[str, str]):
@@ -3186,9 +3188,36 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                                 layout_stats[k] += batch_write_stats.get(k, 0)
                             lance_write_mode = "append"
                         except Exception as e:
-                            print(f"[layout] incremental lance write failed: {e}", file=sys.stderr)
+                            if "different schema" in str(e) or "did not match" in str(e):
+                                print(f"[layout] schema mismatch, overwriting lance files", file=sys.stderr)
+                                try:
+                                    batch_write_stats = _write_layout_to_category_lances(
+                                        batch_results, manifests_dir,
+                                        flush_size=get_config("layout", "flush_size", default=10_000),
+                                        write_mode="overwrite",
+                                        image_map=image_map,
+                                    )
+                                    for k in layout_stats:
+                                        layout_stats[k] += batch_write_stats.get(k, 0)
+                                    lance_write_mode = "append"
+                                except Exception as e2:
+                                    print(f"[layout] overwrite also failed: {e2}", file=sys.stderr)
+                            else:
+                                print(f"[layout] incremental lance write failed: {e}", file=sys.stderr)
 
-            # 无论完成还是停止
+            # 所有批次处理完毕后，执行 Lance Compaction 合并碎片
+            if write_lance:
+                for cat in ("text", "formula", "table"):
+                    lp = manifests_dir / f"{cat}.lance"
+                    if lp.exists():
+                        try:
+                            print(f"[layout] compacting {cat}.lance...", file=sys.stderr)
+                            ds = lance.dataset(str(lp))
+                            ds.optimize.compact_files()
+                            ds.cleanup_old_versions(keep_versions=1)
+                            print(f"[layout] {cat}.lance compacted", file=sys.stderr)
+                        except Exception as e:
+                            print(f"[layout] compact {cat}.lance failed: {e}", file=sys.stderr)
             stopped = progress_tracker.is_stopped(task_id)
 
             # 完成消息
@@ -4124,6 +4153,8 @@ async def page_cmcv_sample(
             "total_sampled": sum(len(v) for v in sampled.values()),
             "buckets": {f"page_{t}": [s["sample_id"] for s in samples] for t, samples in sampled.items()},
         }
+        cached["page_cmcv_sample"] = result
+        cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
     except HTTPException:
         raise
