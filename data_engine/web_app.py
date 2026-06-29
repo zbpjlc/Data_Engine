@@ -4733,9 +4733,9 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                     ds = lance.dataset(str(lp))
                                     all_cols = ds.schema.names
                                     read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
-                                    for prefix in ("paddle", "glm", "self"):
+                                    for _pfx in ("paddle", "glm", "self"):
                                         for suffix in ("_text", "_confidence", "_table", "_formula"):
-                                            col = f"{prefix}{suffix}"
+                                            col = f"{_pfx}{suffix}"
                                             if col in all_cols:
                                                 read_cols.append(col)
                                     rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
