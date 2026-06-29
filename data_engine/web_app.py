@@ -4275,7 +4275,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                 if resume:
                     for tier, samples in buckets.items():
                         for s in samples:
-                            if isinstance(s, dict) and s.get(text_col):
+                            if isinstance(s, dict) and any(text_col in b for b in s.get("blocks", [])):
                                 done_count += 1
 
                 # 收集待处理任务
@@ -4288,7 +4288,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                             continue
                         if isinstance(s, dict) and resume:
                             blocks = s.get("blocks", [])
-                            if blocks and all(b.get(text_col) for b in blocks):
+                            if blocks and all(text_col in b for b in blocks):
                                 skipped += 1
                                 continue
                         img_bytes = img_map.get(sid)
