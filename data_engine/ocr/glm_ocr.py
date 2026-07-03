@@ -12,6 +12,9 @@ from data_engine.ocr.base import BaseOCREngine, LayoutBlock, OCRResult
 
 logger = logging.getLogger(__name__)
 
+# 全局服务状态缓存
+_service_available = {}
+
 _TASK_MAP = {
     "text": "text",
     "title": "text",
@@ -44,6 +47,21 @@ class GLMOCREngine(BaseOCREngine):
         self._timeout = timeout or int(get_config("ocr", "engines", "glm_ocr", "timeout", default=60))
         self._max_retries = max_retries or int(get_config("ocr", "engines", "glm_ocr", "max_retries", default=3))
         self._model = get_config("ocr", "engines", "glm_ocr", "model", default=None)
+        
+        # 检查服务可用性
+        if self._api_url not in _service_available:
+            _service_available[self._api_url] = self._check_service_health()
+        
+        if not _service_available[self._api_url]:
+            logger.warning(f"GLM OCR service at {self._api_url} is not available, will return empty results")
+
+    def _check_service_health(self) -> bool:
+        """Check if the OCR service is available."""
+        try:
+            resp = requests.get(f"{self._api_url}/v1/models", timeout=5)
+            return resp.status_code == 200
+        except Exception:
+            return False
 
     @property
     def model_name(self) -> str:
@@ -58,6 +76,19 @@ class GLMOCREngine(BaseOCREngine):
         image_path: Path,
         regions: list[LayoutBlock],
     ) -> list[OCRResult]:
+        # 如果服务不可用，直接返回空结果
+        if not _service_available.get(self._api_url, True):
+            logger.warning(f"GLM OCR service unavailable, returning empty results for {len(regions)} regions")
+            return [OCRResult(
+                block_type=region.block_type,
+                bbox=region.bbox,
+                text_content="",
+                confidence=0.0,
+                table_structure=None,
+                formula_latex="",
+                raw_output={"error": "Service unavailable"},
+            ) for region in regions]
+        
         import io
         from PIL import Image
 
@@ -112,7 +143,7 @@ class GLMOCREngine(BaseOCREngine):
             out.append(OCRResult(
                 block_type=region.block_type,
                 bbox=region.bbox,
-                text_content=text if region.block_type not in ("table", "formula") else "",
+                text_content=text,  # 对所有 block 类型都返回实际文本内容
                 confidence=region.confidence,
                 table_structure=table_data,
                 formula_latex=formula,

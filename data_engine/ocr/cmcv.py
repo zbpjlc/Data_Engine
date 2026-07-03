@@ -143,20 +143,31 @@ except ImportError:
 
 # ─── CDM（Character Detection Matching） ─────────────────────────────────────
 
-# 尝试加载 OmniDocBench CDM（需要 TeX Live + ImageMagick）
+# CDM 视觉渲染引擎：Page CMCV 默认用 token fallback（快），
+# Element CMCV 按需启用视觉渲染（准）。引擎统一初始化，由调用方选择是否使用。
 _CDM_ENGINE = None
+
 try:
-    from src.metrics.cdm_metric import CDM as _OmniCDM
-    # 测试 pdflatex 是否可用
+    from omnidocbench.cdm_metric import CDM as _OmniCDM
     import subprocess as _sp
+    
+    # 测试 pdflatex 是否可用
     _test = _sp.run(["pdflatex", "--version"], capture_output=True, timeout=5)
     if _test.returncode == 0:
-        _CDM_ENGINE = _OmniCDM
-        logger.info("CDM: using OmniDocBench (pdflatex available)")
+        # 测试 ImageMagick 是否可用
+        _magick_test = _sp.run(["magick", "--version"], capture_output=True, timeout=5)
+        if _magick_test.returncode == 0:
+            _CDM_ENGINE = _OmniCDM
+            logger.info("✅ CDM: 视觉渲染引擎已就绪 (pdflatex + ImageMagick)")
+        else:
+            logger.warning("⚠️ CDM: ImageMagick 不可用，视觉渲染降级到 token fallback")
     else:
-        logger.warning("CDM: pdflatex not working, using token fallback")
-except Exception:
-    logger.warning("CDM: OmniDocBench not available, using token fallback")
+        logger.warning("⚠️ CDM: pdflatex 不可用，视觉渲染降级到 token fallback")
+        
+except ImportError as e:
+    logger.warning(f"⚠️ CDM: OmniDocBench 未安装 ({e})，视觉渲染降级到 token fallback")
+except Exception as e:
+    logger.warning(f"⚠️ CDM: 初始化失败 ({e})，视觉渲染降级到 token fallback")
 
 _LATEX_CMD_NORMALIZE = [
     (r"\\left\s*\(", "("),
@@ -184,31 +195,38 @@ def _normalize_latex(s: str) -> str:
     s = s.strip()
     for pattern, repl in _LATEX_CMD_NORMALIZE:
         s = re.sub(pattern, repl, s)
+    # 合并单字符花括号 {x} -> x，避免花括号干扰比较
+    # 多次执行以处理嵌套 {a{b}} -> {ab} -> ab
+    for _ in range(3):
+        new_s = re.sub(r"\{([^{}]+)\}", r"\1", s)
+        if new_s == s:
+            break
+        s = new_s
     s = _LATEX_SPACES.sub(" ", s).strip()
     return s
 
 
 def _tokenize_latex(s: str) -> list[str]:
+    # 归一化阶段已合并单字符花括号，这里直接分词
     return re.findall(r"\\[a-zA-Z]+|[0-9]+\.?[0-9]*|[a-zA-Z]|[^\s]", s)
 
 
-def cdm_similarity(formula_a: str, formula_b: str) -> float:
-    """CDM: 优先用 OmniDocBench 渲染比较，不可用时用 token 匹配"""
-    if _CDM_ENGINE is not None:
-        try:
-            cdm = _CDM_ENGINE(output_root="/tmp/cdm_eval")
-            result = cdm.evaluate(formula_a or "", formula_b or "", "inline")
-            return float(result.get("F1_score", 0.0))
-        except Exception as exc:
-            logger.debug("CDM OmniDocBench failed, fallback: %s", exc)
-
-    # Token 匹配 fallback
+def _cdm_token_similarity(formula_a: str, formula_b: str) -> float:
+    """Token 级别的 LaTeX 公式相似度（快速，用于 Page CMCV 批量分类）
+    
+    综合三个维度：
+    - F1（token 集合，无序，权重 0.25）
+    - 位置匹配率（token 顺序，权重 0.25）
+    - Levenshtein 字符串相似度（整体结构，权重 0.5）
+    """
     na = _normalize_latex(formula_a)
     nb = _normalize_latex(formula_b)
     if not na and not nb:
         return 1.0
     if not na or not nb:
         return 0.0
+    if na == nb:
+        return 1.0
 
     tokens_a = _tokenize_latex(na)
     tokens_b = _tokenize_latex(nb)
@@ -217,17 +235,18 @@ def cdm_similarity(formula_a: str, formula_b: str) -> float:
     if not tokens_a or not tokens_b:
         return 0.0
 
+    # 维度 1: F1（token 集合相似度，无序）
     set_a = set(tokens_a)
     set_b = set(tokens_b)
     intersection = set_a & set_b
-    if not intersection:
-        return 0.0
-    precision = len(intersection) / len(set_b)
-    recall = len(intersection) / len(set_a)
-    if precision + recall == 0:
-        return 0.0
-    f1 = 2 * precision * recall / (precision + recall)
+    if intersection:
+        precision = len(intersection) / len(set_b)
+        recall = len(intersection) / len(set_a)
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    else:
+        f1 = 0.0
 
+    # 维度 2: 位置匹配率（token 顺序，贪心匹配）
     pos_match = 0
     idx_b = 0
     for tok in tokens_a:
@@ -238,7 +257,77 @@ def cdm_similarity(formula_a: str, formula_b: str) -> float:
                 break
     pos_ratio = pos_match / max(len(tokens_a), len(tokens_b))
 
-    return 0.5 * f1 + 0.5 * pos_ratio
+    # 维度 3: Levenshtein 字符串相似度（整体结构，考虑顺序）
+    lev = _text_lev_ratio(na, nb)
+
+    return 0.25 * f1 + 0.25 * pos_ratio + 0.5 * lev
+
+
+def _text_lev_ratio(a: str, b: str) -> float:
+    """Levenshtein 相似度比例 (0-1)，优先用 C 实现"""
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    try:
+        import Levenshtein
+        return Levenshtein.ratio(a, b)
+    except ImportError:
+        max_len = max(len(a), len(b))
+        if max_len == 0:
+            return 1.0
+        # 纯 Python fallback
+        m, n = len(a), len(b)
+        dp = list(range(n + 1))
+        for i in range(1, m + 1):
+            prev = dp[0]
+            dp[0] = i
+            for j in range(1, n + 1):
+                tmp = dp[j]
+                dp[j] = min(dp[j] + 1, dp[j-1] + 1, prev + (0 if a[i-1] == b[j-1] else 1))
+                prev = tmp
+        dist = dp[n]
+        return 1.0 - dist / max_len
+
+
+def _cdm_visual_similarity(formula_a: str, formula_b: str) -> float | None:
+    """OmniDocBench 视觉渲染公式相似度（精度高但慢，用于 Element CMCV）
+    
+    Returns:
+        相似度得分 (0-1)，失败返回 None（调用方应降级到 token fallback）
+    """
+    if _CDM_ENGINE is None:
+        return None
+    # 快速路径：完全相同直接返回，避免无谓的渲染开销
+    if _normalize_latex(formula_a) == _normalize_latex(formula_b):
+        return 1.0
+    try:
+        import tempfile
+        cdm = _CDM_ENGINE()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = cdm.evaluate(formula_a or "", formula_b or "", tmpdir)
+            score = float(result.get("F1_score", 0.0)) if result else 0.0
+            logger.debug(f"CDM 视觉评估：'{formula_a[:30]}...' vs '{formula_b[:30]}...' = {score:.4f}")
+            return score
+    except Exception as exc:
+        logger.debug(f"CDM 视觉评估失败，降级到 token fallback: {exc}")
+        return None
+
+
+def cdm_similarity(formula_a: str, formula_b: str) -> float:
+    """CDM 默认：token fallback（快速，用于 Page CMCV 批量分类）"""
+    return _cdm_token_similarity(formula_a, formula_b)
+
+
+def cdm_similarity_visual(formula_a: str, formula_b: str) -> float:
+    """CDM 视觉渲染（精度高，用于 Element CMCV）
+    
+    优先使用 OmniDocBench 视觉渲染，失败时降级到 token fallback
+    """
+    score = _cdm_visual_similarity(formula_a, formula_b)
+    if score is not None:
+        return score
+    return _cdm_token_similarity(formula_a, formula_b)
 
 
 # ─── 标准化层 ────────────────────────────────────────────────────────────────
@@ -282,6 +371,7 @@ def compare_block(
     glm_formula: str | None = None,
     self_formula: str | None = None,
     agreement_threshold: float | None = None,
+    use_visual_cdm: bool = False,
 ) -> tuple[str, dict]:
     threshold = agreement_threshold or float(
         get_config("ocr", "cmcv", "agreement_threshold", default=0.9)
@@ -295,12 +385,13 @@ def compare_block(
         thr = get_config("ocr", "cmcv", "table_threshold", default=None) or threshold
         method = "teds"
     elif block_type == "formula":
-        sim_fn = cdm_similarity
+        # Page CMCV 用 token fallback（快），Element CMCV 用视觉渲染（准）
+        sim_fn = cdm_similarity_visual if use_visual_cdm else cdm_similarity
         a_val = normalize_formula(paddle_formula)
         b_val = normalize_formula(glm_formula)
         c_val = normalize_formula(self_formula)
         thr = get_config("ocr", "cmcv", "formula_threshold", default=None) or threshold
-        method = "cdm"
+        method = "cdm_visual" if use_visual_cdm else "cdm_token"
     else:
         sim_fn = text_similarity
         a_val = normalize_text(paddle_text)
@@ -342,10 +433,17 @@ def compare_block(
 
 class CMCVEngine:
 
-    def __init__(self) -> None:
+    def __init__(self, use_visual_cdm: bool = False) -> None:
+        """
+        Args:
+            use_visual_cdm: 是否使用 OmniDocBench 视觉渲染评估公式相似度
+                - False（默认）: token fallback，快，用于 Page CMCV
+                - True: 视觉渲染，准但慢，用于 Element CMCV
+        """
         self._threshold = float(
             get_config("ocr", "cmcv", "agreement_threshold", default=0.9)
         )
+        self._use_visual_cdm = use_visual_cdm
 
     def compare_page(self, blocks: list[dict]) -> dict:
         details: list[dict] = []
@@ -364,6 +462,7 @@ class CMCVEngine:
                 glm_formula=block.get("glm_formula"),
                 self_formula=block.get("self_formula"),
                 agreement_threshold=self._threshold,
+                use_visual_cdm=self._use_visual_cdm,
             )
             details.append({
                 "block_idx": block.get("block_idx", 0),
