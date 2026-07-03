@@ -114,7 +114,7 @@
                             <!-- Image -->
                             <div>
                                 <h4 class="text-xs font-medium text-gray-500 mb-1">原始图片</h4>
-                                <img id="detail-image" class="max-w-full max-h-[300px] object-contain border rounded" />
+                                <img id="detail-image" class="max-w-full max-h-[300px] object-contain border rounded" loading="lazy" />
                             </div>
                             <!-- OCR Results -->
                             <div>
@@ -193,7 +193,7 @@
 
         function populateBatchSelect() {
             const sel = document.getElementById('batch-select');
-            sel.innerHTML = '<option value="">选择批次...</option>';
+            sel.innerHTML = '<option value="">全部批次</option>';
             const src = document.getElementById('source-select').value;
             const filtered = src ? allSources.filter(s => s.source_id === src) : allSources;
             const grouped = {};
@@ -212,19 +212,47 @@
         // Load hard cases
         async function loadHardCases() {
             const val = document.getElementById('batch-select').value;
-            if (!val) { alert('请选择批次'); return; }
-            const [sourceId, batchId] = val.split('/');
-
+            const src = document.getElementById('source-select').value;
+            
             document.getElementById('btn-load').textContent = '加载中...';
             try {
-                const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}`);
-                const data = await res.json();
-                hardBlocks = data.blocks || [];
-
-                document.getElementById('stat-total').textContent = data.total || 0;
-                document.getElementById('stat-corrected').textContent = data.corrected || 0;
-                document.getElementById('stat-judged').textContent = data.judged || 0;
-                document.getElementById('stat-expert').textContent = data.needs_expert || 0;
+                let allBlocks = [];
+                let stats = {total: 0, corrected: 0, judged: 0, needs_expert: 0};
+                
+                if (val) {
+                    // 单批次
+                    const [sourceId, batchId] = val.split('/');
+                    const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}`);
+                    const data = await res.json();
+                    allBlocks = data.blocks || [];
+                    stats = {total: data.total || 0, corrected: data.corrected || 0, judged: data.judged || 0, needs_expert: data.needs_expert || 0};
+                } else {
+                    // 全部批次
+                    const batches = src ? allSources.filter(s => s.source_id === src) : allSources;
+                    const grouped = {};
+                    batches.forEach(s => {
+                        const key = `${s.source_id}/${s.batch_id}`;
+                        if (!grouped[key]) grouped[key] = s;
+                    });
+                    const promises = Object.values(grouped).map(g =>
+                        fetch(`/api/hard-cases/${encodeURIComponent(g.source_id)}/${encodeURIComponent(g.batch_id)}`)
+                            .then(r => r.json()).catch(() => ({blocks: [], total: 0, corrected: 0, judged: 0, needs_expert: 0}))
+                    );
+                    const results = await Promise.all(promises);
+                    results.forEach(data => {
+                        allBlocks = allBlocks.concat(data.blocks || []);
+                        stats.total += data.total || 0;
+                        stats.corrected += data.corrected || 0;
+                        stats.judged += data.judged || 0;
+                        stats.needs_expert += data.needs_expert || 0;
+                    });
+                }
+                
+                hardBlocks = allBlocks;
+                document.getElementById('stat-total').textContent = stats.total;
+                document.getElementById('stat-corrected').textContent = stats.corrected;
+                document.getElementById('stat-judged').textContent = stats.judged;
+                document.getElementById('stat-expert').textContent = stats.needs_expert;
                 document.getElementById('stats-panel').classList.remove('hidden');
                 document.getElementById('btn-run').classList.remove('hidden');
 

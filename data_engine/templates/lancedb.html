@@ -583,7 +583,7 @@
                         html += `<div class="${border} rounded-lg p-3 bg-white">
                             <div class="flex gap-3">
                                 <div class="flex-shrink-0">
-                                    <img src="${cropDataUrl}" class="max-w-[280px] max-h-[200px] object-contain border rounded" />
+                                    <img src="${cropDataUrl}" class="max-w-[280px] max-h-[200px] object-contain border rounded" loading="lazy" />
                                     <div class="text-xs text-gray-400 mt-1">${w}x${h}px</div>
                                 </div>
                                 <div class="flex-1 min-w-0 space-y-2">
@@ -640,7 +640,7 @@
                 <button onclick="closeImageModal()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
             </div>
             <div class="p-4">
-                <img id="modal-image" src="" class="max-w-full max-h-[75vh] object-contain mx-auto" />
+                <img id="modal-image" src="" class="max-w-full max-h-[75vh] object-contain mx-auto" loading="lazy" />
             </div>
         </div>
     </div>
