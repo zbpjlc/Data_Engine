@@ -2149,6 +2149,7 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
 
         buckets = {}
         bucket_sizes = {}
+        import gc as _gc
         for i, part_info in enumerate(partitions):
             part_size = part_info.get("size", 0)
             bucket_sizes[f"P{i}"] = part_size
@@ -2166,6 +2167,8 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
                 cols = [c for c in ["sample_id", "difficulty", "page_image", "input_type"] if c in tbl.column_names]
                 rows = tbl.select(cols).to_pylist()
                 buckets[f"P{i}"] = rows
+                del tbl, scanner
+                _gc.collect()
             except Exception as e:
                 print(f"[bucket-samples] P{i} error: {e}", file=sys.stderr)
 
@@ -4378,6 +4381,7 @@ async def page_cmcv_sample(
 
         import random, gc
 
+        # 只打开一次 dataset，循环内复用，避免 FD 耗尽
         _ds = _lance_cache.get(str(ingest_path))
         stats = _ds.index_statistics("idx_embedding_ivf")
         parts = stats["indices"][0].get("partitions", [])
@@ -4414,15 +4418,14 @@ async def page_cmcv_sample(
             total_target = max(total_target, part_size)
             total_target = min(total_target, part_size)
             try:
-                _ds2 = _lance_cache.get(str(ingest_path))
-                scanner = _ds2.scanner(
+                # 复用已打开的 _ds，不重复打开
+                scanner = _ds.scanner(
                     nearest={"column": "embedding", "q": query_vec, "k": total_target},
                     disable_scoring_autoprojection=True, columns=["sample_id", "difficulty", "input_type"],
                 )
                 tbl = scanner.to_table()
                 candidates = tbl.to_pylist()
-                del tbl, scanner, _ds2
-                gc.collect()
+                del tbl, scanner
             except Exception as e:
                 print(f"[page-cmcv-sample] {tier_name} 采样失败: {e}", file=sys.stderr)
                 continue
