@@ -748,6 +748,8 @@
 
             async _tick() {
                 if (this._subs.size === 0) return;
+                // 只在页面可见时才轮询，避免后台标签页浪费请求
+                if (document.hidden) return;
                 try {
                     const data = await fetch('/api/progress').then(r => r.json());
                     const tasks = data.tasks || {};
