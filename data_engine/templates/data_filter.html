@@ -807,7 +807,7 @@
         const selBatch = document.getElementById('sel-batch');
         let bucketSampleData = null;
         let ecSelectedBatches = new Set();  // EC panel selected batches
-        const _cmcvIntervals = new Map();  // taskId → intervalId (B3 fix)
+        // _cmcvIntervals removed - using PollManager instead
         const _eoIntervals = {};              // taskId → active flag
         let _ecPollCancelled = false;      // B5 fix: pollEcStatus cancellation token
         let _sourceAbortController = null; // B8 fix: abort stale fetches on source/batch change
@@ -2999,29 +2999,21 @@
                     .then(data => {
                         done++;
                         const taskId = data.task_id || `cmcv_${b.source_id}_${b.batch_id}`;
-                        // 启动进度轮询
-                        const interval = setInterval(() => {
-                            fetch('/api/progress').then(r => r.json()).then(pd => {
-                                const task = (pd.tasks || {})[taskId];
-                                if (!task) return;
-                                const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
-                                btn.textContent = `CMCV ${task.message || pct + '%'}`;
-
-                                if (task.status === 'completed') {
-                                    clearInterval(interval);
-                                    _cmcvIntervals.delete(taskId);
-                                    btn.textContent = 'CMCV 完成';
-                                    btn.disabled = false;
-                                    loadOcrResults();
-                                } else if (task.status === 'failed' || task.status === 'stopped') {
-                                    clearInterval(interval);
-                                    _cmcvIntervals.delete(taskId);
-                                    btn.textContent = 'CMCV 失败';
-                                    btn.disabled = false;
-                                }
-                            }).catch(() => {});
-                        }, 1000);
-                        _cmcvIntervals.set(taskId, interval);
+                        // 使用 PollManager 统一轮询（减少 /api/progress 请求）
+                        PollManager.subscribe(taskId, {
+                            onProgress(task) {
+                                btn.textContent = `CMCV ${task.message || task.pct + '%'}`;
+                            },
+                            onComplete(task) {
+                                btn.textContent = 'CMCV 完成';
+                                btn.disabled = false;
+                                loadOcrResults();
+                            },
+                            onFail(task) {
+                                btn.textContent = 'CMCV 失败';
+                                btn.disabled = false;
+                            }
+                        });
                     })
                     .catch(err => {
                         done++;
@@ -3155,9 +3147,8 @@
         // 数据源变化时重置 EC 选择
         selSource.addEventListener('change', () => {
             _ecPollCancelled = true;  // B5 fix: cancel any running EC poll
-            // B3 fix: clear all running CMCV intervals
-            for (const [tid, iv] of _cmcvIntervals) { clearInterval(iv); }
-            _cmcvIntervals.clear();
+            // B3 fix: clear all running CMCV polling via PollManager
+            // (PollManager handles cleanup automatically when tasks complete)
             ecSelectedBatches.clear();
             renderEcBatchSelect();
             updateEcButtonVisibility();
