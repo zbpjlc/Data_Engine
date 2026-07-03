@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-from data_engine.manifests import find_stage_manifest, read_json, manifest_count, _lance_write_lock
+from data_engine.manifests import find_stage_manifest, read_json, manifest_count
 from data_engine.models import BatchStatusSummary, SourceScanSummary
 from data_engine.registry import SourceRegistry
 
@@ -78,14 +78,13 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
     lance_version = 0
     if ingest_manifest and ingest_manifest.suffix == ".lance":
         try:
-            with _lance_write_lock:
-                ds = lance.dataset(str(ingest_manifest))
-                lance_version = getattr(ds, "version", None)
-                # 用 lance 实际行数校验 sample_count，不一致时以 lance 为准
-                lance_count = manifest_count(ingest_manifest)
-                if lance_count > 0 and lance_count != sample_count:
-                    sample_count = lance_count
-                pending_count = max(sample_count - _completed_count(stage_status, sample_count), 0)
+            ds = lance.dataset(str(ingest_manifest))
+            lance_version = getattr(ds, "version", None)
+            # 用 lance 实际行数校验 sample_count，不一致时以 lance 为准
+            lance_count = manifest_count(ingest_manifest)
+            if lance_count > 0 and lance_count != sample_count:
+                sample_count = lance_count
+            pending_count = max(sample_count - _completed_count(stage_status, sample_count), 0)
         except Exception:
             pass
 
@@ -98,19 +97,18 @@ def _summarize_batch(source_id: str, category: str, batch_dir: Path) -> BatchSta
             continue
         element_exists = True
         try:
-            with _lance_write_lock:
-                ds = lance.dataset(str(cat_path))
-                element_count += ds.count_rows()
-                col_names = set(ds.schema.names)
-                for prefix in ("paddle", "glm", "self"):
-                    col = f"{prefix}_text"
-                    if col in col_names and prefix not in element_models:
-                        try:
-                            non_null = ds.count_rows(filter=f"{col} IS NOT NULL")
-                            if non_null > 0:
-                                element_models.append(prefix)
-                        except Exception:
-                            pass
+            ds = lance.dataset(str(cat_path))
+            element_count += ds.count_rows()
+            col_names = set(ds.schema.names)
+            for prefix in ("paddle", "glm", "self"):
+                col = f"{prefix}_text"
+                if col in col_names and prefix not in element_models:
+                    try:
+                        non_null = ds.count_rows(filter=f"{col} IS NOT NULL")
+                        if non_null > 0:
+                            element_models.append(prefix)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -138,13 +136,12 @@ def _detect_stage_status(manifests_dir: Path) -> str:
         cat_path = manifests_dir / f"{cat}.lance"
         if cat_path.exists():
             try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(cat_path))
-                    if "consistency_pattern" in ds.schema.names:
-                        sample = ds.to_table(limit=5, columns=["consistency_pattern"]).to_pylist()
-                        has_cmcv = any(r.get("consistency_pattern") for r in sample) if sample else False
-                        if has_cmcv:
-                            return "bucketed"
+                ds = lance.dataset(str(cat_path))
+                if "consistency_pattern" in ds.schema.names:
+                    sample = ds.to_table(limit=5, columns=["consistency_pattern"]).to_pylist()
+                    has_cmcv = any(r.get("consistency_pattern") for r in sample) if sample else False
+                    if has_cmcv:
+                        return "bucketed"
                 return "inferred"
             except Exception:
                 pass
@@ -153,10 +150,9 @@ def _detect_stage_status(manifests_dir: Path) -> str:
     if ingest_manifest:
         if ingest_manifest.suffix == ".lance":
             try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(ingest_manifest))
-                    table = ds.to_table(limit=20)
-                    sample_records = table.to_pylist()
+                ds = lance.dataset(str(ingest_manifest))
+                table = ds.to_table(limit=20)
+                sample_records = table.to_pylist()
             except Exception:
                 return "ingested"
         else:

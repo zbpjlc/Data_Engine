@@ -55,6 +55,11 @@ class LanceDatasetCache:
 _lance_cache = LanceDatasetCache(max_size=8)
 
 
+def _open_lance(path):
+    """使用缓存打开 Lance dataset，避免 FD 耗尽。仅用于读操作。"""
+    return _lance_cache.get(str(path))
+
+
 class BucketSummaryCache:
     """LRU cache for parsed bucket_samples.json content (avoids 4s json.loads on every request)."""
     def __init__(self, max_size=16):
@@ -89,6 +94,55 @@ class BucketSummaryCache:
 
 
 _bucket_summary_cache = BucketSummaryCache(max_size=16)
+
+
+class JsonFileCache:
+    """LRU cache for parsed JSON files (avoids repeated json.loads of large files)."""
+    def __init__(self, max_size=16):
+        self._cache = OrderedDict()
+        self._max_size = max_size
+        self._lock = threading.Lock()
+
+    def get(self, path: str):
+        key = str(path)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+        return None
+
+    def put(self, path: str, data):
+        key = str(path)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            else:
+                if len(self._cache) >= self._max_size:
+                    self._cache.popitem(last=False)
+            self._cache[key] = data
+
+    def invalidate(self, path: str = None):
+        with self._lock:
+            if path:
+                self._cache.pop(str(path), None)
+            else:
+                self._cache.clear()
+
+
+_json_cache = JsonFileCache(max_size=16)
+
+
+def _read_json_cached(path):
+    """带缓存的 JSON 文件读取，避免重复解析大文件。"""
+    cached = _json_cache.get(str(path))
+    if cached is not None:
+        return cached
+    import json as _json
+    data = _json.loads(path.read_text(encoding="utf-8"))
+    _json_cache.put(str(path), data)
+    return data
+
+
 from typing import Any
 import shutil
 import pyarrow as pa
@@ -1045,50 +1099,49 @@ async def get_partition_samples(source_id: str, batch_id: str, partition_id: int
 
         import pyarrow as pa
 
-        with _lance_write_lock:
-            ds = lance.dataset(str(manifest_path))
+        ds = _open_lance(manifest_path)
 
-            # 获取分区对应的质心向量
-            try:
-                stats = ds.index_statistics("idx_embedding_ivf")
-                centroids = stats["indices"][0]["centroids"]
-                if partition_id < 0 or partition_id >= len(centroids):
-                    raise HTTPException(status_code=400, detail=f"分区ID超出范围 (0-{len(centroids)-1})")
-                centroid = centroids[partition_id]
-            except HTTPException:
-                raise
-            except Exception:
-                raise HTTPException(status_code=404, detail="未找到向量索引")
+        # 获取分区对应的质心向量
+        try:
+            stats = ds.index_statistics("idx_embedding_ivf")
+            centroids = stats["indices"][0]["centroids"]
+            if partition_id < 0 or partition_id >= len(centroids):
+                raise HTTPException(status_code=400, detail=f"分区ID超出范围 (0-{len(centroids)-1})")
+            centroid = centroids[partition_id]
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=404, detail="未找到向量索引")
 
-            # 用质心向量查询该分区的样本
-            query_vec = pa.array(centroid, type=pa.float32())
-            results = ds.to_table(
-                columns=[c for c in ds.schema.names if c != "embedding"],
-                nearest={"column": "embedding", "q": query_vec, "k": page_size * page},
-                disable_scoring_autoprojection=True,
-            )
-            total = min(results.num_rows, page_size * 20)  # 限制最大返回
-            offset = (page - 1) * page_size
-            limit = min(page_size, total - offset)
-            if limit <= 0:
-                return {"partition_id": partition_id, "samples": [], "total": total, "page": page, "page_size": page_size}
+        # 用质心向量查询该分区的样本
+        query_vec = pa.array(centroid, type=pa.float32())
+        results = ds.to_table(
+            columns=[c for c in ds.schema.names if c != "embedding"],
+            nearest={"column": "embedding", "q": query_vec, "k": page_size * page},
+            disable_scoring_autoprojection=True,
+        )
+        total = min(results.num_rows, page_size * 20)  # 限制最大返回
+        offset = (page - 1) * page_size
+        limit = min(page_size, total - offset)
+        if limit <= 0:
+            return {"partition_id": partition_id, "samples": [], "total": total, "page": page, "page_size": page_size}
 
-            # 取当前页数据
-            if offset > 0 or limit < results.num_rows:
-                table = results.slice(offset, limit)
-            else:
-                table = results
+        # 取当前页数据
+        if offset > 0 or limit < results.num_rows:
+            table = results.slice(offset, limit)
+        else:
+            table = results
 
-            samples = table.to_pylist()
-            for row in samples:
-                for k, v in list(row.items()):
-                    if k == "image_data":
-                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
-                    elif isinstance(v, bytes):
-                        row[k] = f"<{len(v)} bytes>"
-                    elif k in ("_distance",):
-                        row[k] = round(float(v), 4) if v is not None else None
-            return {"partition_id": partition_id, "samples": samples, "total": total, "page": page, "page_size": page_size}
+        samples = table.to_pylist()
+        for row in samples:
+            for k, v in list(row.items()):
+                if k == "image_data":
+                    row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                elif isinstance(v, bytes):
+                    row[k] = f"<{len(v)} bytes>"
+                elif k in ("_distance",):
+                    row[k] = round(float(v), 4) if v is not None else None
+        return {"partition_id": partition_id, "samples": samples, "total": total, "page": page, "page_size": page_size}
     except HTTPException:
         raise
     except Exception as e:
@@ -1106,19 +1159,18 @@ async def get_sample_image(source_id: str, batch_id: str, sample_id: str):
         if not manifest_path.exists():
             raise HTTPException(status_code=404, detail="Lance 数据集不存在")
 
-        with _lance_write_lock:
-            ds = lance.dataset(str(manifest_path))
-            table = ds.to_table(filter=f"sample_id = '{sample_id}'", columns=["sample_id", "image_data"])
-            if table.num_rows == 0:
-                raise HTTPException(status_code=404, detail="样本不存在")
-            row = table.to_pylist()[0]
-            image_data = row.get("image_data")
-            if not image_data:
-                raise HTTPException(status_code=404, detail="样本无图片数据")
+        ds = _open_lance(manifest_path)
+        table = ds.to_table(filter=f"sample_id = '{sample_id}'", columns=["sample_id", "image_data"])
+        if table.num_rows == 0:
+            raise HTTPException(status_code=404, detail="样本不存在")
+        row = table.to_pylist()[0]
+        image_data = row.get("image_data")
+        if not image_data:
+            raise HTTPException(status_code=404, detail="样本无图片数据")
 
-            import base64
-            b64 = base64.b64encode(image_data).decode("utf-8")
-            return {"sample_id": sample_id, "image_base64": b64, "size": len(image_data)}
+        import base64
+        b64 = base64.b64encode(image_data).decode("utf-8")
+        return {"sample_id": sample_id, "image_base64": b64, "size": len(image_data)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1171,29 +1223,28 @@ async def lancedb_list_sources():
                 if not manifest_path or manifest_path.suffix != ".lance" or not manifest_path.exists():
                     continue
                 try:
-                    with _lance_write_lock:
-                        ds = lance.dataset(str(manifest_path))
-                        schema_fields = [f.name for f in ds.schema]
-                        row_count = ds.count_rows()
-                        versions = []
-                        for v in ds.versions():
-                            ts = v.get("timestamp")
-                            versions.append({
-                                "version": v["version"],
-                                "timestamp": ts.isoformat() if ts else None,
-                                "num_rows": int(v.get("metadata", {}).get("total_rows", 0)),
-                            })
-                        result.append({
-                            "source_id": batch.source_id,
-                            "batch_id": batch.batch_id,
-                            "dataset": dataset_name,
-                            "category": batch.category,
-                            "stage_status": batch.stage_status,
-                            "sample_count": row_count,
-                            "current_version": getattr(ds, "version", None),
-                            "columns": schema_fields,
-                            "versions": versions,
+                    ds = _open_lance(manifest_path)
+                    schema_fields = [f.name for f in ds.schema]
+                    row_count = ds.count_rows()
+                    versions = []
+                    for v in ds.versions():
+                        ts = v.get("timestamp")
+                        versions.append({
+                            "version": v["version"],
+                            "timestamp": ts.isoformat() if ts else None,
+                            "num_rows": int(v.get("metadata", {}).get("total_rows", 0)),
                         })
+                    result.append({
+                        "source_id": batch.source_id,
+                        "batch_id": batch.batch_id,
+                        "dataset": dataset_name,
+                        "category": batch.category,
+                        "stage_status": batch.stage_status,
+                        "sample_count": row_count,
+                        "current_version": getattr(ds, "version", None),
+                        "columns": schema_fields,
+                        "versions": versions,
+                    })
                 except Exception:
                     pass
         return {"sources": result}
@@ -1230,66 +1281,44 @@ async def lancedb_query_data(
         if not manifest_path or manifest_path.suffix != ".lance":
             raise HTTPException(status_code=404, detail=f"{dataset}.lance 不存在")
 
-        with _lance_write_lock:
-            if version:
-                ds = lance.dataset(str(manifest_path)).checkout_version(version)
-            else:
-                ds = lance.dataset(str(manifest_path))
-            total = ds.count_rows()
+        if version:
+            ds = _open_lance(manifest_path).checkout_version(version)
+        else:
+            ds = _open_lance(manifest_path)
+        total = ds.count_rows()
 
-            select_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
-            if select_cols and "sample_id" not in select_cols:
-                select_cols.append("sample_id")
+        select_cols = [c.strip() for c in columns.split(",") if c.strip()] if columns else None
+        if select_cols and "sample_id" not in select_cols:
+            select_cols.append("sample_id")
 
-            schema_fields = [f.name for f in ds.schema]
+        schema_fields = [f.name for f in ds.schema]
 
-            if search and search_col and search_col in schema_fields:
-                safe_search = search.replace("'", "''")
-                try:
-                    results = ds.to_table(
-                        columns=select_cols,
-                        filter=f"contains(cast({search_col} as string), '{safe_search}')",
-                    )
-                except Exception:
-                    results = ds.to_table(columns=select_cols)
-                total = results.num_rows
-
-                start = (page - 1) * page_size
-                end = min(start + page_size, total)
-                page_rows = results.to_pylist()[start:end]
-                for row in page_rows:
-                    for k, v in list(row.items()):
-                        if k == "image_data":
-                            row[k] = {"has_image": True, "size": len(v)} if v is not None else None
-                        elif isinstance(v, bytes):
-                            row[k] = f"<{len(v)} bytes>"
-
-                return {
-                    "columns": list(results.column_names),
-                    "schema": schema_fields,
-                    "total": total,
-                    "page": page,
-                    "page_size": page_size,
-                    "total_pages": (total + page_size - 1) // page_size,
-                    "data": page_rows,
-                }
-
+        if search and search_col and search_col in schema_fields:
+            safe_search = search.replace("'", "''")
+            search_filter = f"contains(cast({search_col} as string), '{safe_search}')"
             start = (page - 1) * page_size
-            if start >= total:
-                page_rows = []
-            else:
-                limit = min(page_size, total - start)
-                results = ds.to_table(offset=start, limit=limit, columns=select_cols)
-                page_rows = results.to_pylist()
-                for row in page_rows:
-                    for k, v in list(row.items()):
-                        if k == "image_data":
-                            row[k] = {"has_image": True, "size": len(v)} if v is not None else None
-                        elif isinstance(v, bytes):
-                            row[k] = f"<{len(v)} bytes>"
+            try:
+                total = ds.count_rows(filter=search_filter)
+                results = ds.to_table(
+                    columns=select_cols,
+                    filter=search_filter,
+                    offset=start,
+                    limit=page_size,
+                )
+            except Exception:
+                total = ds.count_rows()
+                results = ds.to_table(columns=select_cols, offset=start, limit=page_size)
+
+            page_rows = results.to_pylist()
+            for row in page_rows:
+                for k, v in list(row.items()):
+                    if k == "image_data":
+                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                    elif isinstance(v, bytes):
+                        row[k] = f"<{len(v)} bytes>"
 
             return {
-                "columns": select_cols or schema_fields,
+                "columns": list(results.column_names),
                 "schema": schema_fields,
                 "total": total,
                 "page": page,
@@ -1297,6 +1326,30 @@ async def lancedb_query_data(
                 "total_pages": (total + page_size - 1) // page_size,
                 "data": page_rows,
             }
+
+        start = (page - 1) * page_size
+        if start >= total:
+            page_rows = []
+        else:
+            limit = min(page_size, total - start)
+            results = ds.to_table(offset=start, limit=limit, columns=select_cols)
+            page_rows = results.to_pylist()
+            for row in page_rows:
+                for k, v in list(row.items()):
+                    if k == "image_data":
+                        row[k] = {"has_image": True, "size": len(v)} if v is not None else None
+                    elif isinstance(v, bytes):
+                        row[k] = f"<{len(v)} bytes>"
+
+        return {
+            "columns": select_cols or schema_fields,
+            "schema": schema_fields,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size,
+            "data": page_rows,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -1322,19 +1375,18 @@ async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, versi
             cat_path = find_stage_manifest(manifests_dir, dataset)
             if cat_path and cat_path.suffix == ".lance" and cat_path.exists():
                 try:
-                    with _lance_write_lock:
-                        ds = lance.dataset(str(cat_path))
-                        if version:
-                            ds = ds.checkout_version(version)
-                        cols = ["sample_id", "image_data"]
-                        if "block_idx" in ds.schema.names:
-                            cols.append("block_idx")
-                        flt = f"sample_id = '{sample_id}'"
-                        if block_idx is not None and "block_idx" in ds.schema.names:
-                            flt += f" AND block_idx = {block_idx}"
-                        tbl = ds.to_table(columns=cols, filter=flt)
-                        if tbl.num_rows > 0 and tbl.column("image_data")[0].as_py() is not None:
-                            image_bytes = tbl.column("image_data")[0].as_py()
+                    ds = _open_lance(cat_path)
+                    if version:
+                        ds = ds.checkout_version(version)
+                    cols = ["sample_id", "image_data"]
+                    if "block_idx" in ds.schema.names:
+                        cols.append("block_idx")
+                    flt = f"sample_id = '{sample_id}'"
+                    if block_idx is not None and "block_idx" in ds.schema.names:
+                        flt += f" AND block_idx = {block_idx}"
+                    tbl = ds.to_table(columns=cols, filter=flt)
+                    if tbl.num_rows > 0 and tbl.column("image_data")[0].as_py() is not None:
+                        image_bytes = tbl.column("image_data")[0].as_py()
                 except Exception as e:
                     print(f"[lancedb] read {dataset}.lance image failed: {e}", file=sys.stderr)
 
@@ -1344,21 +1396,24 @@ async def lancedb_get_image(source_id: str, batch_id: str, sample_id: str, versi
             if not manifest_path or manifest_path.suffix != ".lance":
                 raise HTTPException(status_code=404, detail="ingest.lance 不存在")
 
-            with _lance_write_lock:
-                ds = lance.dataset(str(manifest_path))
+            ds = _open_lance(manifest_path)
 
-                results = ds.to_table(
-                    columns=["sample_id", "image_data"],
-                    filter=f"sample_id = '{sample_id}'",
-                )
-                if results.num_rows == 0:
-                    raise HTTPException(status_code=404, detail="Sample not found")
+            results = ds.to_table(
+                columns=["sample_id", "image_data"],
+                filter=f"sample_id = '{sample_id}'",
+            )
+            if results.num_rows == 0:
+                raise HTTPException(status_code=404, detail="Sample not found")
 
-                image_bytes = results.column("image_data")[0].as_py()
-                if image_bytes is None:
-                    raise HTTPException(status_code=404, detail="No image data")
+            image_bytes = results.column("image_data")[0].as_py()
+            if image_bytes is None:
+                raise HTTPException(status_code=404, detail="No image data")
 
-        return Response(content=image_bytes, media_type="image/jpeg")
+        return Response(
+            content=image_bytes,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=3600"}
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -1514,7 +1569,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                         try:
                             sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
                             if sp.exists():
-                                sd = json.loads(sp.read_text(encoding="utf-8"))
+                                sd = _read_json_cached(sp)
                                 for s in sd.get("samples", []):
                                     sample_keys.add((s["category"], s["sample_id"], s["block_idx"]))
                         except Exception:
@@ -1535,7 +1590,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                 continue
                             try:
                                 with _lance_write_lock:
-                                    ds = lance.dataset(str(lp))
+                                    ds = _open_lance(lp)
                                     all_cols = ds.schema.names
                                     read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                     for prefix in ("paddle", "glm", "self"):
@@ -1569,7 +1624,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                             continue
                         try:
                             with _lance_write_lock:
-                                ds = lance.dataset(str(lp))
+                                ds = _open_lance(lp)
                                 all_cols = ds.schema.names
                                 read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                 for prefix in ("paddle", "glm", "self"):
@@ -1613,7 +1668,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                             continue
                         try:
                             with _lance_write_lock:
-                                ds = lance.dataset(str(lp))
+                                ds = _open_lance(lp)
                                 col_names = set(ds.schema.names)
                                 if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
                                     continue
@@ -1627,8 +1682,8 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                             if not update_map:
                                 continue
                             with _lance_write_lock:
-                                ds = lance.dataset(str(lp))
-                                t = ds.to_table()
+                                ds = _open_lance(lp)
+                                t = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern", "block_diff_json"])
                                 patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
                                 diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
                                 sids = t.column("sample_id").to_pylist()
@@ -1662,7 +1717,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                         "difficulty": pa.array(tiers, type=pa.large_string()),
                     })
                     with _lance_write_lock:
-                        ds = lance.dataset(str(ingest_path))
+                        ds = _open_lance(ingest_path)
                         ds.merge_insert(["sample_id"]).when_matched_update_all().execute(update_table)
 
                 progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(page_tiers)} 页面")
@@ -1682,6 +1737,9 @@ async def start_cmcv(source_id: str, batch_id: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_cmcv_results_cache = {}  # key: (source_id, batch_id) → (result, lance_version)
+
+
 @app.get("/api/cmcv/{source_id}/{batch_id}/results")
 async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
     """获取单个 batch 的 CMCV 比较结果"""
@@ -1690,11 +1748,43 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
 
+        # 检查缓存：基于 Lance 版本
+        cache_key = (source_id, batch_id)
+        cached_result = _cmcv_results_cache.get(cache_key)
+        if cached_result is not None:
+            cached_data, cached_version = cached_result
+            # 验证版本是否一致
+            text_lp = manifests_dir / "text.lance"
+            if text_lp.exists():
+                try:
+                    ds = _open_lance(text_lp)
+                    current_version = getattr(ds, "version", None)
+                    if current_version == cached_version:
+                        # 应用 tier 过滤
+                        if tier:
+                            filtered_rows = [r for r in cached_data["rows"] if r.get("consistency_pattern") == tier]
+                            # 重新计算 histogram
+                            tier_histogram = {"easy": 0, "medium": 0, "hard": 0}
+                            for row in filtered_rows:
+                                pat = row.get("consistency_pattern", "")
+                                if pat == "all_agree": tier_histogram["easy"] += 1
+                                elif pat == "partial_agree": tier_histogram["medium"] += 1
+                                elif pat == "all_disagree": tier_histogram["hard"] += 1
+                            return {
+                                "total_blocks": len(filtered_rows),
+                                "total_pages": len(set(r["sample_id"] for r in filtered_rows)),
+                                "tier_histogram": tier_histogram,
+                                "pages": list({r["sample_id"]: r for r in filtered_rows}.values())[:100],
+                            }
+                        return cached_data
+                except Exception:
+                    pass
+
         sample_keys = set()
         try:
             sp = batch_dir / "artifacts" / "element_samples.json"
             if sp.exists():
-                sd = json.loads(sp.read_text(encoding="utf-8"))
+                sd = _read_json_cached(sp)
                 for s in sd.get("samples", []):
                     sample_keys.add((s["sample_id"], s["block_idx"]))
         except Exception:
@@ -1706,16 +1796,15 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             if not lp.exists():
                 continue
             try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
-                    col_names = set(ds.schema.names)
-                    read_cols = ["sample_id", "block_idx", "block_type",
-                                 "consistency_pattern", "block_diff_json"]
-                    for prefix in ("paddle", "glm", "self"):
-                        col = f"{prefix}_text"
-                        if col in col_names:
-                            read_cols.append(col)
-                    rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
+                ds = _open_lance(lp)
+                col_names = set(ds.schema.names)
+                read_cols = ["sample_id", "block_idx", "block_type",
+                             "consistency_pattern", "block_diff_json"]
+                for prefix in ("paddle", "glm", "self"):
+                    col = f"{prefix}_text"
+                    if col in col_names:
+                        read_cols.append(col)
+                rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
             except Exception:
                 pass
 
@@ -1747,11 +1836,29 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             elif pat == "partial_agree" and page_stats[sid]["worst_pattern"] != "all_disagree":
                 page_stats[sid]["worst_pattern"] = "partial_agree"
 
-        return {
+        result = {
             "total_blocks": len(rows),
             "total_pages": len(page_stats),
             "tier_histogram": tier_histogram,
             "pages": list(page_stats.values())[:100],
+            "rows": rows,  # 用于缓存
+        }
+
+        # 存储缓存（基于 Lance 版本）
+        try:
+            text_lp = manifests_dir / "text.lance"
+            if text_lp.exists():
+                ds = _open_lance(text_lp)
+                lance_version = getattr(ds, "version", None)
+                _cmcv_results_cache[(source_id, batch_id)] = (result, lance_version)
+        except Exception:
+            pass
+
+        return {
+            "total_blocks": result["total_blocks"],
+            "total_pages": result["total_pages"],
+            "tier_histogram": result["tier_histogram"],
+            "pages": result["pages"],
         }
     except HTTPException:
         raise
@@ -1773,27 +1880,25 @@ async def get_sample_compare(source_id: str, batch_id: str, sample_id: str):
             if not lp.exists():
                 continue
             try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
-                    col_names = set(ds.schema.names)
-                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json",
-                                 "paddle_text", "glm_text", "self_text",
-                                 "paddle_table", "glm_table", "self_table",
-                                 "paddle_formula", "glm_formula", "self_formula",
-                                 "consistency_pattern", "block_diff_json"]
-                    available = [c for c in read_cols if c in col_names]
-                    tbl = ds.to_table(columns=available)
-                    t_sample_id = tbl.column("sample_id").to_pylist()
-                    for i, sid in enumerate(t_sample_id):
-                        if sid == sample_id:
-                            row = {col: tbl.column(col)[i].as_py() for col in available}
-                            for key in ("paddle_table", "glm_table", "self_table"):
-                                if key in row and isinstance(row[key], str) and row[key]:
-                                    try:
-                                        row[key] = json.loads(row[key])
-                                    except (json.JSONDecodeError, TypeError):
-                                        pass
-                            sample_blocks.append(row)
+                ds = _open_lance(lp)
+                col_names = set(ds.schema.names)
+                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json",
+                             "paddle_text", "glm_text", "self_text",
+                             "paddle_table", "glm_table", "self_table",
+                             "paddle_formula", "glm_formula", "self_formula",
+                             "consistency_pattern", "block_diff_json"]
+                available = [c for c in read_cols if c in col_names]
+                # 使用 Lance filter 直接查询，避免加载全表
+                tbl = ds.to_table(columns=available, filter=f"sample_id = '{sample_id}'")
+                for i in range(tbl.num_rows):
+                    row = {col: tbl.column(col)[i].as_py() for col in available}
+                    for key in ("paddle_table", "glm_table", "self_table"):
+                        if key in row and isinstance(row[key], str) and row[key]:
+                            try:
+                                row[key] = json.loads(row[key])
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                    sample_blocks.append(row)
             except Exception:
                 pass
         if not sample_blocks:
@@ -1821,7 +1926,7 @@ async def get_category_stats(source_id: str, batch_id: str):
         for cat in ("text", "formula", "table"):
             lance_path = manifests_dir / f"{cat}.lance"
             if lance_path.exists():
-                ds = lance.dataset(str(lance_path))
+                ds = _open_lance(lance_path)
                 n = ds.count_rows()
                 cols = ds.schema.names
                 no_img = 0
@@ -1858,7 +1963,7 @@ async def get_category_stats_batch(request: Request):
                 for cat in ("text", "formula", "table"):
                     lp = manifests_dir / f"{cat}.lance"
                     if lp.exists():
-                        ds = lance.dataset(str(lp))
+                        ds = _open_lance(lp)
                         n = ds.count_rows()
                         cols = ds.schema.names
                         no_img = 0
@@ -1901,7 +2006,7 @@ def _merge_all_bucket_samples(registry, count: int, force: bool) -> dict:
                 cpath = bdir / "artifacts" / "bucket_samples.json"
                 if cpath.exists():
                     try:
-                        cached = json.loads(cpath.read_text(encoding="utf-8"))
+                        cached = _read_json_cached(cpath)
                         if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
                             continue
                         total = cached.get("total_sampled", 0)
@@ -1956,7 +2061,7 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
         if not force:
             if cache_path.exists():
                 try:
-                    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                    cached = _read_json_cached(cache_path)
                     # Element Clustering 和 Difficulty Aware 需要重新生成，不返回缓存
                     # Page-Level 聚类（page_cmcv_*）应该返回缓存
                     if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
@@ -1988,7 +2093,7 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
                         cpath = bdir / "artifacts" / "bucket_samples.json"
                         if cpath.exists():
                             try:
-                                cached = json.loads(cpath.read_text(encoding="utf-8"))
+                                cached = _read_json_cached(cpath)
                                 if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
                                     continue
                                 for k, v in (cached.get("buckets") or {}).items():
@@ -2019,7 +2124,7 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
                 "bucket_sizes": {}, "total_sampled": 0, "buckets": {},
             }
 
-        ds = lance.dataset(str(manifest_path))
+        ds = _open_lance(manifest_path)
 
         indices = ds.list_indices()
         index_name = None
@@ -2136,7 +2241,7 @@ async def get_bucket_summary(source_id: str = "", batch_id: str = ""):
                 }
             cached = _bucket_summary_cache.get(cache_path)
             if cached is None:
-                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                cached = _read_json_cached(cache_path)
                 _bucket_summary_cache.set(cache_path, cached)
             page_cmcv, page_cmcv_sample = _strip_heavy_summary_fields(
                 cached.get("page_cmcv"), cached.get("page_cmcv_sample"))
@@ -2177,7 +2282,7 @@ async def get_bucket_summary(source_id: str = "", batch_id: str = ""):
 
         cached = _bucket_summary_cache.get(cache_path)
         if cached is None:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            cached = _read_json_cached(cache_path)
             _bucket_summary_cache.set(cache_path, cached)
 
         page_cmcv, page_cmcv_sample = _strip_heavy_summary_fields(
@@ -2233,7 +2338,7 @@ async def get_bucket_samples_batch(request: Request, full: bool = False):
                 if cache_path.exists():
                     cached = _bucket_summary_cache.get(cache_path)
                     if cached is None:
-                        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                        cached = _read_json_cached(cache_path)
                         _bucket_summary_cache.set(cache_path, cached)
                     # 跳过 Element Clustering 和 Difficulty Aware 抽样（这些是 Block 级别的）
                     # Page-Level 聚类（page_cmcv_*）应该正常返回
@@ -2307,7 +2412,7 @@ async def get_difficulty_aware_samples(
         cache_path = batch_dir / "artifacts" / "element_bucket_samples.json"
         if not force and cache_path.exists():
             try:
-                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                cached = _read_json_cached(cache_path)
                 if cached.get("strategy") == "element_cluster":
                     cached_ratios = cached.get("ratios", {})
                     if (float(cached_ratios.get("easy", 0)) == easy_ratio and
@@ -2321,7 +2426,7 @@ async def get_difficulty_aware_samples(
         clusters_path = batch_dir / "artifacts" / "element_clusters.json"
         if not clusters_path.exists():
             raise HTTPException(status_code=400, detail="未找到 Element 聚类结果，请先运行 Element Clustering")
-        clusters_data = json.loads(clusters_path.read_text(encoding="utf-8"))
+        clusters_data = _read_json_cached(clusters_path)
 
         # 收集所有 batch 的抽样 keys（用于确定哪些 block 有 CMCV 结果）
         all_sample_keys = set()
@@ -2329,7 +2434,7 @@ async def get_difficulty_aware_samples(
             try:
                 sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
                 if sp.exists():
-                    sd = json.loads(sp.read_text(encoding="utf-8"))
+                    sd = _read_json_cached(sp)
                     for s in sd.get("samples", []):
                         all_sample_keys.add((s["sample_id"], s["block_idx"]))
             except Exception:
@@ -2340,36 +2445,43 @@ async def get_difficulty_aware_samples(
 
         # cluster_diff_map[(cat, cid)] = {"easy": N, "medium": N, "hard": N}
         cluster_diff_map: dict[tuple, dict] = {}
+        # 同时构建 block_tier_map，避免第二次 Lance 扫描
+        block_tier_map_global: dict[str, str] = {}
 
         for cat in ("text", "formula", "table"):
             lp = manifests_dir / f"{cat}.lance"
             if not lp.exists():
                 continue
             try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
-                    if "consistency_pattern" not in ds.schema.names:
+                ds = _open_lance(lp)
+                if "consistency_pattern" not in ds.schema.names:
+                    continue
+                tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
+                for row in tbl.to_pylist():
+                    # 构建 block_tier_map（用于后续按 tier 分配）
+                    bk = f"{row['sample_id']}:{row['block_idx']}"
+                    pattern = row.get("consistency_pattern")
+                    if pattern and pattern in PATTERN_TIER:
+                        block_tier_map_global[bk] = PATTERN_TIER[pattern]
+
+                    # 构建 cluster_diff_map（用于比例计算）
+                    key = (row["sample_id"], row["block_idx"])
+                    if key not in all_sample_keys:
                         continue
-                    tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
-                    for row in tbl.to_pylist():
-                        key = (row["sample_id"], row["block_idx"])
-                        if key not in all_sample_keys:
-                            continue
-                        pattern = row.get("consistency_pattern")
-                        if not pattern:
-                            continue
-                        tier = PATTERN_TIER.get(pattern)
-                        if not tier:
-                            continue
-                        cat_info = clusters_data.get(cat, {})
-                        labels_map = cat_info.get("labels", {})
-                        ckey = f"{row['sample_id']}:{row['block_idx']}"
-                        cid = labels_map.get(ckey)
-                        if cid is None:
-                            continue
-                        cluster_key = (cat, cid)
-                        cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
-                        cluster_diff_map[cluster_key][tier] += 1
+                    if not pattern:
+                        continue
+                    tier = PATTERN_TIER.get(pattern)
+                    if not tier:
+                        continue
+                    cat_info = clusters_data.get(cat, {})
+                    labels_map = cat_info.get("labels", {})
+                    ckey = f"{row['sample_id']}:{row['block_idx']}"
+                    cid = labels_map.get(ckey)
+                    if cid is None:
+                        continue
+                    cluster_key = (cat, cid)
+                    cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
+                    cluster_diff_map[cluster_key][tier] += 1
             except Exception as e:
                 print(f"[difficulty-samples] 读取 {cat}.lance 失败: {e}", file=sys.stderr)
                 continue
@@ -2449,31 +2561,14 @@ async def get_difficulty_aware_samples(
                     continue
                 sampled_keys = random.sample(cluster_keys, min(total_target, len(cluster_keys)))
 
-                # 按 block 的 CMCV 结果确定 tier
-                cat_lp = manifests_dir / f"{cat}.lance"
-                block_tier_map = {}
-                if cat_lp.exists():
-                    try:
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(cat_lp))
-                            if "consistency_pattern" in ds.schema.names:
-                                tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
-                                for row in tbl.to_pylist():
-                                    bk = f"{row['sample_id']}:{row['block_idx']}"
-                                    pattern = row.get("consistency_pattern")
-                                    if pattern and pattern in PATTERN_TIER:
-                                        block_tier_map[bk] = PATTERN_TIER[pattern]
-                    except Exception:
-                        pass
-
-                # 按 tier 分配 sampled blocks
+                # 按 tier 分配 sampled blocks（使用第一轮扫描构建的 block_tier_map_global）
                 for tier_name in ("easy", "medium", "hard"):
                     tier_target = tier_samples.get(tier_name, 0)
                     if tier_target == 0:
                         continue
                     tier_bucket_key = f"{cluster_key}_{tier_name}"
                     # 优先选属于该 tier 的 block
-                    tier_blocks = [k for k in sampled_keys if block_tier_map.get(k) == tier_name]
+                    tier_blocks = [k for k in sampled_keys if block_tier_map_global.get(k) == tier_name]
                     other_blocks = [k for k in sampled_keys if block_tier_map.get(k) != tier_name]
                     chosen = tier_blocks[:tier_target]
                     if len(chosen) < tier_target:
@@ -2537,19 +2632,18 @@ async def get_hard_cases_detail(source_id: str, batch_id: str):
             if not lp.exists():
                 continue
             try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
-                    cols = ds.schema.names
-                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json",
-                                 "consistency_pattern"]
-                    for c in ("paddle_text", "glm_text", "self_text",
-                              "paddle_table", "glm_table", "self_table",
-                              "paddle_formula", "glm_formula", "self_formula",
-                              "judged", "corrected", "needs_expert",
-                              "judge_confidence", "judge_rounds"):
-                        if c in cols:
-                            read_cols.append(c)
-                    tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
+                ds = _open_lance(lp)
+                cols = ds.schema.names
+                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json",
+                             "consistency_pattern"]
+                for c in ("paddle_text", "glm_text", "self_text",
+                          "paddle_table", "glm_table", "self_table",
+                          "paddle_formula", "glm_formula", "self_formula",
+                          "judged", "corrected", "needs_expert",
+                          "judge_confidence", "judge_rounds"):
+                    if c in cols:
+                        read_cols.append(c)
+                tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
                 for row in tbl.to_pylist():
                     if row.get("consistency_pattern") != "all_disagree":
                         continue
@@ -2599,17 +2693,16 @@ async def start_judge_refine(source_id: str, batch_id: str, request: Request):
                     if not lp.exists():
                         continue
                     try:
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(lp))
-                            cols = ds.schema.names
-                            read_cols = ["sample_id", "block_idx", "block_type", "bbox_json"]
-                            for c in ("paddle_text", "glm_text", "self_text",
-                                      "paddle_table", "glm_table", "self_table",
-                                      "paddle_formula", "glm_formula", "self_formula",
-                                      "image_data", "judged", "consistency_pattern"):
-                                if c in cols:
-                                    read_cols.append(c)
-                            tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
+                        ds = _open_lance(lp)
+                        cols = ds.schema.names
+                        read_cols = ["sample_id", "block_idx", "block_type", "bbox_json"]
+                        for c in ("paddle_text", "glm_text", "self_text",
+                                  "paddle_table", "glm_table", "self_table",
+                                  "paddle_formula", "glm_formula", "self_formula",
+                                  "image_data", "judged", "consistency_pattern"):
+                            if c in cols:
+                                read_cols.append(c)
+                        tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
                         for row in tbl.to_pylist():
                             if row.get("consistency_pattern") != "all_disagree":
                                 continue
@@ -2689,7 +2782,7 @@ async def start_judge_refine(source_id: str, batch_id: str, request: Request):
                     try:
                         lp = manifests_dir / f"{cat}.lance"
                         with _lance_write_lock:
-                            ds = lance.dataset(str(lp))
+                            ds = _open_lance(lp)
                             update_data = {
                                 "judged": [True],
                                 "corrected": [corrected],
@@ -2744,21 +2837,20 @@ async def get_judge_refine_results(source_id: str, batch_id: str):
             if not lp.exists():
                 continue
             try:
-                with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
-                    if "judged" not in ds.schema.names:
+                ds = _open_lance(lp)
+                if "judged" not in ds.schema.names:
+                    continue
+                tbl = ds.to_table(columns=["consistency_pattern", "judged", "corrected", "needs_expert"])
+                for row in tbl.to_pylist():
+                    if row.get("consistency_pattern") != "all_disagree":
                         continue
-                    tbl = ds.to_table(columns=["consistency_pattern", "judged", "corrected", "needs_expert"])
-                    for row in tbl.to_pylist():
-                        if row.get("consistency_pattern") != "all_disagree":
-                            continue
-                        stats["total"] += 1
-                        if row.get("judged"):
-                            stats["judged"] += 1
-                        if row.get("corrected"):
-                            stats["corrected"] += 1
-                        if row.get("needs_expert"):
-                            stats["needs_expert"] += 1
+                    stats["total"] += 1
+                    if row.get("judged"):
+                        stats["judged"] += 1
+                    if row.get("corrected"):
+                        stats["corrected"] += 1
+                    if row.get("needs_expert"):
+                        stats["needs_expert"] += 1
             except Exception:
                 pass
 
@@ -2792,7 +2884,7 @@ async def run_layout_preview(request: Request):
             lp = manifests_dir / f"{cat}.lance"
             if lp.exists():
                 try:
-                    ds = lance.dataset(str(lp))
+                    ds = _open_lance(lp)
                     ids_str = ",".join(repr(s) for s in sample_ids)
                     rows = ds.to_table(
                         columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"],
@@ -2811,7 +2903,7 @@ async def run_layout_preview(request: Request):
                     pass
 
         # 2. 从 ingest.lance 读取图片（只读，无需写锁）
-        ds = lance.dataset(str(manifest_path))
+        ds = _open_lance(manifest_path)
         ids_str = ",".join(repr(s) for s in sample_ids)
         recs = ds.to_table(
             columns=["sample_id", "image_data", "difficulty"],
@@ -2897,7 +2989,7 @@ async def run_layout_preview(request: Request):
             results.append({
                 "sample_id": sid,
                 "difficulty": rec.get("difficulty") or "unlabeled",
-                "image_base64": base64.b64encode(image_bytes).decode("ascii"),
+                "image_url": f"/api/lancedb/{source_id}/{batch_id}/image/{sid}",
                 "blocks": blocks,
                 "block_count": len(blocks),
                 "from_cache": from_cache,
@@ -3169,7 +3261,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                 cpath = batch_dir / "artifacts" / "bucket_samples.json"
                 if cpath.exists():
                     try:
-                        cached = json.loads(cpath.read_text(encoding="utf-8"))
+                        cached = _read_json_cached(cpath)
                         for samples in cached.get("buckets", {}).values():
                             for s in samples:
                                 sid = s if isinstance(s, str) else s.get("sample_id", "")
@@ -3203,7 +3295,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     lp = manifests_dir / f"{cat}.lance"
                     if lp.exists():
                         try:
-                            ds = lance.dataset(str(lp))
+                            ds = _open_lance(lp)
                             ids_col = ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
                             done_ids.update(ids_col)
                         except Exception as e:
@@ -3216,7 +3308,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                 lr_path = batch_dir / "artifacts" / "layout_results.json"
                 if lr_path.exists():
                     try:
-                        cached = json.loads(lr_path.read_text(encoding="utf-8"))
+                        cached = _read_json_cached(lr_path)
                         existing = cached.get("results", [])
                         for r in existing:
                             sid = r.get("sample_id", "")
@@ -3257,7 +3349,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     image_map: dict[str, bytes] = {}
                     loaded_in_batch = 0
                     try:
-                        ds = lance.dataset(str(manifest_path))
+                        ds = _open_lance(manifest_path)
                         query_batch = get_config("layout", "query_batch", default=200)
                         for qi in range(0, len(batch_ids), query_batch):
                             if progress_tracker.is_stopped(task_id):
@@ -3374,7 +3466,7 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
                     if lp.exists():
                         try:
                             print(f"[layout] compacting {cat}.lance...", file=sys.stderr)
-                            ds = lance.dataset(str(lp))
+                            ds = _open_lance(lp)
                             ds.optimize.compact_files()
                             ds.cleanup_old_versions(keep_versions=1)
                             print(f"[layout] {cat}.lance compacted", file=sys.stderr)
@@ -3436,7 +3528,7 @@ async def get_layout_batch_results(source_id: str, batch_id: str):
         json_path = batch_dir / "artifacts" / "layout_results.json"
         if json_path.exists():
             try:
-                cached = json.loads(json_path.read_text(encoding="utf-8"))
+                cached = _read_json_cached(json_path)
                 results = cached.get("results", [])
                 return {"results": results, "total": len(results)}
             except Exception:
@@ -3449,7 +3541,7 @@ async def get_layout_batch_results(source_id: str, batch_id: str):
             lp = manifests_dir / f"{cat}.lance"
             if lp.exists():
                 with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
+                    ds = _open_lance(lp)
                     rows = ds.to_table(
                         columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                     ).to_pylist()
@@ -3492,7 +3584,7 @@ async def repair_images(source_id: str, batch_id: str):
             lp = manifests_dir / f"{cat}.lance"
             if lp.exists():
                 with _lance_write_lock:
-                    ds = lance.dataset(str(lp))
+                    ds = _open_lance(lp)
                     cols = ds.schema.names
                     if "image_data" in cols:
                         try:
@@ -3534,7 +3626,7 @@ async def repair_images(source_id: str, batch_id: str):
                 image_map: dict[str, bytes] = {}
                 try:
                     with _lance_write_lock:
-                        ds = lance.dataset(str(ingest_path))
+                        ds = _open_lance(ingest_path)
                         all_sids = list(no_image_sids)
                         chunk_size = 200
                         for ci in range(0, len(all_sids), chunk_size):
@@ -3668,20 +3760,26 @@ async def repair_images(source_id: str, batch_id: str):
                                 continue
 
                             with _lance_write_lock:
-                                ds = lance.dataset(str(lp))
-                                full_table = ds.to_table()
+                                ds = _open_lance(lp)
+                                # 只读 key 列，避免加载 image_data 大二进制
+                                key_table = ds.to_table(columns=["sample_id"])
+                                sids_col = key_table.column("sample_id").to_pylist()
+                                keep_indices = [i for i, sid in enumerate(sids_col) if sid not in repair_sids_set]
 
-                            # 过滤掉需要替换的 sample_id 行
-                            sids_col = full_table.column("sample_id").to_pylist()
-                            keep_indices = [i for i, sid in enumerate(sids_col) if sid not in repair_sids_set]
                             if keep_indices:
-                                kept_table = full_table.take(keep_indices)
+                                # 需要保留行，读完整表但只取保留的行
+                                with _lance_write_lock:
+                                    ds = _open_lance(lp)
+                                    full_table = ds.to_table()
+                                    kept_table = full_table.take(keep_indices)
+                                # overwrite 保留的行
+                                with _lance_write_lock:
+                                    lance.write_dataset(kept_table, str(lp), mode="overwrite")
                             else:
-                                kept_table = full_table.slice(0, 0)
-
-                            # overwrite 保留的行
-                            with _lance_write_lock:
-                                lance.write_dataset(kept_table, str(lp), mode="overwrite")
+                                # 所有行都需要替换，直接清空
+                                with _lance_write_lock:
+                                    empty_table = pa.table({f.name: pa.array([], type=f.type) for f in ds.schema})
+                                    lance.write_dataset(empty_table, str(lp), mode="overwrite")
 
                             # append 新行
                             if new_lp.exists() and new_stats.get(cat, 0) > 0:
@@ -3861,7 +3959,7 @@ async def get_element_clusters(source_id: str, batch_id: str):
         if not out_path.exists():
             return {"status": "not_started", "result": None}
         
-        result = json.loads(out_path.read_text(encoding="utf-8"))
+        result = _read_json_cached(out_path)
         resp = {"status": "completed", "result": result}
         if task_info and task_info.elapsed_time > 0:
             resp["elapsed_seconds"] = round(task_info.elapsed_time, 1)
@@ -3891,7 +3989,7 @@ async def element_sample(source_id: str, batch_id: str, request: Request):
         if not cluster_path.exists():
             raise HTTPException(status_code=400, detail="未找到聚类结果，请先运行 Element-Type 聚类")
 
-        cluster_data = json.loads(cluster_path.read_text(encoding="utf-8"))
+        cluster_data = _read_json_cached(cluster_path)
 
         import lance
         import random
@@ -3918,7 +4016,7 @@ async def element_sample(source_id: str, batch_id: str, request: Request):
                 continue
 
             try:
-                ds = lance.dataset(str(lance_path))
+                ds = _open_lance(lance_path)
                 # 只读 key 列，避免加载 image_data 二进制
                 key_table = ds.to_table(columns=["sample_id", "block_idx"])
                 key_rows = key_table.to_pylist()
@@ -3989,7 +4087,7 @@ async def get_element_sample_status(source_id: str, batch_id: str):
         out_path = batch_dir / "artifacts" / "element_samples.json"
         if not out_path.exists():
             return {"status": "not_started", "total_sampled": 0}
-        data = json.loads(out_path.read_text(encoding="utf-8"))
+        data = _read_json_cached(out_path)
         return {
             "status": "completed",
             "per_cluster": data.get("per_cluster", 0),
@@ -4017,7 +4115,7 @@ async def page_cmcv_classify(
         if not cache_path.exists():
             raise HTTPException(status_code=400, detail="bucket_samples.json 不存在，请先运行 Page OCR")
 
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        cached = _read_json_cached(cache_path)
 
         # 缓存短路：已有 page_cmcv 结果直接返回，避免每次重算 + 全量回写 248MB
         existing = cached.get("page_cmcv")
@@ -4052,12 +4150,11 @@ async def page_cmcv_classify(
         ingest_path = batch_dir / "manifests" / "ingest.lance"
         partition_sizes = {}  # partition_name -> actual size
         try:
-            with _lance_write_lock:
-                ds = lance.dataset(str(ingest_path))
-                stats = ds.index_statistics("idx_embedding_ivf")
-                parts = stats["indices"][0].get("partitions", [])
-                for i, p in enumerate(parts):
-                    partition_sizes[f"P{i}"] = p.get("size", 0)
+            ds = _open_lance(ingest_path)
+            stats = ds.index_statistics("idx_embedding_ivf")
+            parts = stats["indices"][0].get("partitions", [])
+            for i, p in enumerate(parts):
+                partition_sizes[f"P{i}"] = p.get("size", 0)
         except Exception as e:
             print(f"[page-cmcv] 获取分区大小失败: {e}", file=sys.stderr)
 
@@ -4202,7 +4299,7 @@ async def page_cmcv_sample(
         if not cache_path.exists():
             raise HTTPException(status_code=400, detail="bucket_samples.json 不存在，请先运行 Page OCR")
 
-        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        cached = _read_json_cached(cache_path)
 
         # 缓存短路：非 force 且已有 page_cmcv_sample 结果直接返回
         if not force:
@@ -4398,7 +4495,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                     progress_tracker.fail_task(task_id, "bucket_samples.json 不存在，请先抽样")
                     return
 
-                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                cached = _read_json_cached(cache_path)
                 buckets = cached.get("buckets", {})
                 if not buckets:
                     progress_tracker.fail_task(task_id, "抽样数据为空")
@@ -4425,7 +4522,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                     progress_tracker.fail_task(task_id, "ingest manifest 不存在")
                     return
 
-                ds = lance.dataset(str(ingest_path))
+                ds = _open_lance(ingest_path)
                 print(f"[page-ocr] ingest rows: {ds.count_rows()}", file=sys.stderr)
 
                 # 读取 layout block bboxes（JSON 较小，可以预加载）
@@ -4433,7 +4530,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                 layout_map: dict[str, list] = {}  # sid -> [{"block_type", "bbox"}, ...]
                 if lr_path.exists():
                     try:
-                        lr_data = json.loads(lr_path.read_text(encoding="utf-8"))
+                        lr_data = _read_json_cached(lr_path)
                         for r in lr_data.get("results", []):
                             sid = r.get("sample_id", "")
                             blocks = r.get("blocks", [])
@@ -4732,7 +4829,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     if not lp.exists():
                         continue
                     try:
-                        ds = lance.dataset(str(lp))
+                        ds = _open_lance(lp)
                         if "image_data" not in ds.schema.names:
                             continue
                         total_blocks += ds.count_rows()
@@ -4979,7 +5076,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                 continue
                             try:
                                 with _lance_write_lock:
-                                    ds = lance.dataset(str(lp))
+                                    ds = _open_lance(lp)
                                     all_cols = ds.schema.names
                                     read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                     for _pfx in ("paddle", "glm", "self"):
@@ -5005,8 +5102,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                         update_map.setdefault("block_diff_json", {})[(r["sample_id"], r["block_idx"])] = r["block_diff_json"]
                                 if update_map:
                                     with _lance_write_lock:
-                                        ds = lance.dataset(str(lp))
-                                        t = ds.to_table()
+                                        ds = _open_lance(lp)
+                                        t = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern", "block_diff_json"])
                                         patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
                                         diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
                                         sids = t.column("sample_id").to_pylist()
