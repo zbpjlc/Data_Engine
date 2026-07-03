@@ -420,27 +420,28 @@
         }
 
         function pollProgress(taskId) {
-            const interval = setInterval(async () => {
-                try {
-                    const res = await fetch('/api/progress');
-                    const data = await res.json();
-                    const task = (data.tasks || {})[taskId];
-                    if (!task) return;
-
+            // 使用 PollManager 统一轮询（减少 /api/progress 请求）
+            startHardCasesAutoRefresh(); // 任务开始时启动自动刷新
+            PollManager.subscribe(taskId, {
+                onProgress(task) {
                     const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
                     document.getElementById('progress-bar').style.width = pct + '%';
                     document.getElementById('progress-msg').textContent = task.message || `${task.current}/${task.total}`;
-
-                    if (task.status === 'completed' || task.status === 'failed') {
-                        clearInterval(interval);
-                        document.getElementById('btn-run').textContent = '运行 Judge-and-Refine';
-                        document.getElementById('btn-run').disabled = false;
-                        document.getElementById('btn-stop').classList.add('hidden');
-                        // Reload results
-                        loadHardCases();
-                    }
-                } catch (e) {}
-            }, 2000);
+                },
+                onComplete(task) {
+                    document.getElementById('btn-run').textContent = '运行 Judge-and-Refine';
+                    document.getElementById('btn-run').disabled = false;
+                    document.getElementById('btn-stop').classList.add('hidden');
+                    loadHardCases();
+                    stopHardCasesAutoRefresh(); // 任务完成时停止自动刷新
+                },
+                onFail(task) {
+                    document.getElementById('btn-run').textContent = '运行 Judge-and-Refine';
+                    document.getElementById('btn-run').disabled = false;
+                    document.getElementById('btn-stop').classList.add('hidden');
+                    stopHardCasesAutoRefresh();
+                }
+            });
         }
 
         // Filter buttons
@@ -470,27 +471,41 @@
 
         init();
 
-        // 自动刷新：轮询检测 el_ocr/cmcv 任务完成后刷新数据
+        // 自动刷新：只在 Judge-Refine 任务运行时轮询，完成后停止
         let lastHardCount = -1;
-        setInterval(async () => {
-            const val = document.getElementById('batch-select').value;
-            if (!val) return;
-            const [sourceId, batchId] = val.split('/');
-            try {
-                const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}`);
-                const data = await res.json();
-                const newCount = data.total || 0;
-                if (lastHardCount >= 0 && newCount !== lastHardCount) {
-                    hardBlocks = data.blocks || [];
-                    document.getElementById('stat-total').textContent = data.total || 0;
-                    document.getElementById('stat-corrected').textContent = data.corrected || 0;
-                    document.getElementById('stat-judged').textContent = data.judged || 0;
-                    document.getElementById('stat-expert').textContent = data.needs_expert || 0;
-                    renderBlockList();
-                }
-                lastHardCount = newCount;
-            } catch (e) {}
-        }, 10000);
+        let hardCasesInterval = null;
+
+        function startHardCasesAutoRefresh() {
+            if (hardCasesInterval) return; // 已在轮询
+            hardCasesInterval = setInterval(async () => {
+                // 只在页面可见时才轮询，避免后台标签页浪费请求
+                if (document.hidden) return;
+                const val = document.getElementById('batch-select').value;
+                if (!val) { stopHardCasesAutoRefresh(); return; }
+                const [sourceId, batchId] = val.split('/');
+                try {
+                    const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}`);
+                    const data = await res.json();
+                    const newCount = data.total || 0;
+                    if (lastHardCount >= 0 && newCount !== lastHardCount) {
+                        hardBlocks = data.blocks || [];
+                        document.getElementById('stat-total').textContent = data.total || 0;
+                        document.getElementById('stat-corrected').textContent = data.corrected || 0;
+                        document.getElementById('stat-judged').textContent = data.judged || 0;
+                        document.getElementById('stat-expert').textContent = data.needs_expert || 0;
+                        renderBlockList();
+                    }
+                    lastHardCount = newCount;
+                } catch (e) {}
+            }, 10000);
+        }
+
+        function stopHardCasesAutoRefresh() {
+            if (hardCasesInterval) {
+                clearInterval(hardCasesInterval);
+                hardCasesInterval = null;
+            }
+        }
     </script>
 </body>
 </html>
