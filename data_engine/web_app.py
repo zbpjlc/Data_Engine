@@ -9,6 +9,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["TORCH_NUM_THREADS"] = "1"
 
+import asyncio
 import sys
 import json
 import gc
@@ -52,6 +53,42 @@ class LanceDatasetCache:
 
 
 _lance_cache = LanceDatasetCache(max_size=8)
+
+
+class BucketSummaryCache:
+    """LRU cache for parsed bucket_samples.json content (avoids 4s json.loads on every request)."""
+    def __init__(self, max_size=16):
+        self._cache = OrderedDict()
+        self._max_size = max_size
+        self._lock = threading.Lock()
+
+    def get(self, path: str):
+        key = str(path)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+        return None
+
+    def set(self, path: str, data: dict):
+        key = str(path)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            else:
+                if len(self._cache) >= self._max_size:
+                    self._cache.popitem(last=False)
+            self._cache[key] = data
+
+    def invalidate(self, path: str = None):
+        with self._lock:
+            if path:
+                self._cache.pop(str(path), None)
+            else:
+                self._cache.clear()
+
+
+_bucket_summary_cache = BucketSummaryCache(max_size=16)
 from typing import Any
 import shutil
 import pyarrow as pa
@@ -1565,7 +1602,7 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                     total=len(element_rows), message="开始一致性比较",
                 )
 
-                cmcv = CMCVEngine()
+                cmcv = CMCVEngine(use_visual_cdm=True)  # Element CMCV 使用视觉渲染（精度优先）
                 updated_rows, page_tiers = cmcv.process_element_batch(element_rows)
 
                 for b in global_status.batches:
@@ -1920,10 +1957,12 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
             if cache_path.exists():
                 try:
                     cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                    # Element Clustering 和 Difficulty Aware 需要重新生成，不返回缓存
+                    # Page-Level 聚类（page_cmcv_*）应该返回缓存
                     if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
-                        pass
+                        pass  # 继续生成新的
                     else:
-                        return cached
+                        return cached  # 直接返回缓存（包括 page_cmcv_* 和无 strategy）
                 except Exception:
                     pass
 
@@ -2040,6 +2079,7 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
 
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _bucket_summary_cache.invalidate(cache_path)
 
         # 重新抽样时清除预览模式的 layout 结果缓存（不影响 lance 拆分文件）
         layout_cache = cache_path.parent / "layout_results.json"
@@ -2053,6 +2093,121 @@ async def get_bucket_samples(source_id: str = "", batch_id: str = "", count: int
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _strip_heavy_summary_fields(page_cmcv, page_cmcv_sample):
+    """去掉 block_details(29MB) 和 page_cmcv_sample.buckets(38MB)——摘要模式下前端不需要。"""
+    if isinstance(page_cmcv, dict):
+        page_cmcv.pop("block_details", None)
+    if isinstance(page_cmcv_sample, dict):
+        page_cmcv_sample.pop("buckets", None)
+    return page_cmcv, page_cmcv_sample
+
+
+@app.get("/api/bucket-summary")
+@app.get("/api/bucket-summary/{source_id}")
+@app.get("/api/bucket-summary/{source_id}/{batch_id}")
+async def get_bucket_summary(source_id: str = "", batch_id: str = ""):
+    """返回 bucket_samples.json 的摘要字段，不含 buckets 样本数据（占 95% 体积）。"""
+    try:
+        if not source_id:
+            # 没有选源时返回空摘要
+            return {
+                "source_id": "", "batch_id": "",
+                "count_per_bucket": 0, "bucket_count": 0,
+                "bucket_sizes": {}, "total_sampled": 0,
+                "strategy": None, "partition_tiers": None,
+                "ratios": None, "batch_info": [],
+                "page_cmcv": None, "page_cmcv_sample": None,
+            }
+
+        source = registry.get(source_id)
+
+        if not batch_id:
+            # 空 batchId 时：直接读源根目录下的 bucket_samples.json
+            batch_dir = source.resolve_batch_dir("")
+            cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+            if not cache_path.exists():
+                return {
+                    "source_id": source_id, "batch_id": "",
+                    "count_per_bucket": 0, "bucket_count": 0,
+                    "bucket_sizes": {}, "total_sampled": 0,
+                    "strategy": None, "partition_tiers": None,
+                    "ratios": None, "batch_info": [],
+                    "page_cmcv": None, "page_cmcv_sample": None,
+                }
+            cached = _bucket_summary_cache.get(cache_path)
+            if cached is None:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                _bucket_summary_cache.set(cache_path, cached)
+            page_cmcv, page_cmcv_sample = _strip_heavy_summary_fields(
+                cached.get("page_cmcv"), cached.get("page_cmcv_sample"))
+            return {
+                "source_id": source_id,
+                "batch_id": cached.get("batch_id", ""),
+                "count_per_bucket": cached.get("count_per_bucket", 0),
+                "bucket_count": cached.get("bucket_count", 0),
+                "bucket_sizes": cached.get("bucket_sizes", {}),
+                "total_sampled": cached.get("total_sampled", 0),
+                "strategy": cached.get("strategy"),
+                "partition_tiers": cached.get("partition_tiers"),
+                "ratios": cached.get("ratios"),
+                "batch_info": [{
+                    "source_id": source_id,
+                    "batch_id": cached.get("batch_id", ""),
+                    "total_sampled": cached.get("total_sampled", 0),
+                    "partition_tiers": cached.get("partition_tiers"),
+                    "strategy": cached.get("strategy"),
+                }],
+                "page_cmcv": page_cmcv,
+                "page_cmcv_sample": page_cmcv_sample,
+                "cached_at": cached.get("cached_at"),
+            }
+
+        batch_dir = source.resolve_batch_dir(batch_id)
+        cache_path = batch_dir / "artifacts" / "bucket_samples.json"
+
+        if not cache_path.exists():
+            return {
+                "source_id": source_id, "batch_id": batch_id,
+                "count_per_bucket": 0, "bucket_count": 0,
+                "bucket_sizes": {}, "total_sampled": 0,
+                "strategy": None, "partition_tiers": None,
+                "ratios": None, "batch_info": [],
+                "page_cmcv": None, "page_cmcv_sample": None,
+            }
+
+        cached = _bucket_summary_cache.get(cache_path)
+        if cached is None:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            _bucket_summary_cache.set(cache_path, cached)
+
+        page_cmcv, page_cmcv_sample = _strip_heavy_summary_fields(
+            cached.get("page_cmcv"), cached.get("page_cmcv_sample"))
+
+        return {
+            "source_id": source_id,
+            "batch_id": batch_id,
+            "count_per_bucket": cached.get("count_per_bucket", 0),
+            "bucket_count": cached.get("bucket_count", 0),
+            "bucket_sizes": cached.get("bucket_sizes", {}),
+            "total_sampled": cached.get("total_sampled", 0),
+            "strategy": cached.get("strategy"),
+            "partition_tiers": cached.get("partition_tiers"),
+            "ratios": cached.get("ratios"),
+            "batch_info": [{
+                "source_id": source_id,
+                "batch_id": batch_id,
+                "total_sampled": cached.get("total_sampled", 0),
+                "partition_tiers": cached.get("partition_tiers"),
+                "strategy": cached.get("strategy"),
+            }],
+            "page_cmcv": page_cmcv,
+            "page_cmcv_sample": page_cmcv_sample,
+            "cached_at": cached.get("cached_at"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/bucket-samples-batch")
 async def get_bucket_samples_batch(request: Request, full: bool = False):
     """批量获取多个批次的抽样缓存摘要，一次请求返回所有结果。
@@ -2060,6 +2215,8 @@ async def get_bucket_samples_batch(request: Request, full: bool = False):
     full=true 时返回完整数据（含 buckets）。"""
     try:
         targets = await request.json()  # [{source_id, batch_id}, ...]
+        if not targets:
+            return {}
         results = {}
         for t in targets:
             sid = t.get("source_id", "")
@@ -2068,10 +2225,18 @@ async def get_bucket_samples_batch(request: Request, full: bool = False):
                 continue
             try:
                 source = registry.get(sid)
+                if not source:
+                    print(f"[bucket-samples-batch] Source not found: {sid}", file=sys.stderr)
+                    continue
                 batch_dir = source.resolve_batch_dir(bid)
                 cache_path = batch_dir / "artifacts" / "bucket_samples.json"
                 if cache_path.exists():
-                    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                    cached = _bucket_summary_cache.get(cache_path)
+                    if cached is None:
+                        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                        _bucket_summary_cache.set(cache_path, cached)
+                    # 跳过 Element Clustering 和 Difficulty Aware 抽样（这些是 Block 级别的）
+                    # Page-Level 聚类（page_cmcv_*）应该正常返回
                     if cached.get("strategy") in ("element_cluster", "difficulty_aware"):
                         continue
                     total = cached.get("total_sampled", 0)
@@ -2095,8 +2260,14 @@ async def get_bucket_samples_batch(request: Request, full: bool = False):
                             }
             except Exception as e:
                 print(f"[bucket-samples-batch] {sid}/{bid} error: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
         return results
+    except json.JSONDecodeError as e:
+        print(f"[bucket-samples-batch] JSON decode error: {e}", file=sys.stderr)
+        return {}
     except Exception as e:
+        print(f"[bucket-samples-batch] Unexpected error: {e}", file=sys.stderr)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3847,6 +4018,12 @@ async def page_cmcv_classify(
             raise HTTPException(status_code=400, detail="bucket_samples.json 不存在，请先运行 Page OCR")
 
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        # 缓存短路：已有 page_cmcv 结果直接返回，避免每次重算 + 全量回写 248MB
+        existing = cached.get("page_cmcv")
+        if existing and existing.get("tier_summary"):
+            return existing
+
         buckets = cached.get("buckets", {})
 
         # 检测可用的 OCR 模型列
@@ -3885,11 +4062,27 @@ async def page_cmcv_classify(
             print(f"[page-cmcv] 获取分区大小失败: {e}", file=sys.stderr)
 
         # CMCV：对每个 sample 的每个 block 计算模型一致性
-        from data_engine.ocr.cmcv import text_similarity
+        # Page CMCV 用 token fallback（快），不启用视觉渲染
+        from data_engine.ocr.cmcv import (
+            text_similarity, cdm_similarity, _normalize_latex,
+            normalize_table, teds_similarity,
+        )
 
         PATTERN_TIER = {"all_agree": "easy", "partial_agree": "medium", "all_disagree": "hard"}
         page_tiers = {}  # sid -> "easy"/"medium"/"hard"
         block_details = {}  # sid -> [{"block_idx", "pattern", "similarities"}, ...]
+
+        def _pick_sim_fn(block_type: str):
+            """根据 block 类型选择相似度函数（Page CMCV 用 token fallback）"""
+            if block_type == "formula":
+                return cdm_similarity, "cdm_token"
+            elif block_type == "table":
+                return lambda a, b: teds_similarity(
+                    {"html": a} if a else None,
+                    {"html": b} if b else None,
+                ), "teds"
+            else:
+                return text_similarity, "levenshtein"
 
         for tier_name, tier_samples in buckets.items():
             for s in tier_samples:
@@ -3903,12 +4096,17 @@ async def page_cmcv_classify(
                 block_patterns = []
                 block_scores = []
                 for b in blocks:
+                    bt = b.get("block_type", "text")
                     texts = [b.get(col, "") for col in model_cols]
+                    sim_fn, method = _pick_sim_fn(bt)
+                    # formula 需要 normalize，table 需要 normalize_table
+                    if bt == "formula":
+                        texts = [_normalize_latex(t) for t in texts]
                     # 计算两两相似度
                     sims = []
                     for i in range(len(texts)):
                         for j in range(i + 1, len(texts)):
-                            sims.append(text_similarity(texts[i], texts[j]))
+                            sims.append(sim_fn(texts[i], texts[j]))
                     avg_sim = sum(sims) / len(sims) if sims else 1.0
 
                     if avg_sim >= 0.8:
@@ -3919,7 +4117,7 @@ async def page_cmcv_classify(
                         pattern = "all_disagree"
 
                     block_patterns.append(pattern)
-                    block_scores.append({"block_idx": b.get("block_idx", 0), "pattern": pattern, "avg_similarity": round(avg_sim, 3)})
+                    block_scores.append({"block_idx": b.get("block_idx", 0), "type": bt, "method": method, "pattern": pattern, "avg_similarity": round(avg_sim, 3)})
 
                 # 页面难度 = 所有 block 中最差的
                 if "all_disagree" in block_patterns:
@@ -3974,6 +4172,7 @@ async def page_cmcv_classify(
 
         cached["page_cmcv"] = result
         cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+        _bucket_summary_cache.invalidate(cache_path)
 
         return result
     except HTTPException:
@@ -4004,6 +4203,13 @@ async def page_cmcv_sample(
             raise HTTPException(status_code=400, detail="bucket_samples.json 不存在，请先运行 Page OCR")
 
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        # 缓存短路：非 force 且已有 page_cmcv_sample 结果直接返回
+        if not force:
+            existing = cached.get("page_cmcv_sample")
+            if existing and existing.get("total_sampled", 0) > 0:
+                return existing
+
         buckets = cached.get("buckets", {})
 
         # 检测可用的 OCR 模型列
@@ -4150,6 +4356,7 @@ async def page_cmcv_sample(
         }
         cached["page_cmcv_sample"] = result
         cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+        _bucket_summary_cache.invalidate(cache_path)
         return result
     except HTTPException:
         raise
@@ -4161,13 +4368,13 @@ async def page_cmcv_sample(
 
 @app.post("/api/ocr/{source_id}")
 async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
-                   resume: bool = True, test_mode: bool = False):
+                   resume: bool = True):
     """对抽样页面运行 Page OCR，结果写回 bucket_samples.json。"""
     try:
         prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
         prefix = prefix_map.get(model)
         if not prefix:
-            raise HTTPException(status_code=400, detail=f"未知模型: {model}")
+            raise HTTPException(status_code=400, detail=f"未知模型：{model}")
 
         task_id = f"ocr_{model}_{source_id}_{batch_id}"
         existing = progress_tracker.get_task(task_id)
@@ -4211,7 +4418,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
 
                 progress_tracker.update_progress(task_id, current=0, total=len(all_samples), message=f"{model}: 共 {len(all_samples)} 页面，准备中...")
 
-                # 读取 ingest.lance
+                # 读取 ingest.lance（只打开 dataset，不加载数据）
                 ingest_dir = batch_dir / "manifests"
                 ingest_path = find_stage_manifest(ingest_dir, "ingest")
                 if not ingest_path:
@@ -4221,24 +4428,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                 ds = lance.dataset(str(ingest_path))
                 print(f"[page-ocr] ingest rows: {ds.count_rows()}", file=sys.stderr)
 
-                # 一次性读取所有抽样页面的 image_data（filter 下推）
-                sampled_ids = {sid for _, sid in all_samples}
-                id_list = list(sampled_ids)
-                ids_str = ",".join(repr(s) for s in id_list)
-                img_map: dict[str, bytes] = {}
-                try:
-                    tbl = ds.to_table(
-                        columns=["sample_id", "image_data"],
-                        filter=f"sample_id IN ({ids_str})",
-                    )
-                    for row in tbl.to_pylist():
-                        sid = row.get("sample_id", "")
-                        if row.get("image_data"):
-                            img_map[sid] = row["image_data"]
-                except Exception as e:
-                    print(f"[page-ocr] batch load error: {e}", file=sys.stderr)
-
-                # 读取 layout block bboxes
+                # 读取 layout block bboxes（JSON 较小，可以预加载）
                 lr_path = batch_dir / "artifacts" / "layout_results.json"
                 layout_map: dict[str, list] = {}  # sid -> [{"block_type", "bbox"}, ...]
                 if lr_path.exists():
@@ -4250,9 +4440,9 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                             if sid and blocks:
                                 layout_map[sid] = [b for b in blocks if "bbox" in b]
                     except Exception as e:
-                        print(f"[page-ocr] layout_results.json 读取失败: {e}", file=sys.stderr)
+                        print(f"[page-ocr] layout_results.json 读取失败：{e}", file=sys.stderr)
 
-                print(f"[page-ocr] sampled={len(sampled_ids)}, img_map={len(img_map)}, layout_blocks={sum(len(v) for v in layout_map.values())}", file=sys.stderr)
+                print(f"[page-ocr] sampled={len(all_samples)}, layout_blocks={sum(len(v) for v in layout_map.values())}", file=sys.stderr)
 
                 # 初始化 OCR 引擎
                 if model == "paddleocr":
@@ -4263,20 +4453,37 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                     engine = GLMOCREngine()
                 else:
                     from data_engine.ocr.self_ocr import SelfOCREngine
-                    engine = SelfOCREngine(test_mode=test_mode and model == "self_ocr")
+                    engine = SelfOCREngine()
 
                 from data_engine.ocr.base import LayoutBlock
 
                 text_col = f"{prefix}_text"
                 conf_col = f"{prefix}_confidence"
 
-                # 断点续跑：检查已有结果
+                # 断点续跑：检查已有结果（需要有文本且 confidence > 0，或者 raw_output 无 error）
                 done_count = 0
                 if resume:
                     for tier, samples in buckets.items():
                         for s in samples:
-                            if isinstance(s, dict) and any(text_col in b for b in s.get("blocks", [])):
-                                done_count += 1
+                            if isinstance(s, dict):
+                                blocks = s.get("blocks", [])
+                                # 检查所有 block 是否都成功完成
+                                all_done = True
+                                for b in blocks:
+                                    # text/formula/table 都检查 text_col 存在 + confidence > 0
+                                    # formula/table 的 text_col 为空是正常的（GLM 不返回 text）
+                                    if text_col not in b:
+                                        all_done = False
+                                        break
+                                    if b.get(conf_col, 1.0) == 0.0:
+                                        all_done = False
+                                        break
+                                    raw_output = b.get("raw_output", {})
+                                    if isinstance(raw_output, dict) and "error" in raw_output:
+                                        all_done = False
+                                        break
+                                if all_done and blocks:
+                                    done_count += 1
 
                 # 收集待处理任务
                 tasks = []
@@ -4288,19 +4495,39 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                             continue
                         if isinstance(s, dict) and resume:
                             blocks = s.get("blocks", [])
-                            if blocks and all(text_col in b for b in blocks):
-                                skipped += 1
-                                continue
-                        img_bytes = img_map.get(sid)
-                        if not img_bytes:
-                            skipped += 1
-                            continue
+                            if blocks:
+                                # 检查所有 block 是否都成功完成
+                                all_done = True
+                                for b in blocks:
+                                    # text/formula/table 都检查 text_col 存在 + confidence > 0
+                                    # formula/table 的 text_col 为空是正常的（GLM 不返回 text）
+                                    if text_col not in b:
+                                        all_done = False
+                                        break
+                                    # SelfOCR 空结果视为未完成（服务可能不可用）
+                                    block_type = b.get("block_type", "text")
+                                    if model == "self_ocr" and block_type not in ("formula", "table"):
+                                        if not b.get(text_col, ""):
+                                            all_done = False
+                                            break
+                                    if b.get(conf_col, 1.0) == 0.0:
+                                        all_done = False
+                                        break
+                                    raw_output = b.get("raw_output", {})
+                                    if isinstance(raw_output, dict) and "error" in raw_output:
+                                        all_done = False
+                                        break
+                                if all_done:
+                                    skipped += 1
+                                    continue
+                        # 检查是否有 layout 结果
                         blocks = layout_map.get(sid, [])
                         if not blocks:
                             print(f"[page-ocr] skip {sid}: 无 layout 结果", file=sys.stderr)
                             skipped += 1
                             continue
-                        tasks.append((tier, idx, sid, s, img_bytes, blocks))
+                        # 传递 ds 引用，按需加载图片
+                        tasks.append((tier, idx, sid, s, ds, blocks))
 
                 remaining = len(tasks)
                 print(f"[page-ocr] {model}: total={len(all_samples)}, skipped={skipped}, to_process={remaining}", file=sys.stderr)
@@ -4321,18 +4548,38 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
 
                 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                def _ocr_one(tier, idx, sid, s, img_bytes, blocks):
+                def _ocr_one(tier, idx, sid, s, ds, blocks):
+                    """处理单个页面的 OCR 识别。
+                    
+                    Args:
+                        tier: 难度层级
+                        idx: 样本索引
+                        sid: 样本 ID
+                        s: 样本数据（字符串或字典）
+                        ds: Lance dataset（用于按需加载图片）
+                        blocks: layout block 列表
+                    """
                     if progress_tracker.is_stopped(task_id):
                         return None
+                    
                     tmp_path = Path(tmp_dir) / f"{sid}.png"
                     try:
-                        if isinstance(img_bytes, bytes):
-                            tmp_path.write_bytes(img_bytes)
-                        elif isinstance(img_bytes, str):
-                            tmp_path.write_bytes(img_bytes.encode("latin-1"))
-                        else:
-                            tmp_path.write_bytes(bytes(img_bytes))
-
+                        # 按需加载单张图片
+                        tbl = ds.to_table(
+                            columns=["sample_id", "image_data"],
+                            filter=f"sample_id = '{sid}'",
+                        )
+                        if tbl.num_rows == 0:
+                            return (tier, idx, sid, s, [], "Image not found")
+                        
+                        row = tbl.to_pylist()[0]
+                        img_bytes = row.get("image_data")
+                        if not img_bytes:
+                            return (tier, idx, sid, s, [], "No image data")
+                        
+                        # 保存图片到临时文件
+                        tmp_path.write_bytes(img_bytes)
+                        
                         from PIL import Image as PILImage
                         import io
                         img = PILImage.open(tmp_path)
@@ -4340,23 +4587,24 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                         for bi, b in enumerate(blocks):
                             bbox = b.get("bbox", [0, 0, 9999, 9999])
                             x1, y1, x2, y2 = [int(c) for c in bbox]
-                            cropped = img.crop((x1, y1, x2, y2))
-                            buf = io.BytesIO()
-                            cropped.save(buf, format="PNG")
-                            crop_path = Path(tmp_dir) / f"{sid}_{bi}.png"
-                            crop_path.write_bytes(buf.getvalue())
                             br = {"block_idx": bi, "block_type": b.get("block_type", "text"), "bbox": [round(c, 1) for c in bbox]}
                             try:
+                                # 所有引擎都使用裁剪图片（SelfOCR 内部会 padding 到 1000x1000）
+                                cropped = img.crop((x1, y1, x2, y2))
+                                buf = io.BytesIO()
+                                cropped.save(buf, format="PNG")
+                                crop_path = Path(tmp_dir) / f"{sid}_{bi}.png"
+                                crop_path.write_bytes(buf.getvalue())
                                 region = LayoutBlock(block_type=b.get("block_type", "text"), bbox=[0, 0, x2-x1, y2-y1], confidence=b.get("confidence", 1.0))
                                 results = engine.recognize_regions(crop_path, [region])
+                                crop_path.unlink(missing_ok=True)
+                                
                                 r = results[0] if results else None
                                 br[text_col] = (r.text_content or "") if r else ""
                                 br[conf_col] = r.confidence if r else 0.0
                             except Exception:
                                 br[text_col] = ""
                                 br[conf_col] = 0.0
-                            finally:
-                                crop_path.unlink(missing_ok=True)
                             block_results.append(br)
 
                         return (tier, idx, sid, s, block_results, None)
@@ -4397,16 +4645,20 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
 
                             done_count += 1
                             processed += 1
+                            err_msg = f"（{errors} 错误）" if errors else ""
+                            # 每个页面处理完都更新进度（前端轮询需要）
+                            progress_tracker.update_progress(task_id, current=skipped + processed, total=len(all_samples), message=f"{model}: {processed}/{remaining} {err_msg}")
+                            # 定期保存到文件（避免频繁 IO）
                             if processed % save_interval == 0:
                                 cached["buckets"] = buckets
                                 cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
-                            err_msg = f"（{errors} 错误）" if errors else ""
-                            progress_tracker.update_progress(task_id, current=skipped + processed, total=len(all_samples), message=f"{model}: {processed}/{remaining} {err_msg}")
+                                _bucket_summary_cache.invalidate(cache_path)
 
                 finally:
                     cached["buckets"] = buckets
                     cached[f"{prefix}_ocr_at"] = datetime.now().isoformat(timespec='seconds')
                     cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+                    _bucket_summary_cache.invalidate(cache_path)
                     import shutil
                     shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -4438,8 +4690,7 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
 
 @app.post("/api/element-ocr/{source_id}/{batch_id}")
 async def element_ocr(source_id: str, batch_id: str, request: Request,
-                      model: str = "paddleocr", test_mode: bool = False,
-                      force: bool = False):
+                      model: str = "paddleocr", force: bool = False):
     """对 Element 抽样 block 运行 OCR，结果写回 text/formula/table.lance。
     force=True 时清空该模型已有结果后全部重跑。
     """
@@ -4457,8 +4708,6 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 progress_tracker.stop_task(task_id, "线程已终止，任务停止")
             else:
                 return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
-
-        use_test_mode = test_mode and model == "self_ocr"
 
         def execute():
             try:
@@ -4506,7 +4755,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     engine = GLMOCREngine()
                 else:
                     from data_engine.ocr.self_ocr import SelfOCREngine
-                    engine = SelfOCREngine(test_mode=use_test_mode)
+                    engine = SelfOCREngine()
 
                 text_col = f"{prefix}_text"
                 conf_col = f"{prefix}_confidence"
@@ -4540,7 +4789,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                         if text_col in ds.schema.names:
                             tbl = ds.to_table(
                                 columns=["sample_id", "block_idx"],
-                                filter=f"{text_col} IS NOT NULL AND {text_col} != ''"
+                                filter=f"{text_col} IS NOT NULL AND {text_col} != '' AND {conf_col} > 0"
                             )
                             done_keys.update(
                                 (row["sample_id"], row["block_idx"])
@@ -4723,7 +4972,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     try:
                         from data_engine.ocr.cmcv import CMCVEngine
                         print(f"[el-ocr] 自动触发 CMCV 重算...", file=sys.stderr)
-                        cmcv_engine = CMCVEngine()
+                        cmcv_engine = CMCVEngine(use_visual_cdm=True)  # Element CMCV 使用视觉渲染
                         for cat in ("text", "formula", "table"):
                             lp = manifests_dir / f"{cat}.lance"
                             if not lp.exists():
