@@ -49,7 +49,7 @@ except ImportError:
 # ─── TEDS（OmniDocBench 实现） ──────────────────────────────────────────────
 
 try:
-    from src.metrics.table_metric import TEDS as _OmniTEDS
+    from data_engine.ocr.omnidocbench_local.table_metric import TEDS as _OmniTEDS
     _teds_engine = _OmniTEDS()
 
     def _table_to_full_html(table: dict | str | None) -> str:
@@ -148,7 +148,7 @@ except ImportError:
 _CDM_ENGINE = None
 
 try:
-    from omnidocbench.cdm_metric import CDM as _OmniCDM
+    from data_engine.ocr.omnidocbench_local.cdm_metric import CDM as _OmniCDM
     import subprocess as _sp
     
     # 测试 pdflatex 是否可用
@@ -293,25 +293,35 @@ def _text_lev_ratio(a: str, b: str) -> float:
 def _cdm_visual_similarity(formula_a: str, formula_b: str) -> float | None:
     """OmniDocBench 视觉渲染公式相似度（精度高但慢，用于 Element CMCV）
     
+    仅走容器 bridge；失败返回 None，由调用方降级到 token similarity。
+    
     Returns:
-        相似度得分 (0-1)，失败返回 None（调用方应降级到 token fallback）
+        相似度得分 (0-1)，失败返回 None
     """
-    if _CDM_ENGINE is None:
-        return None
-    # 快速路径：完全相同直接返回，避免无谓的渲染开销
     if _normalize_latex(formula_a) == _normalize_latex(formula_b):
         return 1.0
     try:
-        import tempfile
-        cdm = _CDM_ENGINE()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = cdm.evaluate(formula_a or "", formula_b or "", tmpdir)
-            score = float(result.get("F1_score", 0.0)) if result else 0.0
-            logger.debug(f"CDM 视觉评估：'{formula_a[:30]}...' vs '{formula_b[:30]}...' = {score:.4f}")
-            return score
+        from data_engine.ocr.omnidocbench_local.cdm_bridge import compute_cdm_visual
+        container_score = compute_cdm_visual(formula_a, formula_b)
+        if container_score is not None:
+            return container_score.score
     except Exception as exc:
-        logger.debug(f"CDM 视觉评估失败，降级到 token fallback: {exc}")
-        return None
+        logger.debug(f"CDM 容器执行失败: {exc}")
+    return None
+
+
+def _cdm_visual_similarity_batch(formula_pairs: list[tuple[str, str]]) -> list[float] | None:
+    """批量 CDM 视觉渲染，减少 docker exec 开销。"""
+    if not formula_pairs:
+        return []
+    try:
+        from data_engine.ocr.omnidocbench_local.cdm_bridge import compute_cdm_visual_batch
+        batch_results = compute_cdm_visual_batch(formula_pairs)
+        if batch_results is not None:
+            return [r.score for r in batch_results]
+    except Exception as exc:
+        logger.debug(f"CDM 批量容器执行失败: {exc}")
+    return None
 
 
 def cdm_similarity(formula_a: str, formula_b: str) -> float:
@@ -319,15 +329,12 @@ def cdm_similarity(formula_a: str, formula_b: str) -> float:
     return _cdm_token_similarity(formula_a, formula_b)
 
 
-def cdm_similarity_visual(formula_a: str, formula_b: str) -> float:
+def cdm_similarity_visual(formula_a: str, formula_b: str) -> float | None:
     """CDM 视觉渲染（精度高，用于 Element CMCV）
     
-    优先使用 OmniDocBench 视觉渲染，失败时降级到 token fallback
+    仅使用 OmniDocBench 视觉渲染；失败返回 None。
     """
-    score = _cdm_visual_similarity(formula_a, formula_b)
-    if score is not None:
-        return score
-    return _cdm_token_similarity(formula_a, formula_b)
+    return _cdm_visual_similarity(formula_a, formula_b)
 
 
 # ─── 标准化层 ────────────────────────────────────────────────────────────────
@@ -385,7 +392,6 @@ def compare_block(
         thr = get_config("ocr", "cmcv", "table_threshold", default=None) or threshold
         method = "teds"
     elif block_type == "formula":
-        # Page CMCV 用 token fallback（快），Element CMCV 用视觉渲染（准）
         sim_fn = cdm_similarity_visual if use_visual_cdm else cdm_similarity
         a_val = normalize_formula(paddle_formula)
         b_val = normalize_formula(glm_formula)
@@ -403,6 +409,17 @@ def compare_block(
     sim_pg = sim_fn(a_val, b_val)
     sim_ps = sim_fn(a_val, c_val)
     sim_gs = sim_fn(b_val, c_val)
+
+    if sim_pg is None or sim_ps is None or sim_gs is None:
+        diff_detail = {
+            "method": method,
+            "sim_paddle_glm": None,
+            "sim_paddle_self": None,
+            "sim_glm_self": None,
+            "threshold": thr,
+            "error": "cdm_visual_unavailable",
+        }
+        return "all_disagree", diff_detail
 
     diff_detail = {
         "method": method,
@@ -448,13 +465,28 @@ class CMCVEngine:
     def compare_page(self, blocks: list[dict]) -> dict:
         details: list[dict] = []
         patterns: list[str] = []
+        formula_blocks: list[dict] = []
+        formula_indices: list[int] = []
 
-        for block in blocks:
+        for idx, block in enumerate(blocks):
+            block_type = block.get("block_type", "text")
+            if block_type == "formula" and self._use_visual_cdm:
+                formula_blocks.append(block)
+                formula_indices.append(idx)
+                details.append({
+                    "block_idx": block.get("block_idx", 0),
+                    "type": block_type,
+                    "pattern": "",
+                    "diff": {},
+                })
+                patterns.append("")
+                continue
+
             pattern, diff = compare_block(
                 paddle_text=block.get("paddle_text"),
                 glm_text=block.get("glm_text"),
                 self_text=block.get("self_text"),
-                block_type=block.get("block_type", "text"),
+                block_type=block_type,
                 paddle_table=block.get("paddle_table"),
                 glm_table=block.get("glm_table"),
                 self_table=block.get("self_table"),
@@ -466,11 +498,51 @@ class CMCVEngine:
             )
             details.append({
                 "block_idx": block.get("block_idx", 0),
-                "type": block.get("block_type", "text"),
+                "type": block_type,
                 "pattern": pattern,
                 "diff": diff,
             })
             patterns.append(pattern)
+
+        if formula_blocks and self._use_visual_cdm:
+            formula_pairs: list[tuple[str, str]] = []
+            for block in formula_blocks:
+                a = normalize_formula(block.get("paddle_formula")) or ""
+                b = normalize_formula(block.get("glm_formula")) or ""
+                c = normalize_formula(block.get("self_formula")) or ""
+                formula_pairs.extend([(a, b), (a, c), (b, c)])
+
+            batch_scores = _cdm_visual_similarity_batch(formula_pairs)
+            if batch_scores is not None:
+                for offset, idx in enumerate(formula_indices):
+                    block = formula_blocks[offset]
+                    sim_pg = batch_scores[offset * 3]
+                    sim_ps = batch_scores[offset * 3 + 1]
+                    sim_gs = batch_scores[offset * 3 + 2]
+
+                    thr = get_config("ocr", "cmcv", "formula_threshold", default=None) or self._threshold
+                    external_agree = sim_pg >= thr
+                    self_agree_with_external = sim_ps >= thr and sim_gs >= thr
+                    if external_agree and self_agree_with_external:
+                        pattern = "all_agree"
+                    elif external_agree:
+                        pattern = "partial_agree"
+                    else:
+                        pattern = "all_disagree"
+
+                    patterns[idx] = pattern
+                    details[idx] = {
+                        "block_idx": block.get("block_idx", 0),
+                        "type": block.get("block_type", "formula"),
+                        "pattern": pattern,
+                        "diff": {
+                            "method": "cdm_visual_batch",
+                            "sim_paddle_glm": round(sim_pg, 4),
+                            "sim_paddle_self": round(sim_ps, 4),
+                            "sim_glm_self": round(sim_gs, 4),
+                            "threshold": thr,
+                        },
+                    }
 
         tier = self._assign_tier(patterns)
 
