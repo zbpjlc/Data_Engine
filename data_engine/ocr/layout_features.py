@@ -271,32 +271,32 @@ def cluster_by_type(
         if progress_callback:
             progress_callback(total, total, f"{cat} embedding 全部已缓存 ({total})")
 
-    # 4. 从 Lance 加载所有有效 embedding（生成后已全部写回）
+    # 4. 从 Lance 流式加载所有有效 embedding（生成后已全部写回）
     if progress_callback:
         progress_callback(total, total, f"{cat} 加载 embedding 向量...")
     embeddings: list[list[float] | None] = [None] * total
     try:
         import lance as _lance_read
         ds_read = _lance_read.dataset(str(lance_path))
-        emb_table = ds_read.to_table(
+        batch_size = get_config("embedding", "load_batch_size", default=50000)
+        scanner = ds_read.scanner(
             columns=["sample_id", "block_idx", "embedding"],
-            filter="embedding IS NOT NULL"
+            filter="embedding IS NOT NULL",
+            batch_size=batch_size,
         )
-        emb_sids = emb_table.column("sample_id").to_pylist()
-        emb_bidxs = emb_table.column("block_idx").to_pylist()
-        emb_data = emb_table.column("embedding").to_pylist()
-        # 构建 key -> embedding 映射
-        emb_lookup = {}
-        for s, b, e in zip(emb_sids, emb_bidxs, emb_data):
-            if e and len(e) == EMB_DIM:
-                emb_lookup[f"{s}:{b}"] = e
-        # 按行顺序填充
-        for i, key in enumerate(keys):
-            if key in emb_lookup:
-                embeddings[i] = list(emb_lookup[key])
-        del emb_lookup, emb_table
+        key_to_idx = {key: i for i, key in enumerate(keys)}
+        for batch in scanner.to_batches():
+            sids = batch.column("sample_id").to_pylist()
+            bidxs = batch.column("block_idx").to_pylist()
+            emb_col = batch.column("embedding")
+            for row_idx, (s, b) in enumerate(zip(sids, bidxs)):
+                emb = emb_col[row_idx]
+                if emb.is_valid and len(emb) == EMB_DIM:
+                    g_idx = key_to_idx.get(f"{s}:{b}")
+                    if g_idx is not None:
+                        embeddings[g_idx] = list(emb.as_py())
     except Exception as e:
-        logger.warning("[layout_features] %s: failed to load embeddings for clustering: %s", cat, e)
+        logger.warning("[layout_features] %s: 流式加载 embedding 失败: %s", cat, e)
 
     # 过滤有效 embedding（确保维度一致）
     valid_embeddings = [
