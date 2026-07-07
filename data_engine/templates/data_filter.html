@@ -569,6 +569,302 @@
     </div>
 
     <script>
+        // ══════════════════════════════════════════════════════════════════
+        //  Phase 1 Infrastructure: Store / DOM / Request / LayoutActions
+        // ══════════════════════════════════════════════════════════════════
+
+        // ── Store（唯一状态入口）────────────────────────────────────────────
+        // 约束：只保存业务状态数据，禁止保存 DOM / Promise / AbortController
+        const Store = {
+          selection: { source: null, batch: null },
+          runtime: {
+            initialized: false,
+            activeTab: null,
+            loading: {},
+            requestVersion: {},
+            abortControllers: {},
+          },
+          index: { stats: null, task: null },
+          bucket: { sample: null, summary: null },
+          layout: {
+            splitPollTimer: null,
+            splitTaskIds: [],
+            splitTargets: [],
+            splitStartTime: null,
+            etaSamples: [],
+          },
+          pageOcr: {},
+          pageCmcv: { classification: null, sampling: null },
+          elementCluster: {
+            selectedBatches: new Set(),
+            ecPollCancelled: false,
+            ecsBatches: [],
+          },
+          elementOcr: { intervals: {} },
+          elementCmcv: {},
+          partition: { currentPage: 1, source: '', batch: '', partitionId: 0 },
+        };
+
+        // ── DOM Cache（唯一静态 DOM 入口）──────────────────────────────────
+        // 约束：initDOM() 中一次性初始化，之后只读，禁止在业务函数中重新赋值
+        // 只缓存 container/button/select/progress/panel，不缓存动态生成的 row/cell/badge
+        const DOM = {};
+        function initDOM() {
+          DOM.selection = {
+            source: document.getElementById('sel-source'),
+            batch: document.getElementById('sel-batch'),
+            info: document.getElementById('source-info'),
+          };
+          DOM.index = {
+            panel: document.getElementById('panel-index'),
+            statsEmpty: document.getElementById('index-stats-empty'),
+            stats: document.getElementById('index-stats'),
+            progress: document.getElementById('index-progress'),
+            progressBar: document.getElementById('index-progress-bar'),
+            progressMsg: document.getElementById('index-progress-msg'),
+            progressPct: document.getElementById('index-progress-pct'),
+            progressTs: document.getElementById('index-progress-ts'),
+            btn: document.getElementById('btn-index'),
+            inputs: {
+              partitions: document.getElementById('index-partitions'),
+              subvectors: document.getElementById('index-subvectors'),
+            },
+            idx: {
+              partitions: document.getElementById('idx-partitions'),
+              vectors: document.getElementById('idx-vectors'),
+              avg: document.getElementById('idx-avg'),
+              empty: document.getElementById('idx-empty'),
+              small: document.getElementById('idx-small'),
+              large: document.getElementById('idx-large'),
+            },
+            chart: document.getElementById('index-chart'),
+            buildRecord: document.getElementById('index-build-record'),
+            buildAt: document.getElementById('idx-built-at'),
+            recPartitions: document.getElementById('idx-rec-partitions'),
+            recSubvectors: document.getElementById('idx-rec-subvectors'),
+            recVersion: document.getElementById('idx-rec-version'),
+          };
+          DOM.bucket = {
+            panel: document.getElementById('panel-bucket'),
+            summary: document.getElementById('bucket-summary'),
+            empty: document.getElementById('bucket-empty'),
+            results: document.getElementById('bucket-results'),
+            tabContent: document.getElementById('bucket-tab-content'),
+            pagination: document.getElementById('bucket-pagination'),
+            count: document.getElementById('bucket-count'),
+            stats: document.getElementById('bucket-stats'),
+            detail: document.getElementById('bucket-detail'),
+            cacheTime: document.getElementById('bucket-cache-time'),
+            buttons: {
+              sample: document.getElementById('btn-bucket-sample'),
+              runLayout: document.getElementById('btn-run-layout'),
+              pageCmcvSample: document.getElementById('btn-page-cmcv-sample'),
+              pageCmcvLayout: document.getElementById('btn-page-cmcv-layout'),
+              pageCmcv: document.getElementById('btn-page-cmcv'),
+            },
+          };
+          DOM.layout = {
+            taskList: document.getElementById('layout-task-list'),
+            progress: document.getElementById('layout-progress'),
+            progressText: document.getElementById('layout-progress-text'),
+            progressBar: document.getElementById('layout-progress-bar'),
+            modal: {
+              el: document.getElementById('layout-modal'),
+              title: document.getElementById('layout-modal-title'),
+              close: document.getElementById('layout-modal-close'),
+              body: document.getElementById('layout-modal-body'),
+            },
+            canvas: document.getElementById('layout-canvas'),
+          };
+          DOM.pageOcr = {
+            empty: document.getElementById('ocr-empty'),
+            results: document.getElementById('ocr-results'),
+            nav: {
+              prev: document.getElementById('ocr-prev'),
+              next: document.getElementById('ocr-next'),
+              pageInfo: document.getElementById('ocr-page-info'),
+            },
+            batchSelect: document.getElementById('ocr-batch-select'),
+            totals: {
+              samples: document.getElementById('ocr-total-samples'),
+              blocks: document.getElementById('ocr-total-blocks'),
+            },
+            sampleList: document.getElementById('ocr-sample-list'),
+            compareStatus: document.getElementById('ocr-compare-status'),
+            paddleOcrTasks: document.getElementById('paddleocr-tasks'),
+          };
+          DOM.pageCmcv = {
+            summary: document.getElementById('diff-summary'),
+            detail: document.getElementById('diff-detail'),
+            stats: document.getElementById('diff-stats'),
+            empty: document.getElementById('diff-empty'),
+            cacheTime: document.getElementById('diff-cache-time'),
+            ratios: {
+              easy: document.getElementById('ratio-easy'),
+              medium: document.getElementById('ratio-medium'),
+              hard: document.getElementById('ratio-hard'),
+            },
+            buttons: { runEds: document.getElementById('btn-run-eds') },
+            eds: {
+              results: document.getElementById('eds-results'),
+              empty: document.getElementById('eds-empty'),
+              easy: document.getElementById('eds-easy'),
+              medium: document.getElementById('eds-medium'),
+              hard: document.getElementById('eds-hard'),
+            },
+          };
+          DOM.elementCluster = {
+            results: document.getElementById('ec-results'),
+            empty: document.getElementById('ec-empty'),
+            batchSelect: document.getElementById('ec-batch-select'),
+            sourceInfo: document.getElementById('el-source-info'),
+            maxK: document.getElementById('ec-max-k'),
+            buttons: { run: document.getElementById('btn-run-ec') },
+            progress: {
+              bar: document.getElementById('ec-progress-bar'),
+              msg: document.getElementById('ec-progress-msg'),
+              container: document.getElementById('ec-progress'),
+            },
+          };
+          DOM.elementOcr = { empty: document.getElementById('eo-empty') };
+          DOM.elementSample = {
+            results: document.getElementById('ecs-results'),
+            empty: document.getElementById('ecs-empty'),
+            summary: document.getElementById('eds-summary'),
+            detail: document.getElementById('ecs-detail'),
+            counts: {
+              text: document.getElementById('ecs-text-count'),
+              table: document.getElementById('ecs-table-count'),
+              formula: document.getElementById('ecs-formula-count'),
+            },
+            perCluster: document.getElementById('ecs-per-cluster'),
+            buttons: { run: document.getElementById('btn-run-ecs') },
+            progress: {
+              msg: document.getElementById('ecs-progress-msg'),
+              container: document.getElementById('ecs-progress'),
+            },
+          };
+          DOM.elementCmcv = {
+            results: document.getElementById('ecmcv-results'),
+            empty: document.getElementById('ecmcv-empty'),
+            tiers: {
+              easy: document.getElementById('ecmcv-easy'),
+              medium: document.getElementById('ecmcv-medium'),
+              hard: document.getElementById('ecmcv-hard'),
+            },
+            detail: document.getElementById('ecmcv-detail'),
+            buttons: { run: document.getElementById('btn-run-ecmcv') },
+            progress: {
+              msg: document.getElementById('ecmcv-progress-msg'),
+              bar: document.getElementById('ecmcv-progress-bar'),
+              container: document.getElementById('ecmcv-progress'),
+            },
+          };
+          DOM.modal = {
+            image: {
+              el: document.getElementById('image-modal'),
+              img: document.getElementById('image-modal-img'),
+              title: document.getElementById('image-modal-title'),
+              close: document.getElementById('image-modal-close'),
+            },
+            partition: {
+              el: document.getElementById('partition-modal'),
+              title: document.getElementById('partition-modal-title'),
+              close: document.getElementById('partition-modal-close'),
+              body: document.getElementById('partition-modal-body'),
+              pagination: document.getElementById('partition-modal-pagination'),
+              prev: document.getElementById('part-prev'),
+              next: document.getElementById('part-next'),
+            },
+          };
+          DOM.toast = document.getElementById('toast-container');
+        }
+
+        // ── RequestManager（唯一网络入口）─────────────────────────────────
+        // 统一返回格式: { ok, data, error, response }
+        // 竞态防护: Request.begin(key) / Request.stale(key, v)
+        const Request = {
+          _result(ok, data, error, response) { return { ok, data, error, response }; },
+
+          begin(key) {
+            Store.runtime.requestVersion[key] = (Store.runtime.requestVersion[key] || 0) + 1;
+            return Store.runtime.requestVersion[key];
+          },
+          stale(key, version) {
+            return Store.runtime.requestVersion[key] !== version;
+          },
+
+          async get(url, opts = {}) {
+            try {
+              const res = await fetch(url, opts);
+              if (!res.ok) return this._result(false, null, `HTTP ${res.status}`, res);
+              const data = await res.json();
+              return this._result(true, data, null, res);
+            } catch (err) {
+              if (err.name === 'AbortError') return this._result(false, null, 'aborted', null);
+              return this._result(false, null, err.message, null);
+            }
+          },
+
+          async post(url, body, opts = {}) {
+            try {
+              const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...opts.headers },
+                body: JSON.stringify(body),
+                signal: opts.signal,
+              });
+              if (!res.ok) return this._result(false, null, `HTTP ${res.status}`, res);
+              const data = await res.json();
+              return this._result(true, data, null, res);
+            } catch (err) {
+              if (err.name === 'AbortError') return this._result(false, null, 'aborted', null);
+              return this._result(false, null, err.message, null);
+            }
+          },
+
+          async cached(url, opts = {}, ttl) {
+            try {
+              const data = await cachedFetch(url, opts, ttl);
+              return this._result(true, data, null, null);
+            } catch (err) {
+              return this._result(false, null, err.message, null);
+            }
+          },
+
+          abort(key) {
+            if (Store.runtime.abortControllers[key]) {
+              Store.runtime.abortControllers[key].abort();
+            }
+            Store.runtime.abortControllers[key] = new AbortController();
+            return Store.runtime.abortControllers[key].signal;
+          },
+        };
+
+        // ── Layout Actions（行为不进 Store）───────────────────────────────
+        const LayoutActions = {
+          stopAll() {
+            if (!Store.layout.splitTargets.length) return;
+            Store.layout.splitTargets.forEach(t => {
+              Request.post(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`);
+            });
+            if (Store.layout.splitPollTimer) {
+              clearInterval(Store.layout.splitPollTimer);
+              Store.layout.splitPollTimer = null;
+            }
+          },
+          stop(sourceId, batchId) {
+            Request.post(`/api/stop/${encodeURIComponent(sourceId)}?batch_id=${encodeURIComponent(batchId)}`);
+          },
+        };
+
+        // 初始化 DOM Cache（脚本位于 body 末尾，DOM 已就绪）
+        initDOM();
+
+        // ══════════════════════════════════════════════════════════════════
+        //  End Phase 1 Infrastructure
+        // ══════════════════════════════════════════════════════════════════
+
         // ── Accordion 折叠面板 ─────────────────────────────────────────────
         function toggleSection(headerEl) {
             const body = headerEl.nextElementSibling;
@@ -593,7 +889,7 @@
                 warning: 'border-amber-500',
             };
             const icons = {info: 'ℹ️', success: '✅', error: '❌', warning: '⚠️'};
-            const container = document.getElementById('toast-container');
+            const container = DOM.toast;
             if (!container) { alert(msg); return; }
             const toast = document.createElement('div');
             toast.className = `bg-white ${styles[type] || styles.info} border-l-4 text-gray-700 px-4 py-3 rounded-r-lg shadow-xl text-sm max-w-md flex items-start gap-2`;
@@ -801,65 +1097,62 @@
             }
         }
 
-        const batchData = {{ batches_json | tojson }};
-        let indexChart = null;
+        Store.batchData = {{ batches_json | tojson }};
+        // indexChart → Store.index.chart (Phase 1 migration)
 
         // ── 共享数据源 / 批次选择器 ──────────────────────────────────────────
-        const selSource = document.getElementById('sel-source');
-        const selBatch = document.getElementById('sel-batch');
-        let bucketSampleData = null;
-        let ecSelectedBatches = new Set();  // EC panel selected batches
+        // selSource → DOM.selection.source (Phase 1 migration)
+        // selBatch → DOM.selection.batch (Phase 1 migration)
+        // bucketSampleData → Store.bucket.sample (Phase 1 migration)
+        // ecSelectedBatches → Store.elementCluster.selectedBatches (Phase 1 migration)
         // _cmcvIntervals removed - using PollManager instead
-        const _eoIntervals = {};              // taskId → active flag
-        let _ecPollCancelled = false;      // B5 fix: pollEcStatus cancellation token
-        let _sourceAbortController = null; // B8 fix: abort stale fetches on source/batch change
-        const ecmcvResults = document.getElementById('ecmcv-results');
-        const ecmcvEmpty = document.getElementById('ecmcv-empty');
+        // _eoIntervals → Store.elementOcr.intervals (Phase 1 migration)
+        // _ecPollCancelled → Store.elementCluster.ecPollCancelled (Phase 1 migration)
+        // _sourceAbortController → Request.abort('source') (Phase 1 migration)
+        // ecmcvResults/ecmcvEmpty → DOM.elementCmcv.results/empty (Phase 1 migration)
 
         function filterBatches() {
             // B8 fix: cancel any in-flight fetches from the previous source/batch selection
-            if (_sourceAbortController) _sourceAbortController.abort();
-            _sourceAbortController = new AbortController();
-            const signal = _sourceAbortController.signal;
+            const signal = Request.abort('source');
             invalidateCache(); // 数据源变化时清除所有缓存
-            const sourceId = selSource.value;
-            selBatch.innerHTML = '<option value="">全部批次</option>';
-            const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
+            const sourceId = DOM.selection.source.value;
+            DOM.selection.batch.innerHTML = '<option value="">全部批次</option>';
+            const filtered = sourceId ? Store.batchData.filter(b => b.source_id === sourceId) : Store.batchData;
             filtered.forEach(b => {
                 const opt = document.createElement('option');
                 opt.value = b.batch_id;
                 const label = sourceId ? b.batch_id : `${b.source_id}/${b.batch_id}`;
                 opt.textContent = label + ' (' + b.sample_count.toLocaleString() + ' 样本)';
                 opt.dataset.source = b.source_id;
-                selBatch.appendChild(opt);
+                DOM.selection.batch.appendChild(opt);
             });
             const totalSamples = filtered.reduce((s,b)=>s+b.sample_count, 0);
-            document.getElementById('source-info').textContent = sourceId
+            DOM.selection.info.textContent = sourceId
                 ? filtered.length + ' 个批次 | 共 ' + totalSamples.toLocaleString() + ' 样本'
                 : '全部 ' + filtered.length + ' 个批次 | 共 ' + totalSamples.toLocaleString() + ' 样本';
 
             // 清空旧数据
-            bucketSampleData = null;
-            document.getElementById('bucket-summary').classList.add('hidden');
-            document.getElementById('bucket-empty').classList.remove('hidden');
-            document.getElementById('bucket-results').classList.add('hidden');
-            document.getElementById('btn-run-layout').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-sample').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-layout').classList.add('hidden');
-            document.getElementById('diff-summary').classList.add('hidden');
-            document.getElementById('diff-empty').classList.remove('hidden');
+            Store.bucket.sample = null;
+            DOM.bucket.summary.classList.add('hidden');
+            DOM.bucket.empty.classList.remove('hidden');
+            DOM.bucket.results.classList.add('hidden');
+            DOM.bucket.buttons.runLayout.classList.add('hidden');
+            DOM.bucket.buttons.pageCmcvSample.classList.add('hidden');
+            DOM.bucket.buttons.pageCmcvLayout.classList.add('hidden');
+            DOM.pageCmcv.summary.classList.add('hidden');
+            DOM.pageCmcv.empty.classList.remove('hidden');
             updateOcrBatchSelect();
 
-            // 不再自动加载 bucket 缓存，由 selBatch change 事件处理
+            // 不再自动加载 bucket 缓存，由 DOM.selection.batch change 事件处理
             // loadAllCachedBuckets(sourceId, filtered, signal);
 
             // 刷新 CMCV 结果
-            if (!ecmcvResults.classList.contains('hidden')) {
-                const bid = selBatch.value;
+            if (!DOM.elementCmcv.results.classList.contains('hidden')) {
+                const bid = DOM.selection.batch.value;
                 if (bid && sourceId) {
                     loadElemCmcvResults(sourceId, bid);
                 } else {
-                    const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
+                    const filtered = sourceId ? Store.batchData.filter(b => b.source_id === sourceId) : Store.batchData;
                     loadElemCmcvResultsAggregated(filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id})));
                 }
             }
@@ -867,7 +1160,7 @@
 
 
 
-        function loadAllCachedBuckets(sourceId, batchList, signal) {
+        async function loadAllCachedBuckets(sourceId, batchList, signal) {
             if (!batchList || batchList.length === 0) {
                 console.log('[bucket-samples-batch] batchList 为空，跳过加载');
                 return;
@@ -875,24 +1168,24 @@
 
             const targets = batchList.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
             console.log('[bucket-samples-batch] 请求数据:', targets);
+            const v = Request.begin('bucket-batch');
             
-            fetch('/api/bucket-samples-batch?full=true', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(targets),
-                signal: signal || undefined,
-            })
-            .then(r => {
-                console.log('[bucket-samples-batch] 响应状态:', r.status);
-                return r.ok ? r.json() : null;
-            })
-            .then(data => {
+            try {
+                const res = await fetch('/api/bucket-samples-batch?full=true', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(targets),
+                    signal: signal || undefined,
+                });
+                if (Request.stale('bucket-batch', v)) return;
+                console.log('[bucket-samples-batch] 响应状态:', res.status);
+                const data = res.ok ? await res.json() : null;
                 console.log('[bucket-samples-batch] 响应数据:', data);
                 if (!data) return;
                 const valid = Object.values(data).filter(d => d && d.total_sampled > 0);
                 if (valid.length === 0) {
-                    document.getElementById('bucket-empty').textContent = '点击「重新抽样」开始抽样';
-                    document.getElementById('bucket-empty').classList.remove('hidden');
+                    DOM.bucket.empty.textContent = '点击「重新抽样」开始抽样';
+                    DOM.bucket.empty.classList.remove('hidden');
                     return;
                 }
 
@@ -958,11 +1251,11 @@
                     }
                 }
 
-                bucketSampleData = merged;
-                document.getElementById('bucket-count').value = merged.count_per_bucket;
+                Store.bucket.sample = merged;
+                DOM.bucket.count.value = merged.count_per_bucket;
                 renderBucketSummary(merged);
                 renderBucketResults(merged);
-                document.getElementById('btn-run-layout').classList.remove('hidden');
+                DOM.bucket.buttons.runLayout.classList.remove('hidden');
                 updateOcrBatchSelect();
 
                 // 恢复 Page CMCV 缓存
@@ -970,9 +1263,8 @@
                 if (firstValid) {
                     restorePageCmcvDisplay(firstValid);
                 }
-            })
-            .catch(e => { 
-                if (e.name !== 'AbortError') {
+            } catch (e) { 
+                if (e.name !== 'AbortError' && e.message !== 'aborted') {
                     console.error('[bucket-samples-batch] 错误详情:', {
                         name: e.name,
                         message: e.message,
@@ -980,7 +1272,7 @@
                     });
                     showToast(`加载抽样数据失败：${e.message}`, 'error');
                 }
-            });
+            }
         }
 
         function restorePageCmcvDisplay(data) {
@@ -1002,11 +1294,11 @@
                     }
                 }
                 const totalBlocks = blockCounts.easy + blockCounts.medium + blockCounts.hard;
-                window._pageCmcvClassification = { allTierCounts, allBlockDetails: block_details, tierPageMap: {}, blockCounts, totalBlocks };
+                Store.pageCmcv.classification = { allTierCounts, allBlockDetails: block_details, tierPageMap: {}, blockCounts, totalBlocks };
 
-                document.getElementById('diff-empty').classList.add('hidden');
-                document.getElementById('diff-summary').classList.remove('hidden');
-                document.getElementById('diff-stats').innerHTML = `
+                DOM.pageCmcv.empty.classList.add('hidden');
+                DOM.pageCmcv.summary.classList.remove('hidden');
+                DOM.pageCmcv.stats.innerHTML = `
                     <div class="col-span-3 text-sm text-gray-600 mb-2">
                         基于 <strong>多模型 OCR</strong> 的 block 级一致性分析
                     </div>
@@ -1028,9 +1320,9 @@
                         <div class="text-xl font-bold text-red-800">${allTierCounts.hard}</div>
                         <div class="text-xs text-gray-400">${blockCounts.hard} blocks</div>
                     </div>`;
-                document.getElementById('diff-detail').innerHTML = `
+                DOM.pageCmcv.detail.innerHTML = `
                     <div class="text-xs text-gray-400 mt-1">分类已缓存，可调整比例后点击「按比例抽样」</div>`;
-                document.getElementById('btn-page-cmcv-sample').classList.remove('hidden');
+                DOM.bucket.buttons.pageCmcvSample.classList.remove('hidden');
             }
             const sampleResult = data.page_cmcv_sample;
             if (sampleResult && sampleResult.total_sampled > 0) {
@@ -1053,10 +1345,10 @@
                 const medPct = estMed > 0 ? (allSampledCounts.medium / estMed * 100).toFixed(1) : '0';
                 const hardPct = estHard > 0 ? (allSampledCounts.hard / estHard * 100).toFixed(1) : '0';
                 const ratios = sampleResult.ratios || {};
-                window._pageCmcvSampling = { allSampledCounts, estEasy, estMed, estHard, easyPct, medPct, hardPct, sampledIds, blockCounts: window._pageCmcvClassification?.blockCounts || {easy:0, medium:0, hard:0} };
+                Store.pageCmcv.sampling = { allSampledCounts, estEasy, estMed, estHard, easyPct, medPct, hardPct, sampledIds, blockCounts: Store.pageCmcv.classification?.blockCounts || {easy:0, medium:0, hard:0} };
 
-                const existingStats = document.getElementById('diff-stats').innerHTML;
-                document.getElementById('diff-stats').innerHTML = existingStats + `
+                const existingStats = DOM.pageCmcv.stats.innerHTML;
+                DOM.pageCmcv.stats.innerHTML = existingStats + `
                     <div class="col-span-3 text-xs text-gray-500 mt-3 mb-2 border-b pb-2">
                         <strong>按分区抽样结果</strong>（缓存）：按 easy:${ratios.easy || 0}% medium:${ratios.medium || 0}% hard:${ratios.hard || 0}% 从各分区抽样
                     </div>
@@ -1075,34 +1367,32 @@
                         <div class="text-xl font-bold text-red-800">${allSampledCounts.hard.toLocaleString()} 页</div>
                         <div class="text-xs text-gray-400">估算 ${estHard.toLocaleString()} 页 · ${hardPct}%</div>
                     </div>`;
-                document.getElementById('btn-page-cmcv-layout').classList.remove('hidden');
+                DOM.bucket.buttons.pageCmcvLayout.classList.remove('hidden');
             }
         }
 
-        selBatch.addEventListener('change', debounce(function() {
+        DOM.selection.batch.addEventListener('change', debounce(function() {
             // B8 fix: abort stale fetches from previous selection
-            if (_sourceAbortController) _sourceAbortController.abort();
-            _sourceAbortController = new AbortController();
-            const signal = _sourceAbortController.signal;
+            const signal = Request.abort('source');
             invalidateCache(); // 批次变化时清除所有缓存
             const batchId = this.value;
             const opt = this.options[this.selectedIndex];
-            const sourceId = opt.dataset.source || selSource.value;
+            const sourceId = opt.dataset.source || DOM.selection.source.value;
 
             // 清空旧数据
-            bucketSampleData = null;
-            document.getElementById('bucket-summary').classList.add('hidden');
-            document.getElementById('bucket-empty').classList.remove('hidden');
-            document.getElementById('bucket-results').classList.add('hidden');
-            document.getElementById('btn-run-layout').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-sample').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-layout').classList.add('hidden');
-            document.getElementById('diff-summary').classList.add('hidden');
-            document.getElementById('diff-empty').classList.remove('hidden');
+            Store.bucket.sample = null;
+            DOM.bucket.summary.classList.add('hidden');
+            DOM.bucket.empty.classList.remove('hidden');
+            DOM.bucket.results.classList.add('hidden');
+            DOM.bucket.buttons.runLayout.classList.add('hidden');
+            DOM.bucket.buttons.pageCmcvSample.classList.add('hidden');
+            DOM.bucket.buttons.pageCmcvLayout.classList.add('hidden');
+            DOM.pageCmcv.summary.classList.add('hidden');
+            DOM.pageCmcv.empty.classList.remove('hidden');
             // 清空 Element-Type 聚类显示
-            document.getElementById('ec-results').classList.add('hidden');
-            document.getElementById('ec-empty').classList.remove('hidden');
-            document.getElementById('ec-empty').textContent = '加载中...';
+            DOM.elementCluster.results.classList.add('hidden');
+            DOM.elementCluster.empty.classList.remove('hidden');
+            DOM.elementCluster.empty.textContent = '加载中...';
             ['text', 'formula', 'table'].forEach(c => {
                 document.getElementById(`ec-${c}-count`).textContent = '-';
                 document.getElementById(`ec-${c}-stats`).textContent = '';
@@ -1110,37 +1400,37 @@
             });
 
             if (batchId && sourceId) {
-                document.getElementById('source-info').textContent = `${sourceId}/${batchId}`;
+                DOM.selection.info.textContent = `${sourceId}/${batchId}`;
                 loadIndexStats(sourceId, batchId);
                 loadCachedBucketSamples(sourceId, batchId);
                 // 加载 Element-Type 聚类结果
                 loadEcResults(sourceId, batchId);
             } else {
-                const totalSamples = batchData.reduce((s,b)=>s+b.sample_count, 0);
-                document.getElementById('source-info').textContent = `全部 ${batchData.length} 个批次 | 共 ${totalSamples.toLocaleString()} 样本`;
+                const totalSamples = Store.batchData.reduce((s,b)=>s+b.sample_count, 0);
+                DOM.selection.info.textContent = `全部 ${Store.batchData.length} 个批次 | 共 ${totalSamples.toLocaleString()} 样本`;
                 // 全部批次时：聚合加载所有批次的 bucket samples
-                const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
+                const filtered = sourceId ? Store.batchData.filter(b => b.source_id === sourceId) : Store.batchData;
                 loadAllCachedBuckets(sourceId, filtered, signal);
                 // 聚合加载所有批次的 EC 聚类结果
-                const ecSrc = selSource.value;
-                const ecFiltered = ecSrc ? batchData.filter(b => b.source_id === ecSrc) : batchData;
+                const ecSrc = DOM.selection.source.value;
+                const ecFiltered = ecSrc ? Store.batchData.filter(b => b.source_id === ecSrc) : Store.batchData;
                 const toFetch = ecFiltered.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                 if (toFetch.length > 0) loadEcResultsAggregated(toFetch);
             }
             updateOcrBatchSelect();
             // 刷新 CMCV 结果
-            if (!ecmcvResults.classList.contains('hidden')) {
+            if (!DOM.elementCmcv.results.classList.contains('hidden')) {
                 if (batchId && sourceId) {
                     loadElemCmcvResults(sourceId, batchId);
                 } else {
-                    const ecSrc = selSource.value;
-                    const filtered = ecSrc ? batchData.filter(b => b.source_id === ecSrc) : batchData;
+                    const ecSrc = DOM.selection.source.value;
+                    const filtered = ecSrc ? Store.batchData.filter(b => b.source_id === ecSrc) : Store.batchData;
                     loadElemCmcvResultsAggregated(filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id})));
                 }
             }
         }, 300));
 
-        selSource.addEventListener('change', debounce(filterBatches, 300));
+        DOM.selection.source.addEventListener('change', debounce(filterBatches, 300));
 
         // 默认不选具体源，显示全部
         filterBatches();
@@ -1166,9 +1456,9 @@
                     if (task.status !== 'running') continue;
                     
                     // 先清除旧的轮询（避免重复订阅）
-                    if (ocrIntervals[tid]) { 
+                    if (Store.pageOcr.intervals[tid]) { 
                         PollManager.unsubscribe(tid); 
-                        delete ocrIntervals[tid]; 
+                        delete Store.pageOcr.intervals[tid]; 
                     }
                     
                     pollOcrModel(model, tid, null);
@@ -1187,22 +1477,22 @@
         }
 
         function getSourceId() {
-            const src = selSource.value;
+            const src = DOM.selection.source.value;
             if (src) return src;
             // 从批次下拉选中项的 data-source 取
-            const opt = selBatch.options[selBatch.selectedIndex];
+            const opt = DOM.selection.batch.options[DOM.selection.batch.selectedIndex];
             if (opt && opt.dataset.source) return opt.dataset.source;
-            // 从 batchData 反查
-            const batchId = selBatch.value;
+            // 从 Store.batchData 反查
+            const batchId = DOM.selection.batch.value;
             if (batchId) {
-                const found = batchData.find(b => b.batch_id === batchId);
+                const found = Store.batchData.find(b => b.batch_id === batchId);
                 if (found) return found.source_id;
             }
             // 返回第一个批次的 source
-            if (batchData.length > 0) return batchData[0].source_id;
+            if (Store.batchData.length > 0) return Store.batchData[0].source_id;
             return '';
         }
-        function getBatchId() { return selBatch.value; }
+        function getBatchId() { return DOM.selection.batch.value; }
 
         // ── Tab 切换 ──────────────────────────────────────────────────────────
         document.querySelectorAll('.panel-tab').forEach(tab => {
@@ -1221,12 +1511,12 @@
                 // 切换到 Element 相关 Tab 时自动加载聚类数据
                 if (this.dataset.panel.startsWith('el-')) {
                     renderEcBatchSelect();
-                    const src = selSource.value;  // empty = all sources
+                    const src = DOM.selection.source.value;  // empty = all sources
                     const bid = getBatchId();
                     if (src && bid) {
                         loadEcResults(src, bid);
-                    } else if (batchData.length > 0) {
-                        const filtered = src ? batchData.filter(b => b.source_id === src) : batchData;
+                    } else if (Store.batchData.length > 0) {
+                        const filtered = src ? Store.batchData.filter(b => b.source_id === src) : Store.batchData;
                         const toFetch = filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                         if (toFetch.length > 0) loadEcResultsAggregated(toFetch);
                     }
@@ -1241,36 +1531,39 @@
         });
 
         // ── Page_index ──────────────────────────────────────────────────────────
-        document.getElementById('btn-index').addEventListener('click', function() {
+        DOM.index.btn.addEventListener('click', async function() {
             const sourceId = getSourceId();
             if (!sourceId) { showToast('请选择数据源', 'warning'); return; }
             const batchId = getBatchId();
-            const partitions = document.getElementById('index-partitions').value;
-            const subvectors = document.getElementById('index-subvectors').value;
+            const partitions = DOM.index.inputs.partitions.value;
+            const subvectors = DOM.index.inputs.subvectors.value;
 
-            document.getElementById('index-progress').classList.remove('hidden');
-            document.getElementById('index-stats-empty').classList.add('hidden');
-            document.getElementById('index-stats').classList.add('hidden');
+            DOM.index.progress.classList.remove('hidden');
+            DOM.index.statsEmpty.classList.add('hidden');
+            DOM.index.stats.classList.add('hidden');
             this.disabled = true;
             this.textContent = '构建中...';
 
             // 重置进度条状态
-            const bar = document.getElementById('index-progress-bar');
+            const bar = DOM.index.progressBar;
             bar.style.width = '0%';
             bar.className = 'bg-indigo-600 h-2 rounded-full transition-all animate-pulse';
-            document.getElementById('index-progress-msg').textContent = '正在启动...';
-            document.getElementById('index-progress-ts').textContent = '';
+            DOM.index.progressMsg.textContent = '正在启动...';
+            DOM.index.progressTs.textContent = '';
 
             let url = `/api/index/${encodeURIComponent(sourceId)}?num_partitions=${partitions}&num_sub_vectors=${subvectors}`;
             if (batchId) url += `&batch_id=${encodeURIComponent(batchId)}`;
 
-            fetch(url, { method: 'POST' })
-                .then(r => r.json())
-                .then(data => {
-                    console.log('[index] POST response:', data);
-                    pollIndex(sourceId, batchId);
-                })
-                .catch(err => { console.error('[index] POST error:', err); showToast('索引构建启动失败: ' + err.message, 'error'); resetIndexBtn(); });
+            try {
+                const r = await Request.post(url);
+                if (!r.ok) throw new Error(r.error);
+                console.log('[index] POST response:', r.data);
+                pollIndex(sourceId, batchId);
+            } catch (err) {
+                console.error('[index] POST error:', err);
+                showToast('索引构建启动失败: ' + err.message, 'error');
+                resetIndexBtn();
+            }
         });
 
         function pollIndex(sourceId, batchId) {
@@ -1280,76 +1573,77 @@
             PollManager.subscribe(expectedTaskId, {
                 onProgress(task) {
                     console.log('[pollIndex]', task.status, task.message);
-                    document.getElementById('index-progress-msg').textContent = task.message || '构建中...';
-                    document.getElementById('index-progress-pct').textContent = task.pct + '%';
-                    document.getElementById('index-progress-bar').style.width = task.pct + '%';
-                    document.getElementById('index-progress-ts').textContent = new Date().toLocaleTimeString();
+                    DOM.index.progressMsg.textContent = task.message || '构建中...';
+                    DOM.index.progressPct.textContent = task.pct + '%';
+                    DOM.index.progressBar.style.width = task.pct + '%';
+                    DOM.index.progressTs.textContent = new Date().toLocaleTimeString();
                 },
                 onComplete(task) {
                     console.log('[pollIndex] COMPLETED');
-                    const bar = document.getElementById('index-progress-bar');
+                    const bar = DOM.index.progressBar;
                     bar.classList.remove('animate-pulse', 'bg-indigo-600');
                     bar.classList.add('bg-green-500');
-                    document.getElementById('index-progress-msg').textContent = '索引构建完成';
+                    DOM.index.progressMsg.textContent = '索引构建完成';
                     loadIndexStats(sourceId, batchId);
                     resetIndexBtn();
                     setTabBadge('index', '✅');
                 },
                 onFail(task) {
-                    const bar = document.getElementById('index-progress-bar');
+                    const bar = DOM.index.progressBar;
                     bar.classList.remove('animate-pulse', 'bg-indigo-600');
                     bar.classList.add('bg-red-500');
-                    document.getElementById('index-progress-msg').textContent = '失败: ' + (task.error_message || task.message || '');
+                    DOM.index.progressMsg.textContent = '失败: ' + (task.error_message || task.message || '');
                     resetIndexBtn();
                 }
             });
         }
 
         function resetIndexBtn() {
-            const btn = document.getElementById('btn-index');
-            btn.disabled = false;
-            btn.textContent = '构建Page_index';
+            DOM.index.btn.disabled = false;
+            DOM.index.btn.textContent = '构建Page_index';
         }
 
-        function loadIndexStats(sourceId, batchId) {
+        async function loadIndexStats(sourceId, batchId) {
             console.log('[loadIndexStats]', sourceId, batchId);
             if (!batchId) {
-                const filtered = batchData.filter(b => b.source_id === sourceId);
+                const filtered = Store.batchData.filter(b => b.source_id === sourceId);
                 if (filtered.length === 0) return;
                 batchId = filtered[0].batch_id;
             }
             // 先清空旧数据
-            document.getElementById('index-stats-empty').classList.remove('hidden');
-            document.getElementById('index-stats-empty').textContent = '加载中...';
-            document.getElementById('index-stats').classList.add('hidden');
-            if (indexChart) { indexChart.destroy(); indexChart = null; }
+            DOM.index.statsEmpty.classList.remove('hidden');
+            DOM.index.statsEmpty.textContent = '加载中...';
+            DOM.index.stats.classList.add('hidden');
+            if (Store.index.chart) { Store.index.chart.destroy(); Store.index.chart = null; }
 
-            cachedFetch(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/stats`)
-                .then(data => {
-                    if (!data) { document.getElementById('index-stats-empty').textContent = '加载统计失败: 服务器返回错误'; return; }
+            try {
+                const r = await Request.cached(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/stats`);
+                if (!r.ok || !r.data) { DOM.index.statsEmpty.textContent = '加载统计失败: 服务器返回错误'; return; }
+                const data = r.data;
                     console.log('[loadIndexStats] response:', data.has_index, 'partitions:', data.total_partitions);
                     if (!data.has_index) {
-                        document.getElementById('index-stats-empty').classList.remove('hidden');
-                        document.getElementById('index-stats').classList.add('hidden');
-                        document.getElementById('index-stats-empty').textContent = data.message;
+                        DOM.index.statsEmpty.classList.remove('hidden');
+                        DOM.index.stats.classList.add('hidden');
+                        DOM.index.statsEmpty.textContent = data.message;
                         return;
                     }
-                    document.getElementById('index-stats-empty').classList.add('hidden');
-                    document.getElementById('index-stats').classList.remove('hidden');
-                    document.getElementById('idx-partitions').textContent = data.total_partitions;
-                    document.getElementById('idx-vectors').textContent = data.total_vectors.toLocaleString();
-                    document.getElementById('idx-avg').textContent = data.avg_bucket;
-                    document.getElementById('idx-empty').textContent = data.empty_buckets;
-                    document.getElementById('idx-small').textContent = data.small_buckets;
-                    document.getElementById('idx-large').textContent = data.large_buckets;
+                    DOM.index.statsEmpty.classList.add('hidden');
+                    DOM.index.stats.classList.remove('hidden');
+                    DOM.index.idx.partitions.textContent = data.total_partitions;
+                    DOM.index.idx.vectors.textContent = data.total_vectors.toLocaleString();
+                    DOM.index.idx.avg.textContent = data.avg_bucket;
+                    DOM.index.idx.empty.textContent = data.empty_buckets;
+                    DOM.index.idx.small.textContent = data.small_buckets;
+                    DOM.index.idx.large.textContent = data.large_buckets;
                     if (data.build_record) {
-                        document.getElementById('index-build-record').classList.remove('hidden');
-                        document.getElementById('idx-built-at').textContent = data.build_record.built_at ? new Date(data.build_record.built_at).toLocaleString('zh-CN') : '-';
-                        document.getElementById('idx-rec-partitions').textContent = data.build_record.num_partitions || '-';
-                        document.getElementById('idx-rec-subvectors').textContent = data.build_record.num_sub_vectors || '-';
-                        document.getElementById('idx-rec-version').textContent = data.build_record.lance_version || '-';
+                        DOM.index.buildRecord.classList.remove('hidden');
+                        const br = data.build_record;
+                        DOM.index.buildAt.textContent = br.built_at ? new Date(br.built_at).toLocaleString('zh-CN') : '-';
+                        DOM.index.recPartitions.textContent = br.num_partitions || '-';
+                        DOM.index.recSubvectors.textContent = br.num_sub_vectors || '-';
+                        DOM.index.recVersion.textContent = br.lance_version || '-';
                     }
-                    if (indexChart) indexChart.destroy();
+                    if (Store.index.chart) Store.index.chart.destroy();
                     const labels = data.buckets.map((_, i) => `P${i}`);
                     const colors = data.buckets.map(v => {
                         if (v === 0) return 'rgba(200,200,200,0.6)';
@@ -1357,7 +1651,7 @@
                         if (v > 3000) return 'rgba(239,68,68,0.7)';
                         return 'rgba(99,102,241,0.6)';
                     });
-                    indexChart = new Chart(document.getElementById('index-chart'), {
+                    Store.index.chart = new Chart(DOM.index.chart, {
                         type: 'bar',
                         data: { labels, datasets: [{ label: '桶大小', data: data.buckets, backgroundColor: colors }] },
                         options: {
@@ -1368,27 +1662,28 @@
                         }
                     });
                     setTabBadge('index', '✅');
-                })
-                .catch(err => { console.error('[loadIndexStats] error:', err); document.getElementById('index-stats-empty').textContent = '加载统计失败: ' + err.message; });
+            } catch (err) {
+                console.error('[loadIndexStats] error:', err);
+                DOM.index.statsEmpty.textContent = '加载统计失败: ' + err.message;
+            }
         }
 
         // 分区样本查看
-        let currentPartitionPage = 1, currentPartitionSource = '', currentPartitionBatch = '', currentPartitionId = 0;
+        // currentPartitionPage/Source/Batch/Id → Store.partition.* (Phase 1 migration)
 
-        function showPartitionSamples(sourceId, batchId, partitionId, page) {
+        async function showPartitionSamples(sourceId, batchId, partitionId, page) {
             page = page || 1;
-            currentPartitionSource = sourceId; currentPartitionBatch = batchId; currentPartitionId = partitionId; currentPartitionPage = page;
-            const modal = document.getElementById('partition-modal');
-            const body = document.getElementById('partition-modal-body');
-            document.getElementById('partition-modal-title').textContent = `分区 P${partitionId} 样本`;
-            body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
-            document.getElementById('partition-modal-pagination').innerHTML = '';
+            Store.partition.source = sourceId; Store.partition.batch = batchId; Store.partition.partitionId = partitionId; Store.partition.currentPage = page;
+            DOM.modal.partition.el;
+            DOM.modal.partition.body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
+            DOM.modal.partition.title.textContent = `分区 P${partitionId} 样本`;
+            DOM.modal.partition.pagination.innerHTML = '';
             modal.classList.remove('hidden');
 
-            fetch(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/partition/${partitionId}?page=${page}&page_size=20`)
-                .then(r => r.json())
-                .then(data => {
-                    if (!data.samples || data.samples.length === 0) { body.innerHTML = '<div class="text-gray-400 text-center">该分区无数据</div>'; return; }
+            try {
+                const r = await Request.get(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/partition/${partitionId}?page=${page}&page_size=20`);
+                const data = r.ok ? r.data : null;
+                if (!data.samples || data.samples.length === 0) { body.innerHTML = '<div class="text-gray-400 text-center">该分区无数据</div>'; return; }
                     const cols = Object.keys(data.samples[0]).filter(k => k !== 'embedding');
                     let html = '<table class="w-full text-sm"><thead><tr class="bg-gray-50">';
                     cols.forEach(c => { html += `<th class="px-3 py-2 text-left font-medium text-gray-600">${c}</th>`; });
@@ -1410,515 +1705,25 @@
                     if (page > 1) pg += `<button onclick="showPartitionSamples('${sourceId}','${batchId}',${partitionId},${page-1})" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 text-sm">上一页</button>`;
                     pg += `<span class="text-sm text-gray-500">${page} / ${totalPages}</span>`;
                     if (page < totalPages) pg += `<button onclick="showPartitionSamples('${sourceId}','${batchId}',${partitionId},${page+1})" class="px-3 py-1 bg-gray-100 rounded hover:bg-gray-200 text-sm">下一页</button>`;
-                    document.getElementById('partition-modal-pagination').innerHTML = pg;
-                })
-                .catch(err => { body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`; });
+                    DOM.modal.partition.pagination.innerHTML = pg;
+            } catch (err) {
+                body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`;
+            }
         }
 
-        document.getElementById('partition-modal-close').addEventListener('click', () => document.getElementById('partition-modal').classList.add('hidden'));
-        document.getElementById('partition-modal').addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
+        DOM.modal.partition.close.addEventListener('click', () => DOM.modal.partition.el.classList.add('hidden'));
+        DOM.modal.partition.el.addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
 
         // 图片查看
         function showSampleImage(sourceId, batchId, sampleId) {
-            const modal = document.getElementById('image-modal');
-            const img = document.getElementById('image-modal-img');
-            document.getElementById('image-modal-title').textContent = `图片 - ${sampleId}`;
+            DOM.modal.image.el;
+            DOM.modal.image.img.src = ''; DOM.modal.image.img.alt = '加载中...';
+            DOM.modal.image.title.textContent = `图片 - ${sampleId}`;
             img.src = ''; img.alt = '加载中...';
             modal.classList.remove('hidden');
-            fetch(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/sample/${encodeURIComponent(sampleId)}/image`)
-                .then(r => r.json()).then(data => { img.src = `data:image/png;base64,${data.image_base64}`; img.alt = sampleId; })
-                .catch(err => { img.alt = `加载失败: ${err.message}`; });
-        }
-
-        document.getElementById('image-modal-close').addEventListener('click', () => document.getElementById('image-modal').classList.add('hidden'));
-        document.getElementById('image-modal').addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
-
-        // ── 难度桶抽样 ──────────────────────────────────────────────────────
-        function loadCachedBucketSamples(sourceId, batchId) {
-            let url = `/api/bucket-summary/${encodeURIComponent(sourceId)}`;
-            if (batchId) url += `/${encodeURIComponent(batchId)}`;
-            console.log('[loadCachedBucketSamples]', url);
-            fetch(url)
-                .then(r => { if (!r.ok) { console.warn('[loadCachedBucketSamples] HTTP', r.status); return null; } return r.json(); })
-                .then(data => {
-                    console.log('[loadCachedBucketSamples] response:', data ? `total=${data.total_sampled}` : 'null');
-                    // 无论有没有数据，都清空旧的分区列表
-                    document.getElementById('bucket-results').classList.add('hidden');
-                    document.getElementById('bucket-tab-content').innerHTML = '';
-                    document.getElementById('bucket-pagination').classList.add('hidden');
-
-                    if (!data || !data.bucket_sizes) {
-                        document.getElementById('bucket-empty').textContent = '点击「重新抽样」开始抽样';
-                        document.getElementById('bucket-empty').classList.remove('hidden');
-                        document.getElementById('bucket-summary').classList.add('hidden');
-                        document.getElementById('btn-run-layout').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-sample').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-layout').classList.add('hidden');
-                        bucketSampleData = null;
-                        return;
-                    }
-                    if (data.error) {
-                        document.getElementById('bucket-empty').textContent = data.error;
-                        document.getElementById('bucket-empty').classList.remove('hidden');
-                        document.getElementById('bucket-summary').classList.add('hidden');
-                        bucketSampleData = null;
-                        return;
-                    }
-                    const hasData = (data.bucket_sizes && Object.keys(data.bucket_sizes).length > 0) || (data.batch_info && data.batch_info.length > 0) || (data.total_sampled > 0);
-                    if (!hasData) {
-                        document.getElementById('bucket-empty').textContent = '点击「重新抽样」开始抽样';
-                        document.getElementById('bucket-empty').classList.remove('hidden');
-                        document.getElementById('bucket-summary').classList.add('hidden');
-                        document.getElementById('btn-run-layout').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-sample').classList.add('hidden');
-            document.getElementById('btn-page-cmcv-layout').classList.add('hidden');
-                        bucketSampleData = null;
-                        return;
-                    }
-                    bucketSampleData = data;
-                    if (data.tier_summary && !data.partition_tiers) {
-                        data.partition_tiers = {};
-                        for (const [t, info] of Object.entries(data.tier_summary)) {
-                            data.partition_tiers[t] = info.blocks || 0;
-                        }
-                    }
-                    document.getElementById('bucket-count').value = data.count_per_bucket || 10;
-                    try {
-                        renderBucketSummary(data);
-                        renderBucketResults(data);
-                    } catch(e) {
-                        console.error('[renderBucketSummary] error:', e);
-                    }
-                    document.getElementById('btn-run-layout').classList.remove('hidden');
-                    updateOcrBatchSelect();
-                    loadLayoutResults(sourceId, batchId);
-                    // 恢复 Page CMCV 缓存显示
-                    restorePageCmcvDisplay(data);
-                })
-                .catch(() => {});
-        }
-
-        document.getElementById('btn-bucket-sample').addEventListener('click', function() {
-            const sourceId = selSource.value;
-            const batchId = selBatch.value;
-            const count = parseInt(document.getElementById('bucket-count').value) || 10;
-
-            // 确定要抽样的批次列表
-            let targets = [];
-            if (batchId) {
-                const b = batchData.find(b => b.batch_id === batchId);
-                if (b) targets.push(b);
-            } else if (sourceId) {
-                targets = batchData.filter(b => b.source_id === sourceId);
-            } else {
-                targets = [...batchData];
-            }
-            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
-
-            const btn = this;
-            btn.disabled = true;
-            btn.textContent = `抽样中 (0/${targets.length})...`;
-
-            // 逐批抽样
-            let done = 0;
-            const promises = targets.map(b => {
-                let url = `/api/bucket-samples/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}?count=${count}&force=true`;
-                return fetch(url)
-                    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-                    .then(data => {
-                        done++;
-                        btn.textContent = `抽样中 (${done}/${targets.length})...`;
-                        return data;
-                    })
-                    .catch(err => {
-                        done++;
-                        console.error(`[${b.batch_id}] 抽样失败:`, err);
-                        return null;
-                    });
-            });
-
-            Promise.all(promises).then(results => {
-                // 合并所有批次结果
-                let allBuckets = {};
-                let allBucketSizes = {};
-                let totalSampled = 0;
-                let totalCount = 0;
-                results.forEach((data, i) => {
-                    if (!data) return;
-                    for (const [k, v] of Object.entries(data.buckets || {})) {
-                        if (Array.isArray(v)) v.forEach(s => { if (typeof s === 'object') { s._source_id = targets[i].source_id; s._batch_id = targets[i].batch_id; } });
-                        allBuckets[k] = v;
-                    }
-                    for (const [k, v] of Object.entries(data.bucket_sizes || {})) allBucketSizes[k] = v;
-                    totalSampled += data.total_sampled || 0;
-                    totalCount = data.count_per_bucket || count;
-                });
-                // 构建 batch_info（每个批次的 source_id + batch_id，供 layout 按钮使用）
-                const batchInfo = [];
-                results.forEach((data, i) => {
-                    if (data && data.total_sampled > 0) {
-                        batchInfo.push({
-                            source_id: targets[i].source_id,
-                            batch_id: targets[i].batch_id,
-                            total_sampled: data.total_sampled || 0,
-                        });
-                    }
-                });
-                bucketSampleData = {
-                    source_id: sourceId || 'all',
-                    batch_id: batchId || '',
-                    count_per_bucket: totalCount,
-                    bucket_count: Object.keys(allBucketSizes).length,
-                    bucket_sizes: allBucketSizes,
-                    total_sampled: totalSampled,
-                    buckets: allBuckets,
-                    batch_info: batchInfo,
-                };
-                renderBucketSummary(bucketSampleData);
-                renderBucketResults(bucketSampleData);
-                document.getElementById('btn-run-layout').classList.remove('hidden');
-                updateOcrBatchSelect();
-                clearOldOcrTasks(sourceId, batchId);
-            }).finally(() => {
-                btn.disabled = false;
-                btn.textContent = '重新抽样';
-            });
-        });
-
-        // Page CMCV 分类
-        document.getElementById('btn-page-cmcv').addEventListener('click', function() {
-            console.log('[Page CMCV] classify clicked');
-            const sourceId = selSource.value;
-            const batchId = selBatch.value;
-
-            let targets = [];
-            if (batchId && sourceId) {
-                const b = batchData.find(b => b.batch_id === batchId && b.source_id === sourceId);
-                if (b) targets.push(b);
-            } else if (batchId) {
-                const b = batchData.find(b => b.batch_id === batchId);
-                if (b) targets.push(b);
-            } else if (sourceId) {
-                targets = batchData.filter(b => b.source_id === sourceId);
-            } else {
-                targets = [...batchData];
-            }
-            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
-
-            const btn = this;
-            btn.disabled = true;
-            btn.textContent = `CMCV 分类中 (0/${targets.length})...`;
-
-            // 逐批调用 Page CMCV API（不抽样，只分类）
-            let allTierCounts = {easy: 0, medium: 0, hard: 0};
-            let allBlockDetails = {};
-            let totalPages = 0;
-            let done = 0;
-
-            const promises = targets.map(b => {
-                const url = `/api/page-cmcv/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`;
-                return fetch(url)
-                    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-                    .then(data => {
-                        if (data.error) { console.warn(`[${b.batch_id}] ${data.error}`); return; }
-                        for (const [t, n] of Object.entries(data.tier_summary || {})) {
-                            allTierCounts[t] = (allTierCounts[t] || 0) + n;
-                        }
-                        Object.assign(allBlockDetails, data.block_details || {});
-                        totalPages += data.total_pages || 0;
-                        done++;
-                        btn.textContent = `CMCV 分类中 (${done}/${targets.length})...`;
-                    })
-                    .catch(err => {
-                        console.error(`[${b.batch_id}] CMCV 分类失败:`, err);
-                        done++;
-                    });
-            });
-
-            Promise.all(promises).then(() => {
-                if (totalPages === 0) { showToast('无 Page OCR 数据', 'warning'); return; }
-
-                const ts = allTierCounts;
-                const blockCounts = {easy: 0, medium: 0, hard: 0};
-                const tierPageMap = {};
-                for (const [sid, details] of Object.entries(allBlockDetails)) {
-                    const pageTier = (Array.isArray(details) && details.length > 0 && details[0]._tier) || 'easy';
-                    blockCounts[pageTier] += details.length;
-                    tierPageMap[sid] = pageTier;
-                }
-                const totalBlocks = blockCounts.easy + blockCounts.medium + blockCounts.hard;
-
-                // 存储分类结果供抽样使用
-                window._pageCmcvClassification = { allTierCounts: ts, allBlockDetails, tierPageMap, totalBlocks };
-
-                document.getElementById('diff-empty').classList.add('hidden');
-                document.getElementById('diff-summary').classList.remove('hidden');
-                document.getElementById('diff-stats').innerHTML = `
-                    <div class="col-span-3 text-sm text-gray-600 mb-2">
-                        基于 <strong>${Object.keys(allBlockDetails).length > 0 ? '多模型' : '单模型'} OCR</strong> 的 block 级一致性分析
-                    </div>
-                    <div class="col-span-3 text-xs text-gray-500 mb-3 border-b pb-2">
-                        <strong>CMCV 分类结果</strong>：共 ${totalPages} 页（${totalBlocks} 个 block）
-                    </div>
-                    <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
-                        <div class="text-xs text-green-600">Easy</div>
-                        <div class="text-xl font-bold text-green-800">${ts.easy || 0} 页</div>
-                        <div class="text-xs text-gray-400">${blockCounts.easy} blocks</div>
-                    </div>
-                    <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
-                        <div class="text-xs text-yellow-600">Medium</div>
-                        <div class="text-xl font-bold text-yellow-800">${ts.medium || 0} 页</div>
-                        <div class="text-xs text-gray-400">${blockCounts.medium} blocks</div>
-                    </div>
-                    <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
-                        <div class="text-xs text-red-600">Hard</div>
-                        <div class="text-xl font-bold text-red-800">${ts.hard || 0} 页</div>
-                        <div class="text-xs text-gray-400">${blockCounts.hard} blocks</div>
-                    </div>`;
-                document.getElementById('diff-detail').innerHTML = `
-                    <div class="text-xs text-gray-400 mt-1">分类完成，可调整比例后点击「按比例抽样」</div>`;
-                document.getElementById('btn-page-cmcv-sample').classList.remove('hidden');
-            }).finally(() => {
-                btn.disabled = false;
-                btn.textContent = 'CMCV 分类';
-            });
-        });
-
-        // Step 2: 按比例抽样 — 调用后端 per-partition 抽样
-        document.getElementById('btn-page-cmcv-sample').addEventListener('click', function() {
-            console.log('[Page CMCV] sample clicked');
-            if (!window._pageCmcvClassification) { showToast('请先运行 CMCV 分类', 'warning'); return; }
-
-            const sourceId = selSource.value;
-            const batchId = selBatch.value;
-
-            const easyRatio = parseFloat(document.getElementById('ratio-easy').value) || 0.5;
-            const mediumRatio = parseFloat(document.getElementById('ratio-medium').value) || 1.0;
-            const hardRatio = parseFloat(document.getElementById('ratio-hard').value) || 2.0;
-
-            // 确定要抽样的批次列表
-            let targets = [];
-            if (batchId && sourceId) {
-                const b = batchData.find(b => b.batch_id === batchId && b.source_id === sourceId);
-                if (b) targets.push(b);
-            } else if (batchId) {
-                const b = batchData.find(b => b.batch_id === batchId);
-                if (b) targets.push(b);
-            } else if (sourceId) {
-                targets = batchData.filter(b => b.source_id === sourceId);
-            } else {
-                targets = [...batchData];
-            }
-            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
-
-            const btn = this;
-            btn.disabled = true;
-            btn.textContent = `抽样中 (0/${targets.length})...`;
-            const progressDiv = document.getElementById('layout-progress');
-            progressDiv.classList.remove('hidden');
-            document.getElementById('layout-task-list').innerHTML = '';
-
-            let done = 0;
-            let allTierSummary = {easy: 0, medium: 0, hard: 0};
-            let allSampledCounts = {easy: 0, medium: 0, hard: 0};
-
-            const promises = targets.map(b => {
-                const url = `/api/page-cmcv-sample/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}?easy_ratio=${easyRatio}&medium_ratio=${mediumRatio}&hard_ratio=${hardRatio}&force=true`;
-                return fetch(url)
-                    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-                    .then(data => {
-                        if (data.error) { console.warn(`[${b.batch_id}] ${data.error}`); return data; }
-                        console.log(`[${b.batch_id}] sample result: total_sampled=${data.total_sampled}, buckets=${JSON.stringify({easy: (data.buckets?.page_easy||[]).length, medium: (data.buckets?.page_medium||[]).length, hard: (data.buckets?.page_hard||[]).length})}`);
-                        const ts = data.tier_summary || {};
-                        for (const [t, n] of Object.entries(ts)) {
-                            allTierSummary[t] = (allTierSummary[t] || 0) + n;
-                        }
-                        for (const [k, v] of Object.entries(data.buckets || {})) {
-                            const tier = k.includes('easy') ? 'easy' : k.includes('medium') ? 'medium' : 'hard';
-                            allSampledCounts[tier] += Array.isArray(v) ? v.length : 0;
-                        }
-                        done++;
-                        btn.textContent = `抽样中 (${done}/${targets.length})...`;
-                        return data;
-                    })
-                    .catch(err => {
-                        console.error(`[${b.batch_id}] 抽样失败:`, err);
-                        done++;
-                    });
-            });
-
-            Promise.all(promises).then(results => {
-                console.log('[Page CMCV] sample results:', results.map(r => r ? {total: r.total_sampled, buckets: {easy: (r.buckets?.page_easy||[]).length}} : 'null'));
-                const totalSampledPages = allSampledCounts.easy + allSampledCounts.medium + allSampledCounts.hard;
-                const ts = allTierSummary;
-
-                // 从各批次的 partition_stats 计算估算的全量 easy/medium/hard 总数
-                let estEasy = 0, estMed = 0, estHard = 0;
-                let allPartitionStats = {};
-                // 收集所有批次的 partition_stats 并合并
-                for (const r of results) {
-                    if (r && r.partition_stats) {
-                        for (const [name, ps] of Object.entries(r.partition_stats)) {
-                            if (!allPartitionStats[name]) allPartitionStats[name] = ps;
-                            else {
-                                allPartitionStats[name].actual_size = (allPartitionStats[name].actual_size || 0) + (ps.actual_size || 0);
-                                allPartitionStats[name].easy_ratio = ps.easy_ratio || 0;
-                                allPartitionStats[name].medium_ratio = ps.medium_ratio || 0;
-                                allPartitionStats[name].hard_ratio = ps.hard_ratio || 0;
-                            }
-                        }
-                    }
-                }
-                for (const ps of Object.values(allPartitionStats)) {
-                    const sz = ps.actual_size || 0;
-                    estEasy += Math.round(sz * (ps.easy_ratio || 0));
-                    estMed += Math.round(sz * (ps.medium_ratio || 0));
-                    estHard += Math.round(sz * (ps.hard_ratio || 0));
-                }
-
-                const easyPct = estEasy > 0 ? (allSampledCounts.easy / estEasy * 100).toFixed(1) : '0';
-                const medPct = estMed > 0 ? (allSampledCounts.medium / estMed * 100).toFixed(1) : '0';
-                const hardPct = estHard > 0 ? (allSampledCounts.hard / estHard * 100).toFixed(1) : '0';
-
-                const blockCounts = {easy: 0, medium: 0, hard: 0};
-                const tierPageMap = {};
-                const cls = window._pageCmcvClassification;
-                if (cls) {
-                    for (const [sid, details] of Object.entries(cls.allBlockDetails)) {
-                        const pageTier = (Array.isArray(details) && details.length > 0 && details[0]._tier) || 'easy';
-                        blockCounts[pageTier] += details.length;
-                        tierPageMap[sid] = pageTier;
-                    }
-                }
-
-                // 存储抽样结果供重复点击使用
-                // 收集所有抽样的 sample_ids
-                const sampledIds = [];
-                for (const r of results) {
-                    if (r && r.buckets) {
-                        for (const ids of Object.values(r.buckets)) {
-                            safePushAll(sampledIds, ids);
-                        }
-                    }
-                }
-
-                window._pageCmcvSampling = { allSampledCounts, estEasy, estMed, estHard, easyPct, medPct, hardPct, blockCounts, sampledIds };
-
-                // 重建完整显示（分类 + 抽样）
-                const clsData = window._pageCmcvClassification || {};
-                const clsTs = clsData.allTierCounts || {};
-                const clsBlockCounts = cls.blockCounts || {};
-                const totalPages = (clsTs.easy || 0) + (clsTs.medium || 0) + (clsTs.hard || 0);
-                const totalSampledNow = allSampledCounts.easy + allSampledCounts.medium + allSampledCounts.hard;
-
-                const statsDiv = document.getElementById('diff-stats');
-                statsDiv.innerHTML = `
-                        <div class="col-span-3 text-sm text-gray-600 mb-2">
-                            基于 <strong>多模型 OCR</strong> 的 block 级一致性分析
-                        </div>
-                        <div class="col-span-3 text-xs text-gray-500 mb-3 border-b pb-2">
-                            <strong>CMCV 分类结果</strong>：共 ${totalPages} 页（${totalSampledNow} 个 block）
-                        </div>
-                        <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
-                            <div class="text-xs text-green-600">Easy</div>
-                            <div class="text-xl font-bold text-green-800">${clsTs.easy || 0} 页</div>
-                            <div class="text-xs text-gray-400">${clsBlockCounts.easy || 0} blocks</div>
-                        </div>
-                        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
-                            <div class="text-xs text-yellow-600">Medium</div>
-                            <div class="text-xl font-bold text-yellow-800">${clsTs.medium || 0} 页</div>
-                            <div class="text-xs text-gray-400">${clsBlockCounts.medium || 0} blocks</div>
-                        </div>
-                        <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
-                            <div class="text-xs text-red-600">Hard</div>
-                            <div class="text-xl font-bold text-red-800">${clsTs.hard || 0} 页</div>
-                            <div class="text-xs text-gray-400">${clsBlockCounts.hard || 0} blocks</div>
-                        </div>
-                        <div class="col-span-3 text-xs text-gray-500 mt-3 mb-2 border-b pb-2">
-                            <strong>按分区抽样结果</strong>：按 easy:${easyRatio}% medium:${mediumRatio}% hard:${hardRatio}% 从各分区抽样
-                        </div>
-                        <div class="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
-                            <div class="text-xs text-green-600">Easy</div>
-                            <div class="text-xl font-bold text-green-800">${allSampledCounts.easy} 页</div>
-                            <div class="text-xs text-gray-400">估算 ${estEasy.toLocaleString()} 页 · ${easyPct}%</div>
-                        </div>
-                        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-center">
-                            <div class="text-xs text-yellow-600">Medium</div>
-                            <div class="text-xl font-bold text-yellow-800">${allSampledCounts.medium} 页</div>
-                            <div class="text-xs text-gray-400">估算 ${estMed.toLocaleString()} 页 · ${medPct}%</div>
-                        </div>
-                        <div class="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
-                            <div class="text-xs text-red-600">Hard</div>
-                            <div class="text-xl font-bold text-red-800">${allSampledCounts.hard} 页</div>
-                            <div class="text-xs text-gray-400">估算 ${estHard.toLocaleString()} 页 · ${hardPct}%</div>
-                        </div>`;
-                document.getElementById('btn-page-cmcv-layout').classList.remove('hidden');
-            }).finally(() => {
-                btn.disabled = false;
-                btn.textContent = '按比例抽样';
-                progressDiv.classList.add('hidden');
-            });
-        });
-
-        // Page CMCV layout 按钮：对按比例抽样结果运行 pp-layout 并写入 text/formula/table.lance
-        document.addEventListener('click', function(e) {
-            if (e.target.id !== 'btn-page-cmcv-layout') return;
-            if (e.target.disabled) return;
-            const sampling = window._pageCmcvSampling;
-            if (!sampling || !sampling.sampledIds || sampling.sampledIds.length === 0) {
-                showToast('请先运行按比例抽样', 'warning'); return;
-            }
-
-            // 确定目标批次
-            const sourceId = selSource.value;
-            const batchId = selBatch.value;
-            let targets = [];
-            if (batchId && sourceId) {
-                targets = [{source_id: sourceId, batch_id: batchId}];
-            } else if (batchId) {
-                targets = [{source_id: '', batch_id: batchId}];
-            } else if (sourceId) {
-                targets = batchData.filter(b => b.source_id === sourceId).map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            } else {
-                targets = batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            }
-            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
-
-            const sampledIds = sampling.sampledIds;
-            const btn = e.target;
-            btn.disabled = true;
-            btn.textContent = `Layout 启动中 (0/${targets.length})...`;
-
-            // 渲染进度条到 diff-detail 区域
-            const diffDetail = document.getElementById('diff-detail');
-            const totalIds = sampledIds.length;
-            const statusDiv = document.createElement('div');
-            statusDiv.className = 'mb-2 text-sm';
-            statusDiv.innerHTML = `<span class="text-gray-600">对 <strong>${totalIds.toLocaleString()}</strong> 个抽样页面运行 pp-layout...</span>`;
-            diffDetail.appendChild(statusDiv);
-
-            const progressBarOuter = document.createElement('div');
-            progressBarOuter.className = 'w-full bg-gray-200 rounded-full h-4 mb-2';
-            progressBarOuter.innerHTML = `<div id="layout-progress-bar" class="bg-indigo-600 h-4 rounded-full transition-all" style="width: 0%"></div>`;
-            diffDetail.appendChild(progressBarOuter);
-
-            const progressText = document.createElement('div');
-            progressText.className = 'text-xs text-gray-500 mb-2';
-            progressText.id = 'layout-progress-text';
-            progressText.textContent = '等待启动...';
-            diffDetail.appendChild(progressText);
-
-            let done = 0;
-            targets.forEach(t => {
-                fetch('/api/layout-batch', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        source_id: t.source_id, batch_id: t.batch_id,
-                        sample_ids: sampledIds, write_lance: true
-                    }),
-                })
-                .then(r => r.json())
-                .then(data => {
+            Request.get(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/sample/${encodeURIComponent(sampleId)}/image`)
+                .then(r => {
+                    const data = r.ok ? r.data : null;
                     done++;
                     btn.textContent = `Layout 启动中 (${done}/${targets.length})...`;
                     if (data.task_id) pollLayoutBatchWithProgress(data.task_id, btn, totalIds);
@@ -1953,8 +1758,8 @@
                         const current = prog.current || 0;
                         const total = prog.total || totalIds;
                         const pct = total > 0 ? Math.round(current / total * 100) : 0;
-                        const bar = document.getElementById('layout-progress-bar');
-                        const txt = document.getElementById('layout-progress-text');
+                        const bar = DOM.layout.progressBar;
+                        const txt = DOM.layout.progressText;
                         if (bar) bar.style.width = pct + '%';
                         if (txt) txt.textContent = `${current.toLocaleString()} / ${total.toLocaleString()}（${pct}%）`;
                         if (data.status === 'completed' || data.status === 'failed') {
@@ -1977,15 +1782,15 @@
         }
 
         function renderDiffSummary(data) {
-            if (data !== bucketSampleData) {
-                console.warn('[renderDiffSummary] SKIP: data !== bucketSampleData', data.total_sampled, 'vs', bucketSampleData?.total_sampled);
+            if (data !== Store.bucket.sample) {
+                console.warn('[renderDiffSummary] SKIP: data !== Store.bucket.sample', data.total_sampled, 'vs', Store.bucket.sample?.total_sampled);
                 return;
             }
             console.log('[renderDiffSummary] RENDER:', data.strategy, 'total_sampled:', data.total_sampled, 'partition_tiers:', data.partition_tiers);
-            document.getElementById('diff-empty').classList.add('hidden');
-            document.getElementById('diff-summary').classList.remove('hidden');
-            const statsDiv = document.getElementById('diff-stats');
-            const detailDiv = document.getElementById('diff-detail');
+            DOM.pageCmcv.empty.classList.add('hidden');
+            DOM.pageCmcv.summary.classList.remove('hidden');
+            const statsDiv = DOM.pageCmcv.stats;
+            const detailDiv = DOM.pageCmcv.detail;
             const ratios = data.ratios || {};
             const totalSampled = data.total_sampled || 0;
             const bucketCount = data.bucket_count || 0;
@@ -2028,7 +1833,7 @@
 
             // 显示缓存时间戳
             if (data.cached_at) {
-                const tsEl = document.getElementById('diff-cache-time');
+                const tsEl = DOM.pageCmcv.cacheTime;
                 if (tsEl) tsEl.textContent = `缓存时间: ${data.cached_at}`;
             }
 
@@ -2048,26 +1853,173 @@
             }
         }
 
+        // ── 难度桶抽样 ──────────────────────────────────────────────────────
+        async function loadCachedBucketSamples(sourceId, batchId) {
+            let url = `/api/bucket-summary/${encodeURIComponent(sourceId)}`;
+            if (batchId) url += `/${encodeURIComponent(batchId)}`;
+            console.log('[loadCachedBucketSamples]', url);
+            const v = Request.begin('bucket');
+            try {
+                const r = await Request.get(url);
+                if (Request.stale('bucket', v)) return;
+                const data = r.ok ? r.data : null;
+                console.log('[loadCachedBucketSamples] response:', data ? `total=${data.total_sampled}` : 'null');
+                DOM.bucket.results.classList.add('hidden');
+                DOM.bucket.tabContent.innerHTML = '';
+                DOM.bucket.pagination.classList.add('hidden');
+
+                if (!data || !data.bucket_sizes) {
+                    DOM.bucket.empty.textContent = '点击「重新抽样」开始抽样';
+                    DOM.bucket.empty.classList.remove('hidden');
+                    DOM.bucket.summary.classList.add('hidden');
+                    DOM.bucket.buttons.runLayout.classList.add('hidden');
+                    DOM.bucket.buttons.pageCmcvSample.classList.add('hidden');
+                    DOM.bucket.buttons.pageCmcvLayout.classList.add('hidden');
+                    Store.bucket.sample = null;
+                    return;
+                }
+                if (data.error) {
+                    DOM.bucket.empty.textContent = data.error;
+                    DOM.bucket.empty.classList.remove('hidden');
+                    DOM.bucket.summary.classList.add('hidden');
+                    Store.bucket.sample = null;
+                    return;
+                }
+                const hasData = (data.bucket_sizes && Object.keys(data.bucket_sizes).length > 0) || (data.batch_info && data.batch_info.length > 0) || (data.total_sampled > 0);
+                if (!hasData) {
+                    DOM.bucket.empty.textContent = '点击「重新抽样」开始抽样';
+                    DOM.bucket.empty.classList.remove('hidden');
+                    DOM.bucket.summary.classList.add('hidden');
+                    DOM.bucket.buttons.runLayout.classList.add('hidden');
+                    DOM.bucket.buttons.pageCmcvSample.classList.add('hidden');
+                    DOM.bucket.buttons.pageCmcvLayout.classList.add('hidden');
+                    Store.bucket.sample = null;
+                    return;
+                }
+                Store.bucket.sample = data;
+                if (data.tier_summary && !data.partition_tiers) {
+                    data.partition_tiers = {};
+                    for (const [t, info] of Object.entries(data.tier_summary)) {
+                        data.partition_tiers[t] = info.blocks || 0;
+                    }
+                }
+                DOM.bucket.count.value = data.count_per_bucket || 10;
+                try {
+                    renderBucketSummary(data);
+                    renderBucketResults(data);
+                } catch(e) {
+                    console.error('[renderBucketSummary] error:', e);
+                }
+                DOM.bucket.buttons.runLayout.classList.remove('hidden');
+                updateOcrBatchSelect();
+                loadLayoutResults(sourceId, batchId);
+                restorePageCmcvDisplay(data);
+            } catch (err) {
+                if (err.message !== 'aborted') {
+                    console.error('[loadCachedBucketSamples] error:', err);
+                }
+            }
+        }
+
+        DOM.bucket.buttons.sample.addEventListener('click', async function() {
+            const sourceId = DOM.selection.source.value;
+            const batchId = DOM.selection.batch.value;
+            const count = parseInt(DOM.bucket.count.value) || 10;
+
+            let targets = [];
+            if (batchId) {
+                const b = Store.batchData.find(b => b.batch_id === batchId);
+                if (b) targets.push(b);
+            } else if (sourceId) {
+                targets = Store.batchData.filter(b => b.source_id === sourceId);
+            } else {
+                targets = [...Store.batchData];
+            }
+            if (targets.length === 0) { showToast('无可用批次', 'warning'); return; }
+
+            const btn = this;
+            btn.disabled = true;
+            btn.textContent = `抽样中 (0/${targets.length})...`;
+
+            let done = 0;
+            const promises = targets.map(async b => {
+                const v = Request.begin('bucket-sample');
+                try {
+                    const r = await Request.get(`/api/bucket-samples/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}?count=${count}&force=true`);
+                    if (Request.stale('bucket-sample', v)) return null;
+                    done++;
+                    btn.textContent = `抽样中 (${done}/${targets.length})...`;
+                    return r.ok ? r.data : null;
+                } catch (err) {
+                    done++;
+                    console.error(`[${b.batch_id}] 抽样失败:`, err);
+                    return null;
+                }
+            });
+
+            const results = await Promise.all(promises);
+            let allBuckets = {};
+            let allBucketSizes = {};
+            let totalSampled = 0;
+            let totalCount = 0;
+            results.forEach((data, i) => {
+                if (!data) return;
+                for (const [k, v] of Object.entries(data.buckets || {})) {
+                    if (Array.isArray(v)) v.forEach(s => { if (typeof s === 'object') { s._source_id = targets[i].source_id; s._batch_id = targets[i].batch_id; } });
+                    allBuckets[k] = v;
+                }
+                for (const [k, v] of Object.entries(data.bucket_sizes || {})) allBucketSizes[k] = v;
+                totalSampled += data.total_sampled || 0;
+                totalCount = data.count_per_bucket || count;
+            });
+            const batchInfo = [];
+            results.forEach((data, i) => {
+                if (data && data.total_sampled > 0) {
+                    batchInfo.push({
+                        source_id: targets[i].source_id,
+                        batch_id: targets[i].batch_id,
+                        total_sampled: data.total_sampled || 0,
+                    });
+                }
+            });
+            Store.bucket.sample = {
+                source_id: sourceId || 'all',
+                batch_id: batchId || '',
+                count_per_bucket: totalCount,
+                bucket_count: Object.keys(allBucketSizes).length,
+                bucket_sizes: allBucketSizes,
+                total_sampled: totalSampled,
+                buckets: allBuckets,
+                batch_info: batchInfo,
+            };
+            renderBucketSummary(Store.bucket.sample);
+            renderBucketResults(Store.bucket.sample);
+            DOM.bucket.buttons.runLayout.classList.remove('hidden');
+            updateOcrBatchSelect();
+            clearOldOcrTasks(sourceId, batchId);
+            btn.disabled = false;
+            btn.textContent = '重新抽样';
+        });
+
         // 页面加载后读取抽样配置默认值（从统一缓存读取，不触发重新抽样）
-        (function() {
-            const sid = selSource.value || (batchData.length > 0 ? batchData[0].source_id : '');
-            const bid = selBatch.value || (batchData.length > 0 ? batchData[0].batch_id : '');
+        (async function() {
+            const sid = DOM.selection.source.value || (Store.batchData.length > 0 ? Store.batchData[0].source_id : '');
+            const bid = DOM.selection.batch.value || (Store.batchData.length > 0 ? Store.batchData[0].batch_id : '');
             if (!sid || !bid) return;
-            fetch(`/api/bucket-summary/${sid}/${bid}`)
-                .then(r => r.ok ? r.json() : null)
-                .then(data => {
-                    if (data && data.ratios) {
-                        document.getElementById('ratio-easy').value = data.ratios.easy || 0.5;
-                        document.getElementById('ratio-medium').value = data.ratios.medium || 1.0;
-                        document.getElementById('ratio-hard').value = data.ratios.hard || 2.0;
-                    }
-                    if (data && data.base_count) {
-                        document.getElementById('bucket-count').value = data.base_count;
-                    } else if (data && data.count_per_bucket) {
-                        document.getElementById('bucket-count').value = data.count_per_bucket;
-                    }
-                })
-                .catch(() => {});
+            try {
+                const r = await Request.get(`/api/bucket-summary/${sid}/${bid}`);
+                const data = r.ok ? r.data : null;
+                if (data && data.ratios) {
+                    DOM.pageCmcv.ratios.easy.value = data.ratios.easy || 0.5;
+                    DOM.pageCmcv.ratios.medium.value = data.ratios.medium || 1.0;
+                    DOM.pageCmcv.ratios.hard.value = data.ratios.hard || 2.0;
+                }
+                if (data && data.base_count) {
+                    DOM.bucket.count.value = data.base_count;
+                } else if (data && data.count_per_bucket) {
+                    DOM.bucket.count.value = data.count_per_bucket;
+                }
+            } catch {}
         })();
 
         const TIER_COLORS = {
@@ -2080,9 +2032,9 @@
 
         function renderBucketSummary(data) {
             console.log('[renderBucketSummary] called, total_sampled:', data.total_sampled, 'batch_info:', data.batch_info?.length, 'buckets:', Object.keys(data.buckets||{}).length, 'bucket_count:', data.bucket_count);
-            document.getElementById('bucket-empty').classList.add('hidden');
-            document.getElementById('bucket-summary').classList.remove('hidden');
-            document.getElementById('bucket-results').classList.remove('hidden');
+            DOM.bucket.empty.classList.add('hidden');
+            DOM.bucket.summary.classList.remove('hidden');
+            DOM.bucket.results.classList.remove('hidden');
 
             // 不自动切换 Tab，只在当前 Tab 内渲染
             const isDiff = data.strategy === 'difficulty_aware' || data.strategy === 'element_cluster' || data.strategy === 'page_cmcv';
@@ -2092,8 +2044,8 @@
             if (isDiff) {
                 return;
             }
-            document.getElementById('bucket-summary').classList.remove('hidden');
-            const statsDiv = document.getElementById('bucket-stats');
+            DOM.bucket.summary.classList.remove('hidden');
+            const statsDiv = DOM.bucket.stats;
             const totalSampled = data.total_sampled || 0;
 
             // 汇总 partition_tiers（支持单批次和全部批次）
@@ -2160,17 +2112,17 @@
 
             // 显示缓存时间戳
             if (data.cached_at) {
-                const tsDiv = document.getElementById('bucket-cache-time');
+                const tsDiv = DOM.bucket.cacheTime;
                 if (tsDiv) tsDiv.textContent = `缓存时间: ${data.cached_at}`;
             }
         }
 
         function renderBucketResults(data) {
-            const container = document.getElementById('bucket-results');
+            const container = DOM.bucket.results;
             const tiers = Object.keys(data.buckets || {});
             container.classList.remove('hidden');
             if (tiers.length === 0) {
-                document.getElementById('bucket-tab-content').innerHTML = '<div class="text-gray-400 text-sm">点击「重新抽样」获取样本数据</div>';
+                DOM.bucket.tabContent.innerHTML = '<div class="text-gray-400 text-sm">点击「重新抽样」获取样本数据</div>';
                 return;
             }
 
@@ -2221,30 +2173,30 @@
                             <button class="smnext px-2 py-1 text-xs bg-gray-100 rounded disabled:opacity-50" ${page>=totalPages-1?'disabled':''}>&gt;</button>
                         </div>`;
                     }
-                    document.getElementById('bucket-detail').innerHTML = shtml;
+                    DOM.bucket.detail.innerHTML = shtml;
                     const prevBtn = document.querySelector('.smprev');
                     const nextBtn = document.querySelector('.smnext');
                     if (prevBtn) prevBtn.onclick = () => { if (page > 0) { page--; renderSamples(); } };
                     if (nextBtn) nextBtn.onclick = () => { if (page < totalPages - 1) { page++; renderSamples(); } };
                 }
 
-                document.getElementById('bucket-tab-content').innerHTML = html;
-                document.getElementById('bucket-detail') || document.getElementById('bucket-tab-content').insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>');
+                DOM.bucket.tabContent.innerHTML = html;
+                DOM.bucket.detail || DOM.bucket.tabContent.insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>');
                 document.getElementById('part-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showPartition(); } };
                 document.getElementById('part-next').onclick = () => { if (currentIdx < tiers.length - 1) { currentIdx++; showPartition(); } };
                 renderSamples();
             }
 
             // 需要 detail 容器
-            if (!document.getElementById('bucket-detail')) {
-                document.getElementById('bucket-tab-content').innerHTML = '<div id="bucket-detail"></div>';
+            if (!DOM.bucket.detail) {
+                DOM.bucket.tabContent.innerHTML = '<div id="bucket-detail"></div>';
             }
             showPartition();
             setTabBadge('bucket', '✅');
         }
 
         function renderBucketTabContent(data, tier) {
-            const contentDiv = document.getElementById('bucket-tab-content');
+            const contentDiv = DOM.bucket.tabContent;
             const rawSamples = data.buckets[tier] || [];
             const partSize = (data.bucket_sizes || {})[tier] || 0;
             if (rawSamples.length === 0) { contentDiv.innerHTML = '<div class="text-gray-400 text-sm">该分区无抽样结果</div>'; return; }
@@ -2295,17 +2247,17 @@
         }
 
         // ── 运行 pp-layout ──────────────────────────────────────────────────
-        document.getElementById('btn-run-layout').addEventListener('click', function() {
-            console.log('[layout] btn clicked, bucketSampleData:', bucketSampleData ? `total=${bucketSampleData.total_sampled}, batch_info=${bucketSampleData.batch_info?.length}` : 'null');
-            if (!bucketSampleData) { showToast('请先抽样', 'warning'); return; }
+        DOM.bucket.buttons.runLayout.addEventListener('click', function() {
+            console.log('[layout] btn clicked, Store.bucket.sample:', Store.bucket.sample ? `total=${Store.bucket.sample.total_sampled}, batch_info=${Store.bucket.sample.batch_info?.length}` : 'null');
+            if (!Store.bucket.sample) { showToast('请先抽样', 'warning'); return; }
 
             // 确定要处理的批次
-            const batchInfo = bucketSampleData.batch_info || [];
+            const batchInfo = Store.bucket.sample.batch_info || [];
             let targets = [];
             if (batchInfo.length > 0) {
                 targets = batchInfo.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            } else if (bucketSampleData.source_id && bucketSampleData.source_id !== 'all') {
-                targets = [{source_id: bucketSampleData.source_id, batch_id: bucketSampleData.batch_id}];
+            } else if (Store.bucket.sample.source_id && Store.bucket.sample.source_id !== 'all') {
+                targets = [{source_id: Store.bucket.sample.source_id, batch_id: Store.bucket.sample.batch_id}];
             } else {
                 // 全部批次：发单个请求，服务端遍历
                 targets = [{source_id: 'all', batch_id: ''}];
@@ -2315,21 +2267,18 @@
             const btn = this;
             btn.disabled = true;
             btn.textContent = `启动中 (0/${targets.length})...`;
-            const progressDiv = document.getElementById('layout-progress');
-            progressDiv.classList.remove('hidden');
-            document.getElementById('layout-task-list').innerHTML = '';
+            DOM.layout.progress.classList.remove('hidden');
+            DOM.layout.taskList.innerHTML = '';
 
             let done = 0;
             targets.forEach(t => {
                 const url = '/api/layout-batch';
-                const body = JSON.stringify({ source_id: t.source_id, batch_id: t.batch_id, write_lance: false });
+                const body = { source_id: t.source_id, batch_id: t.batch_id, write_lance: false };
                 console.log('[layout] POST', url, body);
-                fetch(url, {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: body,
-                })
-                .then(r => r.json())
-                .then(data => {
+                Request.post(url, body)
+                .then(r => {
+                    if (!r.ok) throw new Error(r.error);
+                    const data = r.data;
                     done++;
                     btn.textContent = `启动中 (${done}/${targets.length})...`;
                     // 单个任务返回 task_id，全部批次返回 task_ids
@@ -2347,8 +2296,8 @@
 
         function pollLayoutBatch(taskId, total, btn) {
             // 使用 PollManager 替代独立 setInterval（二期优化 T2）
-            const listDiv = document.getElementById('layout-task-list');
-            document.getElementById('layout-progress').classList.remove('hidden');
+            const listDiv = DOM.layout.taskList;
+            DOM.layout.progress.classList.remove('hidden');
 
             // 创建该任务的独立进度条
             let taskEl = document.getElementById('layout-' + taskId);
@@ -2375,101 +2324,97 @@
                     </div>`;
                 },
                 onComplete(task) {
-                    const sid = bucketSampleData?.source_id;
-                    const bid = bucketSampleData?.batch_id;
+                    const sid = Store.bucket.sample?.source_id;
+                    const bid = Store.bucket.sample?.batch_id;
                     if (sid) loadLayoutResults(sid, bid);
                     setTabBadge('bucket', '✅');
                 }
             });
         }
 
-        function loadLayoutResults(sourceId, batchId) {
+        async function loadLayoutResults(sourceId, batchId) {
             // 确定要查询的批次
             let queryTargets = [];
             if (batchId) {
                 queryTargets = [{source_id: sourceId, batch_id: batchId}];
             } else if (sourceId && sourceId !== 'all') {
-                queryTargets = batchData.filter(b => b.source_id === sourceId);
+                queryTargets = Store.batchData.filter(b => b.source_id === sourceId);
             } else {
-                queryTargets = (bucketSampleData?.batch_info || []).map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-                if (!queryTargets.length) queryTargets = batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+                queryTargets = (Store.bucket.sample?.batch_info || []).map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+                if (!queryTargets.length) queryTargets = Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
             }
             if (!queryTargets.length) return;
 
             // 并发查询所有批次的 layout 结果
-            const promises = queryTargets.map(t =>
-                fetch(`/api/layout-batch/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}/results`)
-                    .then(r => r.json())
-                    .catch(() => ({results: []}))
-            );
-
-            Promise.all(promises).then(resultsList => {
-                // 合并所有批次的结果
-                const resultMap = {};
-                resultsList.forEach(data => {
-                    (data.results || []).forEach(r => { resultMap[r.sample_id] = r; });
-                });
-
-                if (!Object.keys(resultMap).length) return;
-
-                // 合并到 bucketSampleData
-                if (bucketSampleData && bucketSampleData.buckets) {
-                    for (const tier of Object.keys(bucketSampleData.buckets || {})) {
-                        bucketSampleData.buckets[tier].forEach(s => {
-                            const lr = resultMap[s.sample_id];
-                            if (lr) { s._layout_blocks = lr.blocks; s._layout_block_count = lr.block_count; }
-                        });
-                    }
-                    // 刷新分区显示（重新渲染全部导航，layout 数据已合并到 bucketSampleData）
-                    renderBucketResults(bucketSampleData);
-                }
+            const promises = queryTargets.map(async t => {
+                try {
+                    const r = await Request.get(`/api/layout-batch/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}/results`);
+                    return r.ok ? r.data : {results: []};
+                } catch { return {results: []}; }
             });
+
+            const resultsList = await Promise.all(promises);
+            // 合并所有批次的结果
+            const resultMap = {};
+            resultsList.forEach(data => {
+                (data.results || []).forEach(r => { resultMap[r.sample_id] = r; });
+            });
+
+            if (!Object.keys(resultMap).length) return;
+
+            // 合并到 Store.bucket.sample
+            if (Store.bucket.sample && Store.bucket.sample.buckets) {
+                for (const tier of Object.keys(Store.bucket.sample.buckets || {})) {
+                    Store.bucket.sample.buckets[tier].forEach(s => {
+                        const lr = resultMap[s.sample_id];
+                        if (lr) { s._layout_blocks = lr.blocks; s._layout_block_count = lr.block_count; }
+                    });
+                }
+                // 刷新分区显示（重新渲染全部导航，layout 数据已合并到 Store.bucket.sample）
+                renderBucketResults(Store.bucket.sample);
+            }
         }
 
         // ── Layout 单样本预览弹窗 ──────────────────────────────────────────
-        function viewLayoutSingle(sourceId, batchId, sampleId) {
-            const modal = document.getElementById('layout-modal');
-            const body = document.getElementById('layout-modal-body');
-            document.getElementById('layout-modal-title').textContent = `Layout 预览 - ${sampleId}`;
-            body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
-            modal.classList.remove('hidden');
+        async function viewLayoutSingle(sourceId, batchId, sampleId) {
+            DOM.layout.modal.el;
+            DOM.layout.modal.body.innerHTML = '<div class="text-gray-400 text-center">加载中...</div>';
+            DOM.layout.modal.title.textContent = `Layout 预览 - ${sampleId}`;
+            DOM.layout.modal.el.classList.remove('hidden');
 
-            function doFetch(sid, bid) {
-                return fetch('/api/layout-preview', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({source_id: sid, batch_id: bid, sample_ids: [sampleId]}),
-                }).then(r => r.json()).catch(() => null);
+            async function doFetch(sid, bid) {
+                const r = await Request.post('/api/layout-preview', {source_id: sid, batch_id: bid, sample_ids: [sampleId]});
+                return r.ok ? r.data : null;
             }
 
-            let fetchPromise;
-            if (sourceId && sourceId !== 'all' && batchId) {
-                fetchPromise = doFetch(sourceId, batchId);
-            } else {
-                const bi = bucketSampleData?.batch_info || [];
-                if (bi.length > 0) {
-                    fetchPromise = Promise.all(bi.map(b => doFetch(b.source_id, b.batch_id)))
-                        .then(results => {
-                            for (const r of results) {
-                                if (r && r.results && r.results.length > 0 && !r.results[0].error) return r;
-                            }
-                            return results[0] || {results: [{error: '未找到该样本'}]};
-                        });
-                } else if (sourceId && sourceId !== 'all') {
-                    fetchPromise = doFetch(sourceId, '');
+            try {
+                let data;
+                if (sourceId && sourceId !== 'all' && batchId) {
+                    data = await doFetch(sourceId, batchId);
                 } else {
-                    fetchPromise = Promise.resolve({results: [{error: '无批次信息，请选择具体批次'}]});
+                    const bi = Store.bucket.sample?.batch_info || [];
+                    if (bi.length > 0) {
+                        const results = await Promise.all(bi.map(b => doFetch(b.source_id, b.batch_id)));
+                        data = null;
+                        for (const r of results) {
+                            if (r && r.results && r.results.length > 0 && !r.results[0].error) { data = r; break; }
+                        }
+                        data = data || results[0] || {results: [{error: '未找到该样本'}]};
+                    } else if (sourceId && sourceId !== 'all') {
+                        data = await doFetch(sourceId, '');
+                    } else {
+                        data = {results: [{error: '无批次信息，请选择具体批次'}]};
+                    }
                 }
-            }
-
-            fetchPromise.then(data => {
                 const result = (data.results || [])[0] || {};
                 if (result.error) {
-                    body.innerHTML = `<div class="text-red-500 text-center">${result.error}</div>`;
+                    DOM.layout.modal.body.innerHTML = `<div class="text-red-500 text-center">${result.error}</div>`;
                     return;
                 }
-                renderLayoutPreview(body, result.image_url, result.blocks || [], sampleId);
-            }).catch(err => { body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`; });
+                renderLayoutPreview(DOM.layout.modal.body, result.image_url, result.blocks || [], sampleId);
+            } catch (err) {
+                DOM.layout.modal.body.innerHTML = `<div class="text-red-500 text-center">加载失败: ${err.message}</div>`;
+            }
         }
 
         const BLOCK_COLORS = {
@@ -2526,12 +2471,13 @@
             img.src = imageBase64;
         }
 
-        document.getElementById('layout-modal-close').addEventListener('click', () => document.getElementById('layout-modal').classList.add('hidden'));
-        document.getElementById('layout-modal').addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
+        DOM.layout.modal.close.addEventListener('click', () => DOM.layout.modal.el.classList.add('hidden'));
+        DOM.layout.modal.el.addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
 
         // ── 三模型 OCR（独立运行，断点续跑）──────────────────────────────────
         const OCR_MODELS = ['paddleocr', 'glm_ocr', 'self_ocr'];
-        const ocrIntervals = {};
+        // Store.pageOcr.intervals → Store.pageOcr.intervals (Phase 1 migration)
+        Store.pageOcr.intervals = {};
 
         // 清除旧的 OCR 进度显示
         function clearOldOcrTasks(sourceId, batchId) {
@@ -2539,27 +2485,27 @@
                 const tasksDiv = document.getElementById(`${model}-tasks`);
                 if (tasksDiv) tasksDiv.innerHTML = '';
                 // 清除所有相关 PollManager 订阅
-                for (const [tid, active] of Object.entries(ocrIntervals)) {
+                for (const [tid, active] of Object.entries(Store.pageOcr.intervals)) {
                     if (tid.includes(sourceId) || tid.includes(batchId)) {
                         PollManager.unsubscribe(tid);
-                        delete ocrIntervals[tid];
+                        delete Store.pageOcr.intervals[tid];
                     }
                 }
             }
         }
 
-        function updateOcrBatchSelect() {
-            const container = document.getElementById('ocr-batch-select');
-            const sourceId = selSource.value;
-            const batchId = selBatch.value;
+        async function updateOcrBatchSelect() {
+            const container = DOM.pageOcr.batchSelect;
+            const sourceId = DOM.selection.source.value;
+            const batchId = DOM.selection.batch.value;
             // 选了具体批次就只显示那个，否则显示当前源的全部批次
             let filtered;
             if (batchId) {
-                filtered = batchData.filter(b => b.batch_id === batchId && (!sourceId || b.source_id === sourceId));
+                filtered = Store.batchData.filter(b => b.batch_id === batchId && (!sourceId || b.source_id === sourceId));
             } else if (sourceId) {
-                filtered = batchData.filter(b => b.source_id === sourceId);
+                filtered = Store.batchData.filter(b => b.source_id === sourceId);
             } else {
-                filtered = batchData;
+                filtered = Store.batchData;
             }
             if (!filtered.length) {
                 container.innerHTML = '<div class="text-gray-400">无批次</div>';
@@ -2569,13 +2515,9 @@
 
             // 使用批量接口一次获取所有抽样状态
             const targets = filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
-            fetch('/api/bucket-samples-batch', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(targets),
-            })
-            .then(r => r.ok ? r.json() : ({}))
-            .then(cacheData => {
+            try {
+                const r = await Request.post('/api/bucket-samples-batch', targets);
+                const cacheData = r.ok ? r.data : {};
                 let html = '';
                 filtered.forEach(b => {
                     const key = `${b.source_id}/${b.batch_id}`;
@@ -2593,10 +2535,9 @@
                     </label>`;
                 });
                 container.innerHTML = html;
-            })
-            .catch(() => {
+            } catch {
                 container.innerHTML = '<div class="text-red-400">加载失败</div>';
-            });
+            }
         }
 
         function getSelectedOcrBatches() {
@@ -2621,28 +2562,17 @@
                 if (tasksDiv) tasksDiv.innerHTML = '';
 
                 // 为每个批次启动独立的 OCR 任务
-                let started = 0;
-                selectedBatches.forEach(b => {
-                    fetch(`/api/ocr/${encodeURIComponent(b.source_id)}?model=${model}&batch_id=${encodeURIComponent(b.batch_id)}&resume=true`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                    })
-                    .then(r => r.json())
-                    .then(data => {
-                        started++;
-                        if (data.task_id) pollOcrModel(model, data.task_id, null);
-                        if (started >= selectedBatches.length) {
-                            btn.textContent = '运行';
-                        }
-                    })
-                    .catch(err => {
-                        started++;
+                const v = Request.begin('ocr-run');
+                Promise.all(selectedBatches.map(async b => {
+                    try {
+                        const r = await Request.post(`/api/ocr/${encodeURIComponent(b.source_id)}?model=${model}&batch_id=${encodeURIComponent(b.batch_id)}&resume=true`);
+                        if (Request.stale('ocr-run', v)) return;
+                        if (!r.ok) throw new Error(r.error);
+                        if (r.data.task_id) pollOcrModel(model, r.data.task_id, null);
+                    } catch (err) {
                         console.error('[OCR] 启动失败:', err);
-                        if (started >= selectedBatches.length) {
-                            btn.textContent = '运行';
-                        }
-                    });
-                });
+                    }
+                })).then(() => { btn.textContent = '运行'; });
             });
         });
 
@@ -2653,9 +2583,7 @@
                 const bid = getBatchId();
                 if (!src) { showToast('请先选择数据源', 'warning'); return; }
                 const url = bid ? `/api/stop/${encodeURIComponent(src)}?batch_id=${encodeURIComponent(bid)}` : `/api/stop/${encodeURIComponent(src)}`;
-                fetch(url, {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                }).catch(() => {});
+                Request.post(url);
             });
         });
 
@@ -2674,24 +2602,17 @@
                     });
                 }
 
-                let started = 0;
-                selectedBatches.forEach(b => {
-                    fetch(`/api/ocr/${encodeURIComponent(b.source_id)}?model=${model}&batch_id=${encodeURIComponent(b.batch_id)}&resume=false`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                    })
-                    .then(r => r.json())
-                    .then(data => {
-                        started++;
-                        if (data.task_id) pollOcrModel(model, data.task_id, null);
-                        if (started >= selectedBatches.length) this.textContent = '重跑';
-                    })
-                    .catch(err => {
-                        started++;
+                const v = Request.begin('ocr-rerun');
+                Promise.all(selectedBatches.map(async b => {
+                    try {
+                        const r = await Request.post(`/api/ocr/${encodeURIComponent(b.source_id)}?model=${model}&batch_id=${encodeURIComponent(b.batch_id)}&resume=false`);
+                        if (Request.stale('ocr-rerun', v)) return;
+                        if (!r.ok) throw new Error(r.error);
+                        if (r.data.task_id) pollOcrModel(model, r.data.task_id, null);
+                    } catch (err) {
                         console.error('[OCR] 重跑失败:', err);
-                        if (started >= selectedBatches.length) this.textContent = '重跑';
-                    });
-                });
+                    }
+                })).then(() => { this.textContent = '重跑'; });
             });
         });
 
@@ -2726,12 +2647,12 @@
                         
                         // running 状态订阅轮询
                         if (task.status === 'running') {
-                            if (!ocrIntervals[tid]) {
-                                ocrIntervals[tid] = true;
+                            if (!Store.pageOcr.intervals[tid]) {
+                                Store.pageOcr.intervals[tid] = true;
                                 PollManager.subscribe(tid, {
                                     onProgress(t) { renderTaskBar(model, tid, t, {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500'); },
-                                    onComplete(t) { delete ocrIntervals[tid]; checkAllOcrDone(); setTabBadge('ocr', '✅'); },
-                                    onFail(t) { delete ocrIntervals[tid]; }
+                                    onComplete(t) { delete Store.pageOcr.intervals[tid]; checkAllOcrDone(); setTabBadge('ocr', '✅'); },
+                                    onFail(t) { delete Store.pageOcr.intervals[tid]; }
                                 });
                             }
                         }
@@ -2745,7 +2666,7 @@
             // 使用 PollManager 替代独立 setInterval（二期优化 T3）
             const tasksDiv = document.getElementById(`${model}-tasks`);
             // 清除旧的轮询（如果存在）
-            if (ocrIntervals[taskId]) { PollManager.unsubscribe(taskId); delete ocrIntervals[taskId]; }
+            if (Store.pageOcr.intervals[taskId]) { PollManager.unsubscribe(taskId); delete Store.pageOcr.intervals[taskId]; }
 
             const barColor = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500';
 
@@ -2761,21 +2682,18 @@
                 }
 
                 // running 状态，订阅 PollManager
-                ocrIntervals[taskId] = true;  // 标记为活跃
+                Store.pageOcr.intervals[taskId] = true;  // 标记为活跃
                 PollManager.subscribe(taskId, {
                     onProgress(task) {
                         renderTaskBar(model, taskId, task, barColor);
                     },
                     onComplete(task) {
-                        delete ocrIntervals[taskId];
+                        delete Store.pageOcr.intervals[taskId];
                         checkAllOcrDone();
                         setTabBadge('ocr', '✅');
                         // 显示提示，让用户点击按钮查看结果
-                        const statusEl = document.getElementById('ocr-compare-status');
-                        if (statusEl) {
-                            statusEl.textContent = '✅ OCR 完成，请点击"查看三模型对比结果"按钮';
-                            statusEl.className = 'text-sm text-green-600';
-                        }
+                        DOM.pageOcr.compareStatus.textContent = '✅ OCR 完成，请点击"查看三模型对比结果"按钮';
+                        DOM.pageOcr.compareStatus.className = 'text-sm text-green-600';
                         // 加载已有的 CMCV 结果
                         const allTasks = task._rawTasks || {};
                         for (const [tid, t] of Object.entries(allTasks)) {
@@ -2789,7 +2707,7 @@
                         }
                     },
                     onFail(task) {
-                        delete ocrIntervals[taskId];
+                        delete Store.pageOcr.intervals[taskId];
                         renderTaskBar(model, taskId, task, barColor);
                     }
                 });
@@ -2882,13 +2800,13 @@
                     }
                 }
                 if (anyDone) {
-                    document.getElementById('btn-run-cmcv').classList.remove('hidden');
+                    DOM.elementCmcv.buttons.run.classList.remove('hidden');
                     setTabBadge('ocr', '✅');
                 }
             }).catch(() => {});
         }
 
-        function loadOcrResults(sourceId, batchId) {
+        async function loadOcrResults(sourceId, batchId) {
             if (!sourceId || !batchId) {
                 const batches = getSelectedOcrBatches();
                 if (batches.length === 0) {
@@ -2900,22 +2818,17 @@
             }
 
             // 显示加载状态
-            const statusEl = document.getElementById('ocr-compare-status');
-            if (statusEl) {
-                statusEl.textContent = '加载中...';
-                statusEl.className = 'text-sm text-blue-500';
-            }
+            DOM.pageOcr.compareStatus.textContent = '加载中...';
+            DOM.pageOcr.compareStatus.className = 'text-sm text-blue-500';
 
             // 从 API 获取最新的 Page OCR 结果（bucket_samples.json）
-            fetch(`/api/bucket-samples/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}?force=false`)
-                .then(r => r.json())
-                .then(data => {
+            try {
+                const r = await Request.get(`/api/bucket-samples/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}?force=false`);
+                const data = r.ok ? r.data : null;
                     if (!data || !data.buckets) {
                         console.log('[loadOcrResults] No OCR data available');
-                        if (statusEl) {
-                            statusEl.textContent = '暂无 OCR 数据，请先运行三模型 OCR';
-                            statusEl.className = 'text-sm text-gray-500';
-                        }
+                        DOM.pageOcr.compareStatus.textContent = '暂无 OCR 数据，请先运行三模型 OCR';
+                        DOM.pageOcr.compareStatus.className = 'text-sm text-gray-500';
                         return;
                     }
                     
@@ -2933,14 +2846,12 @@
                         }
                     }
                     if (pages.length > 0) {
-                        document.getElementById('ocr-empty').classList.add('hidden');
-                        document.getElementById('ocr-results').classList.remove('hidden');
-                        document.getElementById('ocr-total-blocks').textContent = totalBlocks;
-                        document.getElementById('ocr-total-samples').textContent = pages.length;
-                        if (statusEl) {
-                            statusEl.textContent = `✅ 已加载 ${pages.length} 页，${totalBlocks} 个 block`;
-                            statusEl.className = 'text-sm text-green-600';
-                        }
+                        DOM.pageOcr.empty.classList.add('hidden');
+                        DOM.pageOcr.results.classList.remove('hidden');
+                        DOM.pageOcr.totals.blocks.textContent = totalBlocks;
+                        DOM.pageOcr.totals.samples.textContent = pages.length;
+                        DOM.pageOcr.compareStatus.textContent = `✅ 已加载 ${pages.length} 页，${totalBlocks} 个 block`;
+                        DOM.pageOcr.compareStatus.className = 'text-sm text-green-600';
 
                         let currentIdx = 0;
                         function showSample() {
@@ -2965,26 +2876,25 @@
                                 </div>`;
                             });
                             html += '</div>';
-                            document.getElementById('ocr-sample-list').innerHTML = html;
-                            document.getElementById('ocr-page-info').textContent = `${currentIdx + 1} / ${pages.length}`;
-                            document.getElementById('ocr-prev').disabled = currentIdx <= 0;
-                            document.getElementById('ocr-next').disabled = currentIdx >= pages.length - 1;
+                            DOM.pageOcr.sampleList.innerHTML = html;
+                            DOM.pageOcr.nav.pageInfo.textContent = `${currentIdx + 1} / ${pages.length}`;
+                            DOM.pageOcr.nav.prev.disabled = currentIdx <= 0;
+                            DOM.pageOcr.nav.next.disabled = currentIdx >= pages.length - 1;
                         }
 
-                        document.getElementById('ocr-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showSample(); } };
-                        document.getElementById('ocr-next').onclick = () => { if (currentIdx < pages.length - 1) { currentIdx++; showSample(); } };
+                        DOM.pageOcr.nav.prev.onclick = () => { if (currentIdx > 0) { currentIdx--; showSample(); } };
+                        DOM.pageOcr.nav.next.onclick = () => { if (currentIdx < pages.length - 1) { currentIdx++; showSample(); } };
                         showSample();
                     } else {
-                        document.getElementById('ocr-empty').textContent = '暂无 OCR 结果，请先运行三模型 OCR';
-                        document.getElementById('ocr-empty').classList.remove('hidden');
-                        document.getElementById('ocr-results').classList.add('hidden');
+                        DOM.pageOcr.empty.textContent = '暂无 OCR 结果，请先运行三模型 OCR';
+                        DOM.pageOcr.empty.classList.remove('hidden');
+                        DOM.pageOcr.results.classList.add('hidden');
                     }
-                })
-                .catch(err => console.error('[loadOcrResults] Error:', err));
+            } catch (err) { console.error('[loadOcrResults] Error:', err); }
         }
 
         // CMCV
-        document.getElementById('btn-run-cmcv').addEventListener('click', function() {
+        DOM.elementCmcv.buttons.run.addEventListener('click', function() {
             const batches = getSelectedOcrBatches();
             if (batches.length === 0) { showToast('请勾选已 OCR 的批次', 'warning'); return; }
             const btn = this;
@@ -2992,59 +2902,26 @@
             btn.textContent = '一致性比较中...';
 
             // 在 paddleocr-tasks 区域显示 CMCV 进度
-            const tasksDiv = document.getElementById('paddleocr-tasks');
+            const tasksDiv = DOM.pageOcr.paddleOcrTasks;
 
-            let done = 0;
-            batches.forEach(b => {
-                fetch('/api/cmcv/' + b.source_id + '?batch_id=' + b.batch_id, { method: 'POST' })
-                    .then(r => r.json())
-                    .then(data => {
-                        done++;
-                        const taskId = data.task_id || `cmcv_${b.source_id}_${b.batch_id}`;
-                        // 使用 PollManager 统一轮询（减少 /api/progress 请求）
-                        PollManager.subscribe(taskId, {
-                            onProgress(task) {
-                                btn.textContent = `CMCV ${task.message || task.pct + '%'}`;
-                            },
-                            onComplete(task) {
-                                btn.textContent = 'CMCV 完成';
-                                btn.disabled = false;
-                                loadOcrResults();
-                            },
-                            onFail(task) {
-                                btn.textContent = 'CMCV 失败';
-                                btn.disabled = false;
-                            }
-                        });
-                    })
-                    .catch(err => {
-                        done++;
-                        console.error('[CMCV] failed:', err);
-                        if (done >= batches.length) { btn.disabled = false; btn.textContent = '运行 CMCV'; }
-                    });
+            const v = Request.begin('page-cmcv');
+            Promise.all(batches.map(async b => {
+                try {
+                    const r = await Request.post('/api/cmcv/' + b.source_id + '?batch_id=' + b.batch_id);
+                    if (Request.stale('page-cmcv', v)) return;
+                    if (!r.ok) throw new Error(r.error);
+                } catch (err) {
+                    console.error('[CMCV] failed:', err);
+                }
+            })).then(() => { btn.disabled = false; btn.textContent = '运行 CMCV'; });
             });
         });
 
         // ── pp-layout + 按类型拆分到 Lance（Page_CMCV 面板）──────────────────
-        let _splitPollTimer = null;   // 轮询定时器
-        let _splitTaskIds = [];       // 当前任务ID列表
-        let _splitTargets = [];       // 当前目标批次
-        let _splitStartTime = null;   // 任务开始时间
-        let _etaSamples = [];         // [{time, current}] 用于滚动 ETA
+        // _splitPollTimer/_splitTaskIds/_splitTargets/_splitStartTime/_etaSamples → Store.layout.* (Phase 1 migration)
 
-        // 停止所有 layout 任务
-        window.stopAllLayoutTasks = function() {
-            if (!_splitTargets.length) return;
-            _splitTargets.forEach(t => {
-                fetch(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`, {method:'POST'}).catch(()=>{});
-            });
-            // B6 fix: also clear the split poll timer so UI stops immediately
-            if (_splitPollTimer) { clearInterval(_splitPollTimer); _splitPollTimer = null; }
-        };
-        // 停止单个任务
-        window.stopLayoutTask = function(sourceId, batchId) {
-            fetch(`/api/stop/${encodeURIComponent(sourceId)}?batch_id=${encodeURIComponent(batchId)}`, {method:'POST'}).catch(()=>{});
-        };
+        // window.stopAllLayoutTasks/window.stopLayoutTask → LayoutActions.stopAll/stop (Phase 1 migration)
+        // LayoutActions.stopAll() and LayoutActions.stop() are defined in the infrastructure section
 
         function fmtTime(sec) {
             if (!sec && sec !== 0) return '';
@@ -3057,12 +2934,12 @@
         // 滚动 ETA：用最近 N 个采样点计算速度
         function calcETA(totalTotal, currentTotal) {
             const now = Date.now();
-            _etaSamples.push({time: now, current: currentTotal});
+            Store.layout.etaSamples.push({time: now, current: currentTotal});
             // 只保留最近 20 个采样点
-            if (_etaSamples.length > 20) _etaSamples.shift();
-            if (_etaSamples.length < 3) return '';
+            if (Store.layout.etaSamples.length > 20) Store.layout.etaSamples.shift();
+            if (Store.layout.etaSamples.length < 3) return '';
             // 取最早的采样点计算平均速度
-            const oldest = _etaSamples[0];
+            const oldest = Store.layout.etaSamples[0];
             const elapsed = (now - oldest.time) / 1000;
             const progressed = currentTotal - oldest.current;
             if (elapsed < 5 || progressed <= 0) return '';
@@ -3080,47 +2957,50 @@
         // === Element-Type Clusters (Element-Level card, input from Page_CMCV) ===
 
         function renderEcBatchSelect() {
-            const container = document.getElementById('ec-batch-select');
-            const sourceId = selSource.value;
-            const filtered = sourceId ? batchData.filter(b => b.source_id === sourceId) : batchData;
+            const container = DOM.elementCluster.batchSelect;
+            const sourceId = DOM.selection.source.value;
+            const filtered = sourceId ? Store.batchData.filter(b => b.source_id === sourceId) : Store.batchData;
 
             // 更新 source info — 异步获取 lance block 统计
-            document.getElementById('el-source-info').textContent = sourceId
-                ? `当前数据源: ${sourceId} — ${filtered.length} 个批次（加载 block 统计中...）`
-                : `全部 ${filtered.length} 个批次（加载 block 统计中...）`;
+                DOM.elementCluster.sourceInfo.textContent = sourceId
+                    ? `当前数据源: ${sourceId} — ${filtered.length} 个批次（加载 block 统计中...）`
+                    : `全部 ${filtered.length} 个批次（加载 block 统计中...）`;
 
             // 获取每个批次的 category-stats 汇总
-            const statsPromises = filtered.map(b =>
-                cachedFetch(`/api/category-stats/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`)
-                    .catch(() => null)
-            );
-            Promise.all(statsPromises).then(results => {
-                let totalText = 0, totalFormula = 0, totalTable = 0;
-                results.forEach(sr => {
-                    if (sr && sr.categories) {
-                        totalText += sr.categories.text?.count || 0;
-                        totalFormula += sr.categories.formula?.count || 0;
-                        totalTable += sr.categories.table?.count || 0;
-                    }
-                });
-                const total = totalText + totalFormula + totalTable;
-                const info = total > 0
-                    ? `${filtered.length} 个批次 | ${total.toLocaleString()} blocks (text:${totalText.toLocaleString()} formula:${totalFormula.toLocaleString()} table:${totalTable.toLocaleString()})`
-                    : `${filtered.length} 个批次 | 尚无 text/formula/table.lance（请先运行 pp-layout + 拆分）`;
-                document.getElementById('el-source-info').textContent = sourceId
-                    ? `当前数据源: ${sourceId} — ${info}`
-                    : info;
+            const v = Request.begin('ec-stats');
+            const statsPromises = filtered.map(async b => {
+                try {
+                    const r = await Request.cached(`/api/category-stats/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`);
+                    if (Request.stale('ec-stats', v)) return null;
+                    return r.ok ? r.data : null;
+                } catch { return null; }
             });
+            const results = await Promise.all(statsPromises);
+            let totalText = 0, totalFormula = 0, totalTable = 0;
+            results.forEach(sr => {
+                if (sr && sr.categories) {
+                    totalText += sr.categories.text?.count || 0;
+                    totalFormula += sr.categories.formula?.count || 0;
+                    totalTable += sr.categories.table?.count || 0;
+                }
+            });
+            const total = totalText + totalFormula + totalTable;
+            const info = total > 0
+                ? `${filtered.length} 个批次 | ${total.toLocaleString()} blocks (text:${totalText.toLocaleString()} formula:${totalFormula.toLocaleString()} table:${totalTable.toLocaleString()})`
+                : `${filtered.length} 个批次 | 尚无 text/formula/table.lance（请先运行 pp-layout + 拆分）`;
+            DOM.elementCluster.sourceInfo.textContent = sourceId
+                ? `当前数据源: ${sourceId} — ${info}`
+                : info;
 
             if (filtered.length === 0) {
                 container.innerHTML = '<div class="text-gray-400 text-xs">无可用批次</div>';
-                document.getElementById('btn-run-ec').classList.add('hidden');
+                DOM.elementCluster.buttons.run.classList.add('hidden');
                 return;
             }
 
             container.innerHTML = filtered.map(b => {
                 const key = `${b.source_id}/${b.batch_id}`;
-                const checked = ecSelectedBatches.has(key);
+                const checked = Store.elementCluster.selectedBatches.has(key);
                 return `
                     <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
                         <input type="checkbox" class="ec-batch-cb" data-key="${key}" data-source="${b.source_id}" data-batch="${b.batch_id}" ${checked?'checked':''}>
@@ -3132,8 +3012,8 @@
             container.querySelectorAll('.ec-batch-cb').forEach(cb => {
                 cb.addEventListener('change', function() {
                     const key = this.dataset.key;
-                    if (this.checked) ecSelectedBatches.add(key);
-                    else ecSelectedBatches.delete(key);
+                    if (this.checked) Store.elementCluster.selectedBatches.add(key);
+                    else Store.elementCluster.selectedBatches.delete(key);
                     renderEcBatchSelect();
                     updateEcButtonVisibility();
                 });
@@ -3141,28 +3021,28 @@
         }
 
         function updateEcButtonVisibility() {
-            const btn = document.getElementById('btn-run-ec');
-            if (ecSelectedBatches.size > 0) btn.classList.remove('hidden');
+            const btn = DOM.elementCluster.buttons.run;
+            if (Store.elementCluster.selectedBatches.size > 0) btn.classList.remove('hidden');
             else btn.classList.add('hidden');
         }
 
         // 数据源变化时重置 EC 选择
-        selSource.addEventListener('change', () => {
-            _ecPollCancelled = true;  // B5 fix: cancel any running EC poll
+        DOM.selection.source.addEventListener('change', () => {
+            Store.elementCluster.ecPollCancelled = true;  // B5 fix: cancel any running EC poll
             // B3 fix: clear all running CMCV polling via PollManager
             // (PollManager handles cleanup automatically when tasks complete)
-            ecSelectedBatches.clear();
+            Store.elementCluster.selectedBatches.clear();
             renderEcBatchSelect();
             updateEcButtonVisibility();
-            document.getElementById('ec-results').classList.add('hidden');
-            document.getElementById('ec-empty').classList.remove('hidden');
+            DOM.elementCluster.results.classList.add('hidden');
+            DOM.elementCluster.empty.classList.remove('hidden');
             // 尝试加载新数据源的聚类结果
-            const src = selSource.value;  // use selSource.value directly (empty = all sources)
+            const src = DOM.selection.source.value;  // use DOM.selection.source.value directly (empty = all sources)
             const bid = getBatchId();
             if (src && bid) {
                 loadEcResults(src, bid);
-            } else if (batchData.length > 0) {
-                const filtered = src ? batchData.filter(b => b.source_id === src) : batchData;
+            } else if (Store.batchData.length > 0) {
+                const filtered = src ? Store.batchData.filter(b => b.source_id === src) : Store.batchData;
                 const toFetch = filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                 if (toFetch.length > 0) loadEcResultsAggregated(toFetch);
             }
@@ -3173,46 +3053,44 @@
 
         // 页面加载时尝试加载已有聚类结果
         (function() {
-            const src = selSource.value;  // use selSource.value directly (empty = all sources)
+            const src = DOM.selection.source.value;  // use DOM.selection.source.value directly (empty = all sources)
             const bid = getBatchId();
             if (src && bid) {
                 loadEcResults(src, bid);
-            } else if (batchData.length > 0) {
+            } else if (Store.batchData.length > 0) {
                 // 没有选中具体批次或全部数据源 → 收集所有批次，聚合显示
-                const filtered = src ? batchData.filter(b => b.source_id === src) : batchData;
+                const filtered = src ? Store.batchData.filter(b => b.source_id === src) : Store.batchData;
                 const toFetch = filtered.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                 if (toFetch.length > 0) loadEcResultsAggregated(toFetch);
             }
         })();
 
-        document.getElementById('btn-run-ec').addEventListener('click', function() {
-            if (ecSelectedBatches.size === 0) { showToast('请选择批次', 'warning'); return; }
+        DOM.elementCluster.buttons.run.addEventListener('click', function() {
+            if (Store.elementCluster.selectedBatches.size === 0) { showToast('请选择批次', 'warning'); return; }
             const btn = this;
-            const maxK = parseInt(document.getElementById('ec-max-k').value) || 10;
-            const batches = [...ecSelectedBatches].map(key => {
+            const maxK = parseInt(DOM.elementCluster.maxK.value) || 10;
+            const batches = [...Store.elementCluster.selectedBatches].map(key => {
                 const [src, bid] = key.split('/');
                 return {source_id: src, batch_id: bid};
             });
             
             btn.disabled = true;
             btn.textContent = '运行中...';
-            const progressDiv = document.getElementById('ec-progress');
-            const progressMsg = document.getElementById('ec-progress-msg');
-            progressDiv.classList.remove('hidden');
-            document.getElementById('ec-empty').classList.add('hidden');
-            document.getElementById('ec-results').classList.add('hidden');
+            DOM.elementCluster.progress.container.classList.remove('hidden');
+            DOM.elementCluster.empty.classList.add('hidden');
+            DOM.elementCluster.results.classList.add('hidden');
 
             const total = batches.length;
             let _ecErrors = [];
 
-            function runBatch(idx) {
+            async function runBatch(idx) {
                 if (idx >= batches.length) {
                     btn.disabled = false;
                     btn.textContent = '运行 Element-Type 聚类';
-                    progressDiv.classList.add('hidden');
+                    DOM.elementCluster.progress.container.classList.add('hidden');
                     if (_ecErrors.length > 0) {
-                        document.getElementById('ec-empty').classList.remove('hidden');
-                        document.getElementById('ec-empty').innerHTML =
+                        DOM.elementCluster.empty.classList.remove('hidden');
+                        DOM.elementCluster.empty.innerHTML =
                             `<span class="text-red-600">${_ecErrors.join('<br>')}</span>`;
                     }
                     invalidateCache('/api/element-clusters/');
@@ -3220,44 +3098,43 @@
                     return;
                 }
                 const b = batches[idx];
-                progressMsg.innerHTML = `<b>聚类 ${b.batch_id}</b> (${idx+1}/${total}) — 启动中...`;
+                DOM.elementCluster.progress.msg.innerHTML = `<b>聚类 ${b.batch_id}</b> (${idx+1}/${total}) — 启动中...`;
+                const v = Request.begin('ec-cluster');
                 
-                fetch(`/api/element-clusters/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({max_k: maxK})
-                }).then(r => {
-                    if (!r.ok) return r.json().then(d => { throw new Error(d.detail || '启动失败'); });
-                    return r.json();
-                }).then(data => {
+                try {
+                    const r = await Request.post(`/api/element-clusters/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`, {max_k: maxK});
+                    if (Request.stale('ec-cluster', v)) return;
+                    if (!r.ok) throw new Error(r.error || '启动失败');
                     pollEcStatus(b.source_id, b.batch_id, idx, total, (err) => {
                         if (err) _ecErrors.push(`${b.batch_id}: ${err}`);
                         runBatch(idx + 1);
                     });
-                }).catch(e => {
+                } catch (e) {
                     console.error('Element-Type 聚类失败:', e);
                     _ecErrors.push(`${b.batch_id}: ${e.message}`);
                     runBatch(idx + 1);
-                });
+                }
             }
 
             function pollEcStatus(src, bid, batchIdx, batchTotal, onDone) {
-                _ecPollCancelled = false;
-                const check = () => {
-                    if (_ecPollCancelled) { onDone('cancelled'); return; }
-                    fetch(`/api/element-clusters/${encodeURIComponent(src)}/${encodeURIComponent(bid)}`).then(r => r.json()).then(data => {
+                Store.elementCluster.ecPollCancelled = false;
+                const check = async () => {
+                    if (Store.elementCluster.ecPollCancelled) { onDone('cancelled'); return; }
+                    try {
+                        const r = await Request.get(`/api/element-clusters/${encodeURIComponent(src)}/${encodeURIComponent(bid)}`);
+                        const data = r.ok ? r.data : null;
                         if (data.status === 'completed') {
                             const elapsed = data.elapsed_seconds || 0;
                             const elapsedStr = elapsed > 0 ? ` <span class="text-gray-500">(耗时 ${fmtTime(elapsed)})</span>` : '';
-                            progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — <span class="text-green-600">完成</span>${elapsedStr}`;
-                            const ecBar = document.getElementById('ec-progress-bar');
+                            DOM.elementCluster.progress.msg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — <span class="text-green-600">完成</span>${elapsedStr}`;
+                            const ecBar = DOM.elementCluster.progress.bar;
                             if (ecBar) ecBar.style.width = '100%';
                             onDone(null);
                         } else if (data.status === 'failed') {
-                            progressMsg.innerHTML = `<b>${bid}</b> — <span class="text-red-600">失败: ${data.message || '未知错误'}</span>`;
+                            DOM.elementCluster.progress.msg.innerHTML = `<b>${bid}</b> — <span class="text-red-600">失败: ${data.message || '未知错误'}</span>`;
                             onDone(data.message || '聚类失败');
                         } else if (data.status === 'stopped') {
-                            progressMsg.innerHTML = `<b>${bid}</b> — <span class="text-orange-600">已停止</span>`;
+                            DOM.elementCluster.progress.msg.innerHTML = `<b>${bid}</b> — <span class="text-orange-600">已停止</span>`;
                             onDone('已停止');
                         } else {
                             // running / pending — show detailed progress
@@ -3273,11 +3150,13 @@
                                 timeStr = `<span class="text-gray-500 ml-1">已运行 ${fmtTime(elapsed)}</span>`;
                             }
                             progressMsg.innerHTML = `<b>${bid}</b> (${batchIdx+1}/${batchTotal}) — ${data.message || '处理中'} <span class="text-gray-400">${pct}%</span>${timeStr}`;
-                            const ecBar = document.getElementById('ec-progress-bar');
+                            const ecBar = DOM.elementCluster.progress.bar;
                             if (ecBar) ecBar.style.width = pct + '%';
                             setTimeout(check, 3000);
                         }
-                    }).catch(() => setTimeout(check, 3000));
+                    } catch {
+                        setTimeout(check, 3000);
+                    }
                 };
                 setTimeout(check, 3000);
             }
@@ -3289,29 +3168,32 @@
             loadEcResultsAggregated([{source_id: src, batch_id: bid}]);
         }
 
-        function loadEcResultsAggregated(batchList) {
+        async function loadEcResultsAggregated(batchList) {
             if (!batchList || batchList.length === 0) return;
-            const fetches = batchList.map(b =>
-                cachedFetch(`/api/element-clusters/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`)
-                    .then(data => ({batch: b, data}))
-                    .catch(() => ({batch: b, data: null}))
-            );
-            Promise.all(fetches).then(entries => {
+            const v = Request.begin('ec-results');
+            const fetches = batchList.map(async b => {
+                try {
+                    const r = await Request.cached(`/api/element-clusters/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`);
+                    if (Request.stale('ec-results', v)) return {batch: b, data: null};
+                    return {batch: b, data: r.ok ? r.data : null};
+                } catch { return {batch: b, data: null}; }
+            });
+            const entries = await Promise.all(fetches);
                 // Filter to completed results only
                 const completed = entries.filter(e => e.data && e.data.status === 'completed' && e.data.result);
                 if (completed.length === 0) {
                     const anyFailed = entries.find(e => e.data && e.data.status === 'failed');
-                    document.getElementById('ec-results').classList.add('hidden');
-                    document.getElementById('ec-empty').classList.remove('hidden');
+                    DOM.elementCluster.results.classList.add('hidden');
+                    DOM.elementCluster.empty.classList.remove('hidden');
                     if (anyFailed) {
-                        document.getElementById('ec-empty').innerHTML = `<span class="text-red-600">聚类失败: ${anyFailed.data.message || '未知错误'}</span>`;
+                        DOM.elementCluster.empty.innerHTML = `<span class="text-red-600">聚类失败: ${anyFailed.data.message || '未知错误'}</span>`;
                     } else {
-                        document.getElementById('ec-empty').textContent = '未找到已完成的聚类结果';
+                        DOM.elementCluster.empty.textContent = '未找到已完成的聚类结果';
                     }
                     return;
                 }
-                document.getElementById('ec-results').classList.remove('hidden');
-                document.getElementById('ec-empty').classList.add('hidden');
+                DOM.elementCluster.results.classList.remove('hidden');
+                DOM.elementCluster.empty.classList.add('hidden');
 
                 // Aggregate across all completed batches
                 const multiBatch = completed.length > 1;
@@ -3352,53 +3234,50 @@
                     document.getElementById(`ec-${cat}-clusters`).innerHTML = allClusterHtmls.join('') || '<div class="text-xs text-gray-400">无数据</div>';
                 });
 
-                // Set _ecsBatches to ALL completed batches for per-cluster sampling
-                _ecsBatches = completed.map(e => ({source_id: e.batch.source_id, batch_id: e.batch.batch_id}));
-                document.getElementById('btn-run-ecs').classList.remove('hidden');
-                document.getElementById('ecs-empty').classList.remove('hidden');
-                document.getElementById('ecs-results').classList.add('hidden');
-            });
+                // Set Store.elementCluster.ecsBatches to ALL completed batches for per-cluster sampling
+                Store.elementCluster.ecsBatches = completed.map(e => ({source_id: e.batch.source_id, batch_id: e.batch.batch_id}));
+                DOM.elementSample.buttons.run.classList.remove('hidden');
+                DOM.elementSample.empty.classList.remove('hidden');
+                DOM.elementSample.results.classList.add('hidden');
         }
 
         // ── 每桶抽样 ──────────────────────────────────────────────────────
-        let _ecsBatches = [];  // [{source_id, batch_id}, ...] 由聚类完成后设置
+        // _ecsBatches → Store.elementCluster.ecsBatches (Phase 1 migration)
 
-        document.getElementById('btn-run-ecs').addEventListener('click', function() {
-            if (!_ecsBatches || _ecsBatches.length === 0) { showToast('请先完成 Element-Type 聚类', 'warning'); return; }
+        DOM.elementSample.buttons.run.addEventListener('click', function() {
+            if (!Store.elementCluster.ecsBatches || Store.elementCluster.ecsBatches.length === 0) { showToast('请先完成 Element-Type 聚类', 'warning'); return; }
             const btn = this;
-            const perCluster = parseInt(document.getElementById('ecs-per-cluster').value) || 5;
-            const progress = document.getElementById('ecs-progress');
-            const progressMsg = document.getElementById('ecs-progress-msg');
+            const perCluster = parseInt(DOM.elementSample.perCluster.value) || 5;
+            const progress = DOM.elementSample.progress.container;
+            const progressMsg = DOM.elementSample.progress.msg;
 
             btn.disabled = true;
             btn.textContent = '抽样中...';
             progress.classList.remove('hidden');
-            progressMsg.textContent = `每桶抽样 ${perCluster} 条/簇（${_ecsBatches.length} 个批次）...`;
-            document.getElementById('ecs-results').classList.add('hidden');
-            document.getElementById('ecs-empty').classList.add('hidden');
+            progressMsg.textContent = `每桶抽样 ${perCluster} 条/簇（${Store.elementCluster.ecsBatches.length} 个批次）...`;
+            DOM.elementSample.results.classList.add('hidden');
+            DOM.elementSample.empty.classList.add('hidden');
 
             // 对所有批次并行调用抽样 API，然后聚合结果
-            const samplingPromises = _ecsBatches.map(b =>
-                fetch(`/api/element-sample/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({per_cluster: perCluster}),
-                }).then(r => r.json()).then(data => ({batch: b, data}))
-            );
+            const v = Request.begin('ec-sample');
+            const samplingPromises = Store.elementCluster.ecsBatches.map(async b => {
+                const r = await Request.post(`/api/element-sample/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`, {per_cluster: perCluster});
+                if (Request.stale('ec-sample', v)) return {batch: b, data: {detail: 'cancelled'}};
+                return {batch: b, data: r.ok ? r.data : {detail: r.error}};
+            });
 
-            Promise.all(samplingPromises)
-            .then(results => {
-                progress.classList.add('hidden');
-                btn.disabled = false;
-                btn.textContent = '运行每桶抽样';
+            const results = await Promise.all(samplingPromises);
+            progress.classList.add('hidden');
+            btn.disabled = false;
+            btn.textContent = '运行每桶抽样';
 
-                // 检查是否有错误
-                const errors = results.filter(r => r.data.detail);
-                if (errors.length > 0 && errors.length === results.length) {
-                    document.getElementById('ecs-empty').classList.remove('hidden');
-                    document.getElementById('ecs-empty').textContent = errors[0].data.detail;
-                    return;
-                }
+            // 检查是否有错误
+            const errors = results.filter(r => r.data.detail);
+            if (errors.length > 0 && errors.length === results.length) {
+                DOM.elementSample.empty.classList.remove('hidden');
+                DOM.elementSample.empty.textContent = errors[0].data.detail;
+                return;
+            }
 
                 // 聚合所有批次的 summary
                 const aggSummary = {};
@@ -3420,10 +3299,10 @@
 
                 const totalSampled = aggSummary.text.sampled + aggSummary.formula.sampled + aggSummary.table.sampled;
 
-                document.getElementById('ecs-results').classList.remove('hidden');
-                document.getElementById('ecs-text-count').textContent = aggSummary.text.sampled.toLocaleString();
-                document.getElementById('ecs-formula-count').textContent = aggSummary.formula.sampled.toLocaleString();
-                document.getElementById('ecs-table-count').textContent = aggSummary.table.sampled.toLocaleString();
+                DOM.elementSample.results.classList.remove('hidden');
+                DOM.elementSample.counts.text.textContent = aggSummary.text.sampled.toLocaleString();
+                DOM.elementSample.counts.formula.textContent = aggSummary.formula.sampled.toLocaleString();
+                DOM.elementSample.counts.table.textContent = aggSummary.table.sampled.toLocaleString();
 
                 // 详细每桶信息（多批次时带批次标签）
                 let detailHtml = '';
@@ -3438,15 +3317,14 @@
                         detailHtml += `</div>`;
                     }
                 }
-                document.getElementById('ecs-detail').innerHTML = detailHtml;
-            })
-            .catch(e => {
-                progress.classList.add('hidden');
-                btn.disabled = false;
-                btn.textContent = '运行每桶抽样';
-                document.getElementById('ecs-empty').classList.remove('hidden');
-                document.getElementById('ecs-empty').textContent = `抽样失败: ${e.message}`;
-            });
+                DOM.elementSample.detail.innerHTML = detailHtml;
+        } catch (e) {
+            progress.classList.add('hidden');
+            btn.disabled = false;
+            btn.textContent = '运行每桶抽样';
+            DOM.elementSample.empty.classList.remove('hidden');
+            DOM.elementSample.empty.textContent = `抽样失败: ${e.message}`;
+        }
         });
 
         // 初始化
@@ -3544,7 +3422,7 @@
 
         function pollElementOcrModel(model, taskId) {
             const tasksDiv = document.getElementById(`eo-${model}-tasks`);
-            if (_eoIntervals[taskId]) { PollManager.unsubscribe(taskId); delete _eoIntervals[taskId]; }
+            if (Store.elementOcr.intervals[taskId]) { PollManager.unsubscribe(taskId); delete Store.elementOcr.intervals[taskId]; }
             const barColor = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'}[model] || 'bg-gray-500';
 
             fetch('/api/progress').then(r => r.json()).then(data => {
@@ -3552,18 +3430,18 @@
                 if (task) renderEoTaskBar(model, taskId, task, barColor);
             }).catch(() => {});
 
-            _eoIntervals[taskId] = true;
+            Store.elementOcr.intervals[taskId] = true;
             PollManager.subscribe(taskId, {
                 onProgress(task) {
                     renderEoTaskBar(model, taskId, task, barColor);
                 },
                 onComplete(task) {
-                    delete _eoIntervals[taskId];
+                    delete Store.elementOcr.intervals[taskId];
                     renderEoTaskBar(model, taskId, task, barColor);
                     setTabBadge('el-ocr', '✅');
                 },
                 onFail(task) {
-                    delete _eoIntervals[taskId];
+                    delete Store.elementOcr.intervals[taskId];
                     renderEoTaskBar(model, taskId, task, barColor);
                 }
             });
@@ -3576,12 +3454,12 @@
             // 选了具体批次 → 只跑那一个
             if (src && bid) return [{source_id: src, batch_id: bid}];
             // "全部批次" 或无选择 → 跑所有批次（跨数据源）
-            if (batchData.length > 0) {
-                return batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            if (Store.batchData.length > 0) {
+                return Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
             }
-            // batchData 为空 → 用 _ecsBatches（聚类后的批次列表）
-            if (_ecsBatches.length > 0) {
-                return _ecsBatches;
+            // Store.batchData 为空 → 用 Store.elementCluster.ecsBatches（聚类后的批次列表）
+            if (Store.elementCluster.ecsBatches.length > 0) {
+                return Store.elementCluster.ecsBatches;
             }
             return [];
         }
@@ -3594,27 +3472,18 @@
 
                 this.textContent = '启动中...';
                 const params = new URLSearchParams({model});
+                const v = Request.begin('eo-run');
 
-                let started = 0;
-                targets.forEach(t => {
-                    fetch(`/api/element-ocr/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?${params}`, {
-                        method: 'POST',
-                    })
-                    .then(r => {
-                        if (!r.ok) return r.text().then(txt => { throw new Error(`HTTP ${r.status}: ${txt.slice(0, 200)}`); });
-                        return r.json();
-                    })
-                    .then(data => {
-                        started++;
-                        if (data.task_id) pollElementOcrModel(model, data.task_id);
-                        if (started >= targets.length) btn.textContent = '运行';
-                    })
-                    .catch(err => {
-                        started++;
+                Promise.all(targets.map(async t => {
+                    try {
+                        const r = await Request.post(`/api/element-ocr/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?${params}`);
+                        if (Request.stale('eo-run', v)) return;
+                        if (!r.ok) throw new Error(r.error);
+                        if (r.data.task_id) pollElementOcrModel(model, r.data.task_id);
+                    } catch (err) {
                         console.error('[el-ocr] 启动失败:', err);
-                        if (started >= targets.length) btn.textContent = '运行';
-                    });
-                });
+                    }
+                })).then(() => { btn.textContent = '运行'; });
             });
         });
 
@@ -3623,9 +3492,7 @@
                 const model = this.dataset.model;
                 const targets = getEoTargets();
                 targets.forEach(t => {
-                    fetch(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`, {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                    }).catch(() => {});
+                    Request.post(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`);
                 });
             });
         });
@@ -3642,133 +3509,118 @@
 
                 this.textContent = '启动中...';
                 const params = new URLSearchParams({model, force: 'true'});
+                const v = Request.begin('eo-rerun');
 
-                let started = 0;
-                targets.forEach(t => {
-                    fetch(`/api/element-ocr/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?${params}`, {
-                        method: 'POST',
-                    })
-                    .then(r => {
-                        if (!r.ok) return r.text().then(txt => { throw new Error(`HTTP ${r.status}: ${txt.slice(0, 200)}`); });
-                        return r.json();
-                    })
-                    .then(data => {
-                        started++;
-                        if (data.task_id) pollElementOcrModel(model, data.task_id);
-                        if (started >= targets.length) btn.textContent = '重跑';
-                    })
-                    .catch(err => {
-                        started++;
+                Promise.all(targets.map(async t => {
+                    try {
+                        const r = await Request.post(`/api/element-ocr/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?${params}`);
+                        if (Request.stale('eo-rerun', v)) return;
+                        if (!r.ok) throw new Error(r.error);
+                        if (r.data.task_id) pollElementOcrModel(model, r.data.task_id);
+                    } catch (err) {
                         console.error('[el-ocr] 重跑启动失败:', err);
-                        if (started >= targets.length) btn.textContent = '重跑';
-                    });
+                    }
+                })).then(() => { btn.textContent = '重跑'; });
                 });
             });
         });
 
         // === Element CMCV ===
-        const ecmcvBtn = document.getElementById('btn-run-ecmcv');
-        const ecmcvProgress = document.getElementById('ecmcv-progress');
-        const ecmcvProgressMsg = document.getElementById('ecmcv-progress-msg');
-
         function showElemCmcvButton(show) {
-            ecmcvBtn.classList.toggle('hidden', !show);
-            ecmcvEmpty.classList.toggle('hidden', show);
+            DOM.elementCmcv.buttons.run.classList.toggle('hidden', !show);
+            DOM.elementCmcv.empty.classList.toggle('hidden', show);
         }
 
-        ecmcvBtn.addEventListener('click', async () => {
-            const src = _ecsBatches[0]?.source_id || getSourceId();
-            const bid = _ecsBatches[0]?.batch_id || getBatchId();
+        DOM.elementCmcv.buttons.run.addEventListener('click', async () => {
+            const src = Store.elementCluster.ecsBatches[0]?.source_id || getSourceId();
+            const bid = Store.elementCluster.ecsBatches[0]?.batch_id || getBatchId();
             if (!src || !bid) { showToast('请先完成 Element-Type 聚类，或选择数据源和批次', 'warning'); return; }
-            ecmcvBtn.disabled = true;
-            ecmcvProgress.classList.remove('hidden');
-            ecmcvProgressMsg.textContent = '启动 CMCV...';
+            DOM.elementCmcv.buttons.run.disabled = true;
+            DOM.elementCmcv.progress.container.classList.remove('hidden');
+            DOM.elementCmcv.progress.msg.textContent = '启动 CMCV...';
             try {
-                const resp = await fetch(`/api/cmcv/${src}?batch_id=${bid}`, {method: 'POST'});
-                const data = await resp.json();
+                const resp = await Request.post(`/api/cmcv/${src}?batch_id=${bid}`);
+                if (!resp.ok) throw new Error(resp.error);
+                const data = resp.data;
                 if (data.task_id) {
-                    const ecmcvBar = document.getElementById('ecmcv-progress-bar');
+                    const ecmcvBar = DOM.elementCmcv.progress.bar;
                     // 使用 TaskPoller 替代手动 setInterval
                     new TaskPoller(`/api/tasks/${data.task_id}`, {
                         onProgress: (d) => {
                             const prog = d.progress || {};
                             const pctVal = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
-                            ecmcvProgressMsg.textContent = `${d.message || '...'} (${pctVal}%)`;
+                            DOM.elementCmcv.progress.msg.textContent = `${d.message || '...'} (${pctVal}%)`;
                             ecmcvBar.style.width = `${pctVal}%`;
                         },
                         onComplete: () => {
-                            ecmcvProgress.classList.add('hidden');
+                            DOM.elementCmcv.progress.container.classList.add('hidden');
                             ecmcvBar.style.width = '0%';
-                            ecmcvBtn.disabled = false;
+                            DOM.elementCmcv.buttons.run.disabled = false;
                             loadElemCmcvResults(src, bid);
                         },
                         onFail: () => {
-                            ecmcvProgress.classList.add('hidden');
+                            DOM.elementCmcv.progress.container.classList.add('hidden');
                             ecmcvBar.style.width = '0%';
-                            ecmcvBtn.disabled = false;
+                            DOM.elementCmcv.buttons.run.disabled = false;
                         }
                     }, 3000).start();
                 }
             } catch (e) {
-                ecmcvProgress.classList.add('hidden');
-                ecmcvBtn.disabled = false;
+                DOM.elementCmcv.progress.container.classList.add('hidden');
+                DOM.elementCmcv.buttons.run.disabled = false;
                 showToast(`CMCV 启动失败: ${e.message}`, 'error');
             }
         });
 
         async function loadElemCmcvResults(optSrc, optBid) {
             try {
-                const src = optSrc || _ecsBatches[0]?.source_id || getSourceId();
-                const bid = optBid || _ecsBatches[0]?.batch_id || getBatchId();
+                const src = optSrc || Store.elementCluster.ecsBatches[0]?.source_id || getSourceId();
+                const bid = optBid || Store.elementCluster.ecsBatches[0]?.batch_id || getBatchId();
                 if (!src || !bid) return;
-                const resp = await fetch(`/api/cmcv/${src}/${bid}/results`);
-                const data = await resp.json();
-                if (data.status === 'not_found') return;
-                renderElemCmcvResults(data.tier_histogram, data.total_blocks, data.total_pages, `${src}/${bid}`);
+                const r = await Request.get(`/api/cmcv/${src}/${bid}/results`);
+                if (!r.ok || r.data.status === 'not_found') return;
+                renderElemCmcvResults(r.data.tier_histogram, r.data.total_blocks, r.data.total_pages, `${src}/${bid}`);
             } catch {}
         }
 
         function renderElemCmcvResults(hist, totalBlocks, totalPages, label) {
             hist = hist || {};
-            document.getElementById('ecmcv-easy').textContent = hist.easy || 0;
-            document.getElementById('ecmcv-medium').textContent = hist.medium || 0;
-            document.getElementById('ecmcv-hard').textContent = hist.hard || 0;
-            document.getElementById('ecmcv-detail').textContent = `${label} — ${totalBlocks || 0} blocks, ${totalPages || 0} pages`;
-            ecmcvResults.classList.remove('hidden');
-            ecmcvEmpty.classList.add('hidden');
+            DOM.elementCmcv.tiers.easy.textContent = hist.easy || 0;
+            DOM.elementCmcv.tiers.medium.textContent = hist.medium || 0;
+            DOM.elementCmcv.tiers.hard.textContent = hist.hard || 0;
+            DOM.elementCmcv.detail.textContent = `${label} — ${totalBlocks || 0} blocks, ${totalPages || 0} pages`;
+            DOM.elementCmcv.results.classList.remove('hidden');
+            DOM.elementCmcv.empty.classList.add('hidden');
             showElemDiffSampling(true);
         }
 
-        function loadElemCmcvResultsAggregated(targets) {
+        async function loadElemCmcvResultsAggregated(targets) {
             if (!targets || targets.length === 0) return;
-            const promises = targets.map(t =>
-                fetch(`/api/cmcv/${t.source_id}/${t.batch_id}/results`)
-                    .then(r => r.ok ? r.json() : null).catch(() => null)
-            );
-            Promise.all(promises).then(results => {
-                const valid = results.filter(r => r && r.tier_histogram);
-                if (valid.length === 0) return;
-                const aggHist = {easy: 0, medium: 0, hard: 0};
-                let totalBlocks = 0, totalPages = 0;
-                valid.forEach(d => {
-                    totalBlocks += d.total_blocks || 0;
-                    totalPages += d.total_pages || 0;
-                    for (const [k, v] of Object.entries(d.tier_histogram || {})) {
-                        if (aggHist[k] !== undefined) aggHist[k] += v;
-                    }
-                });
-                const label = targets.length > 1 ? `全部 ${targets.length} 批次` : `${targets[0].source_id}/${targets[0].batch_id}`;
-                renderElemCmcvResults(aggHist, totalBlocks, totalPages, label);
-                showElemCmcvButton(true);
-                document.getElementById('eo-empty')?.classList.add('hidden');
+            const promises = targets.map(async t => {
+                try {
+                    const r = await Request.get(`/api/cmcv/${t.source_id}/${t.batch_id}/results`);
+                    return r.ok ? r.data : null;
+                } catch { return null; }
             });
+            const results = await Promise.all(promises);
+            const valid = results.filter(r => r && r.tier_histogram);
+            if (valid.length === 0) return;
+            const aggHist = {easy: 0, medium: 0, hard: 0};
+            let totalBlocks = 0, totalPages = 0;
+            valid.forEach(d => {
+                totalBlocks += d.total_blocks || 0;
+                totalPages += d.total_pages || 0;
+                for (const [k, v] of Object.entries(d.tier_histogram || {})) {
+                    if (aggHist[k] !== undefined) aggHist[k] += v;
+                }
+            });
+            const label = targets.length > 1 ? `全部 ${targets.length} 批次` : `${targets[0].source_id}/${targets[0].batch_id}`;
+            renderElemCmcvResults(aggHist, totalBlocks, totalPages, label);
+            showElemCmcvButton(true);
+            DOM.elementOcr.empty?.classList.add('hidden');
         }
 
         // === Element Difficulty Sampling ===
-        const edsBtn = document.getElementById('btn-run-eds');
-        const edsResults = document.getElementById('eds-results');
-        const edsEmpty = document.getElementById('eds-empty');
-
         function renderDiffSamplingResult(ts, tierAgg, ratios) {
             let html = `<div class="font-medium mb-2">总计抽样: <b>${ts.toLocaleString()}</b> blocks</div>`;
             html += '<div class="grid grid-cols-3 gap-2">';
@@ -3783,28 +3635,28 @@
                 </div>`;
             }
             html += '</div>';
-            document.getElementById('eds-summary').innerHTML = html;
-            edsResults.classList.remove('hidden');
-            edsEmpty.classList.add('hidden');
+            DOM.pageCmcv.eds.summary.innerHTML = html;
+            DOM.pageCmcv.eds.results.classList.remove('hidden');
+            DOM.pageCmcv.eds.empty.classList.add('hidden');
         }
 
         function showElemDiffSampling(show) {
-            edsBtn.classList.toggle('hidden', !show);
-            edsEmpty.classList.toggle('hidden', show);
+            DOM.pageCmcv.buttons.runEds.classList.toggle('hidden', !show);
+            DOM.pageCmcv.eds.empty.classList.toggle('hidden', show);
         }
 
-        edsBtn.addEventListener('click', async () => {
+        DOM.pageCmcv.buttons.runEds.addEventListener('click', async () => {
             const targets = getEoTargets();
             if (targets.length === 0) { showToast('请先完成 Element-Type 聚类', 'warning'); return; }
-            edsBtn.disabled = true;
-            edsBtn.textContent = '抽样中...';
-            const easy = document.getElementById('eds-easy').value;
-            const medium = document.getElementById('eds-medium').value;
-            const hard = document.getElementById('eds-hard').value;
+            DOM.pageCmcv.buttons.runEds.disabled = true;
+            DOM.pageCmcv.buttons.runEds.textContent = '抽样中...';
+            const easy = DOM.pageCmcv.eds.easy.value;
+            const medium = DOM.pageCmcv.eds.medium.value;
+            const hard = DOM.pageCmcv.eds.hard.value;
             try {
                 const promises = targets.map(t =>
-                    fetch(`/api/bucket-samples-difficulty/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}&force=true`)
-                        .then(r => r.ok ? r.json() : null).catch(() => null)
+                    Request.get(`/api/bucket-samples-difficulty/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}&force=true`)
+                        .then(r => r.ok ? r.data : null).catch(() => null)
                 );
                 const results = await Promise.all(promises);
                 const valid = results.filter(r => r && r.total_sampled > 0);
@@ -3825,65 +3677,64 @@
             } catch (e) {
                 showToast(`抽样失败: ${e.message}`, 'error');
             } finally {
-                edsBtn.disabled = false;
-                edsBtn.textContent = '按难度抽样';
+                DOM.pageCmcv.buttons.runEds.disabled = false;
+                DOM.pageCmcv.buttons.runEds.textContent = '按难度抽样';
             }
         });
 
         // 当每桶抽样完成时，显示 OCR/CMCV 按钮
-        const origEcsHandler = document.getElementById('btn-run-ecs');
+        const origEcsHandler = DOM.elementSample.buttons.run;
         if (origEcsHandler) {
             const obs = new MutationObserver(() => {
-                const ecsRes = document.getElementById('ecs-results');
-                if (ecsRes && !ecsRes.classList.contains('hidden')) {
-                    document.getElementById('eo-empty')?.classList.add('hidden');
+                if (DOM.elementSample.results && !DOM.elementSample.results.classList.contains('hidden')) {
+                    DOM.elementOcr.empty?.classList.add('hidden');
                     showElemCmcvButton(true);
                 }
             });
-            const ecsResEl = document.getElementById('ecs-results');
-            if (ecsResEl) obs.observe(ecsResEl, {attributes: true, attributeFilter: ['class']});
+            if (DOM.elementSample.results) obs.observe(DOM.elementSample.results, {attributes: true, attributeFilter: ['class']});
         }
 
         // ── 页面加载时初始化 Element OCR / CMCV / 聚类已有状态 ──────────────
         // 加载已有 Per-Cluster Sampling 结果（从 element_samples.json）
-        function loadExistingEcsResults() {
-            const targets = batchData.length > 0
-                ? batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}))
+        async function loadExistingEcsResults() {
+            const targets = Store.batchData.length > 0
+                ? Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}))
                 : [];
             if (targets.length === 0) return;
-            Promise.all(targets.map(b =>
-                fetch(`/api/element-sample/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`)
-                    .then(r => r.ok ? r.json() : null).catch(() => null)
-            )).then(results => {
-                const completed = results.filter(r => r && r.status === 'completed' && r.total_sampled > 0);
-                if (completed.length === 0) return;
-                // 聚合
-                const agg = {};
-                for (const cat of ['text', 'formula', 'table']) {
-                    let sampled = 0, clusters = 0; const details = [];
-                    completed.forEach(r => {
-                        const s = r.summary?.[cat]; if (!s) return;
-                        sampled += s.sampled || 0; clusters += s.clusters || 0;
-                        (s.details || []).forEach(d => details.push(d));
-                    });
-                    agg[cat] = {sampled, clusters, details};
+            const results = await Promise.all(targets.map(async b => {
+                try {
+                    const r = await Request.get(`/api/element-sample/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`);
+                    return r.ok ? r.data : null;
+                } catch { return null; }
+            }));
+            const completed = results.filter(r => r && r.status === 'completed' && r.total_sampled > 0);
+            if (completed.length === 0) return;
+            // 聚合
+            const agg = {};
+            for (const cat of ['text', 'formula', 'table']) {
+                let sampled = 0, clusters = 0; const details = [];
+                completed.forEach(r => {
+                    const s = r.summary?.[cat]; if (!s) return;
+                    sampled += s.sampled || 0; clusters += s.clusters || 0;
+                    (s.details || []).forEach(d => details.push(d));
+                });
+                agg[cat] = {sampled, clusters, details};
+            }
+            DOM.elementSample.results?.classList.remove('hidden');
+            DOM.elementSample.empty?.classList.add('hidden');
+            DOM.elementSample.counts.text.textContent = agg.text.sampled.toLocaleString();
+            DOM.elementSample.counts.formula.textContent = agg.formula.sampled.toLocaleString();
+            DOM.elementSample.counts.table.textContent = agg.table.sampled.toLocaleString();
+            let html = '';
+            for (const cat of ['text', 'formula', 'table']) {
+                if (agg[cat].details.length > 0) {
+                    html += `<div class="mb-2"><b class="text-gray-700">${cat}</b>: `;
+                    html += agg[cat].details.map(d => `Cluster${d.cluster_id}: ${d.sampled}/${d.total}`).join(', ');
+                    html += `</div>`;
                 }
-                document.getElementById('ecs-results')?.classList.remove('hidden');
-                document.getElementById('ecs-empty')?.classList.add('hidden');
-                document.getElementById('ecs-text-count').textContent = agg.text.sampled.toLocaleString();
-                document.getElementById('ecs-formula-count').textContent = agg.formula.sampled.toLocaleString();
-                document.getElementById('ecs-table-count').textContent = agg.table.sampled.toLocaleString();
-                let html = '';
-                for (const cat of ['text', 'formula', 'table']) {
-                    if (agg[cat].details.length > 0) {
-                        html += `<div class="mb-2"><b class="text-gray-700">${cat}</b>: `;
-                        html += agg[cat].details.map(d => `Cluster${d.cluster_id}: ${d.sampled}/${d.total}`).join(', ');
-                        html += `</div>`;
-                    }
-                }
-                document.getElementById('ecs-detail').innerHTML = html;
-                setTabBadge('el-cluster', '✅');
-            });
+            }
+            DOM.elementSample.detail.innerHTML = html;
+            setTabBadge('el-cluster', '✅');
         }
 
         (function initAllElementState() {
@@ -3893,8 +3744,8 @@
                 const tasks = [];
 
                 // 1. Element Clustering
-                if (batchData.length > 0) {
-                    const toFetch = batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+                if (Store.batchData.length > 0) {
+                    const toFetch = Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                     tasks.push(loadEcResultsAggregated(toFetch).catch(() => {}));
                 }
 
@@ -3923,37 +3774,42 @@
                 );
 
                 // 3. Element CMCV
-                if (batchData.length > 0) {
-                    tasks.push(loadElemCmcvResultsAggregated(batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}))).catch(() => {}));
+                if (Store.batchData.length > 0) {
+                    tasks.push(loadElemCmcvResultsAggregated(Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}))).catch(() => {}));
                 }
 
                 // 4. Per-Cluster Sampling
                 tasks.push(loadExistingEcsResults().catch(() => {}));
 
                 // 5. Difficulty Sampling
-                if (batchData.length > 0) {
+                if (Store.batchData.length > 0) {
                     tasks.push(
-                        Promise.all(batchData.map(b =>
-                            fetch(`/api/bucket-samples-difficulty/${b.source_id}/${b.batch_id}?force=true`)
-                                .then(r => r.ok ? r.json() : null).catch(() => null)
-                        )).then(results => {
-                            const valid = results.filter(r => r && r.total_sampled > 0);
-                            if (valid.length > 0) {
-                                showElemDiffSampling(true);
-                                const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
-                                let ts = 0;
-                                valid.forEach(d => {
-                                    ts += d.total_sampled || 0;
-                                    for (const [k, v] of Object.entries(d.bucket_diff_stats || {})) {
-                                        const t = v.tier || 'medium';
-                                        if (!tierAgg[t]) continue;
-                                        tierAgg[t].sampled += v.sampled || 0;
-                                        tierAgg[t].total += v.total || 0;
-                                    }
-                                });
-                                renderDiffSamplingResult(ts, tierAgg, valid[0]?.ratios || {});
-                            }
-                        }).catch(() => {})
+                        (async () => {
+                            try {
+                                const results = await Promise.all(Store.batchData.map(async b => {
+                                    try {
+                                        const r = await Request.get(`/api/bucket-samples-difficulty/${b.source_id}/${b.batch_id}?force=true`);
+                                        return r.ok ? r.data : null;
+                                    } catch { return null; }
+                                }));
+                                const valid = results.filter(r => r && r.total_sampled > 0);
+                                if (valid.length > 0) {
+                                    showElemDiffSampling(true);
+                                    const tierAgg = {easy: {sampled: 0, total: 0}, medium: {sampled: 0, total: 0}, hard: {sampled: 0, total: 0}};
+                                    let ts = 0;
+                                    valid.forEach(d => {
+                                        ts += d.total_sampled || 0;
+                                        for (const [k, v] of Object.entries(d.bucket_diff_stats || {})) {
+                                            const t = v.tier || 'medium';
+                                            if (!tierAgg[t]) continue;
+                                            tierAgg[t].sampled += v.sampled || 0;
+                                            tierAgg[t].total += v.total || 0;
+                                        }
+                                    });
+                                    renderDiffSamplingResult(ts, tierAgg, valid[0]?.ratios || {});
+                                }
+                            } catch {}
+                        })()
                     );
                 }
 
@@ -3962,9 +3818,9 @@
                 const idxBid = getBatchId();
                 if (idxSrc && idxBid) {
                     tasks.push(loadIndexStats(idxSrc, idxBid).catch(() => {}));
-                } else if (idxSrc && batchData.length > 0) {
+                } else if (idxSrc && Store.batchData.length > 0) {
                     // 全部批次时加载第一个批次的索引统计
-                    const firstBatch = batchData.find(b => b.source_id === idxSrc);
+                    const firstBatch = Store.batchData.find(b => b.source_id === idxSrc);
                     if (firstBatch) tasks.push(loadIndexStats(idxSrc, firstBatch.batch_id).catch(() => {}));
                 }
 
