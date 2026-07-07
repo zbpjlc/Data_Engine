@@ -1253,6 +1253,7 @@
 
                 Store.bucket.sample = merged;
                 DOM.bucket.count.value = merged.count_per_bucket;
+                console.log('[loadAllCachedBuckets] DOM.bucket.summary:', !!DOM.bucket.summary, 'tabContent:', !!DOM.bucket.tabContent, 'stats:', !!DOM.bucket.stats);
                 renderBucketSummary(merged);
                 renderBucketResults(merged);
                 DOM.bucket.buttons.runLayout.classList.remove('hidden');
@@ -1261,7 +1262,7 @@
                 // 恢复 Page CMCV 缓存
                 const firstValid = valid[0];
                 if (firstValid) {
-                    restorePageCmcvDisplay(firstValid);
+                    try { restorePageCmcvDisplay(firstValid); } catch(e) { console.error('[restorePageCmcvDisplay]', e); }
                 }
             } catch (e) { 
                 if (e.name !== 'AbortError' && e.message !== 'aborted') {
@@ -1278,6 +1279,7 @@
         function restorePageCmcvDisplay(data) {
             const cmcvResult = data.page_cmcv;
             if (cmcvResult && cmcvResult.tier_summary) {
+                console.log('[restorePageCmcvDisplay] DOM.pageCmcv.stats:', !!DOM.pageCmcv.stats, 'detail:', !!DOM.pageCmcv.detail, 'empty:', !!DOM.pageCmcv.empty, 'summary:', !!DOM.pageCmcv.summary);
                 const tier_summary = cmcvResult.tier_summary || {};
                 const block_details = cmcvResult.block_details || {};
                 const allTierCounts = {easy: tier_summary.easy || 0, medium: tier_summary.medium || 0, hard: tier_summary.hard || 0};
@@ -1296,9 +1298,9 @@
                 const totalBlocks = blockCounts.easy + blockCounts.medium + blockCounts.hard;
                 Store.pageCmcv.classification = { allTierCounts, allBlockDetails: block_details, tierPageMap: {}, blockCounts, totalBlocks };
 
-                DOM.pageCmcv.empty.classList.add('hidden');
-                DOM.pageCmcv.summary.classList.remove('hidden');
-                DOM.pageCmcv.stats.innerHTML = `
+                if (DOM.pageCmcv.empty) DOM.pageCmcv.empty.classList.add('hidden');
+                if (DOM.pageCmcv.summary) DOM.pageCmcv.summary.classList.remove('hidden');
+                if (DOM.pageCmcv.stats) DOM.pageCmcv.stats.innerHTML = `
                     <div class="col-span-3 text-sm text-gray-600 mb-2">
                         基于 <strong>多模型 OCR</strong> 的 block 级一致性分析
                     </div>
@@ -1320,7 +1322,7 @@
                         <div class="text-xl font-bold text-red-800">${allTierCounts.hard}</div>
                         <div class="text-xs text-gray-400">${blockCounts.hard} blocks</div>
                     </div>`;
-                DOM.pageCmcv.detail.innerHTML = `
+                if (DOM.pageCmcv.detail) DOM.pageCmcv.detail.innerHTML = `
                     <div class="text-xs text-gray-400 mt-1">分类已缓存，可调整比例后点击「按比例抽样」</div>`;
                 DOM.bucket.buttons.pageCmcvSample.classList.remove('hidden');
             }
@@ -1347,8 +1349,9 @@
                 const ratios = sampleResult.ratios || {};
                 Store.pageCmcv.sampling = { allSampledCounts, estEasy, estMed, estHard, easyPct, medPct, hardPct, sampledIds, blockCounts: Store.pageCmcv.classification?.blockCounts || {easy:0, medium:0, hard:0} };
 
-                const existingStats = DOM.pageCmcv.stats.innerHTML;
-                DOM.pageCmcv.stats.innerHTML = existingStats + `
+                if (DOM.pageCmcv.stats) {
+                    const existingStats = DOM.pageCmcv.stats.innerHTML;
+                    DOM.pageCmcv.stats.innerHTML = existingStats + `
                     <div class="col-span-3 text-xs text-gray-500 mt-3 mb-2 border-b pb-2">
                         <strong>按分区抽样结果</strong>（缓存）：按 easy:${ratios.easy || 0}% medium:${ratios.medium || 0}% hard:${ratios.hard || 0}% 从各分区抽样
                     </div>
@@ -1367,6 +1370,7 @@
                         <div class="text-xl font-bold text-red-800">${allSampledCounts.hard.toLocaleString()} 页</div>
                         <div class="text-xs text-gray-400">估算 ${estHard.toLocaleString()} 页 · ${hardPct}%</div>
                     </div>`;
+                }
                 DOM.bucket.buttons.pageCmcvLayout.classList.remove('hidden');
             }
         }
@@ -2104,10 +2108,11 @@
 
         function renderBucketResults(data) {
             const container = DOM.bucket.results;
+            if (!container) { console.error('[renderBucketResults] DOM.bucket.results is null!'); return; }
             const tiers = Object.keys(data.buckets || {});
             container.classList.remove('hidden');
             if (tiers.length === 0) {
-                DOM.bucket.tabContent.innerHTML = '<div class="text-gray-400 text-sm">点击「重新抽样」获取样本数据</div>';
+                if (DOM.bucket.tabContent) DOM.bucket.tabContent.innerHTML = '<div class="text-gray-400 text-sm">点击「重新抽样」获取样本数据</div>';
                 return;
             }
 
@@ -2165,15 +2170,19 @@
                     if (nextBtn) nextBtn.onclick = () => { if (page < totalPages - 1) { page++; renderSamples(); } };
                 }
 
-                DOM.bucket.tabContent.innerHTML = html;
-                DOM.bucket.detail || DOM.bucket.tabContent.insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>');
-                document.getElementById('part-prev').onclick = () => { if (currentIdx > 0) { currentIdx--; showPartition(); } };
-                document.getElementById('part-next').onclick = () => { if (currentIdx < tiers.length - 1) { currentIdx++; showPartition(); } };
+                if (DOM.bucket.tabContent) DOM.bucket.tabContent.innerHTML = html;
+                if (DOM.bucket.detail || DOM.bucket.tabContent) {
+                    DOM.bucket.detail || (DOM.bucket.tabContent && DOM.bucket.tabContent.insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>'));
+                }
+                const partPrev = document.getElementById('part-prev');
+                const partNext = document.getElementById('part-next');
+                if (partPrev) partPrev.onclick = () => { if (currentIdx > 0) { currentIdx--; showPartition(); } };
+                if (partNext) partNext.onclick = () => { if (currentIdx < tiers.length - 1) { currentIdx++; showPartition(); } };
                 renderSamples();
             }
 
             // 需要 detail 容器
-            if (!DOM.bucket.detail) {
+            if (!DOM.bucket.detail && DOM.bucket.tabContent) {
                 DOM.bucket.tabContent.innerHTML = '<div id="bucket-detail"></div>';
             }
             showPartition();
