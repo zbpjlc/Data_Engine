@@ -1084,7 +1084,9 @@
             }
             async _poll() {
                 try {
-                    const d = await fetch(this.endpoint).then(r => r.json());
+                    const resp = await fetch(this.endpoint);
+                    if (!resp.ok) { this.stop(); return; }
+                    const d = await resp.json();
                     const prog = d.progress || {};
                     const pct = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
                     if (this.cbs.onProgress) this.cbs.onProgress({...d, pct});
