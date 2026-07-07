@@ -1253,7 +1253,6 @@
 
                 Store.bucket.sample = merged;
                 DOM.bucket.count.value = merged.count_per_bucket;
-                console.log('[loadAllCachedBuckets] DOM.bucket.summary:', !!DOM.bucket.summary, 'tabContent:', !!DOM.bucket.tabContent, 'stats:', !!DOM.bucket.stats);
                 renderBucketSummary(merged);
                 renderBucketResults(merged);
                 DOM.bucket.buttons.runLayout.classList.remove('hidden');
@@ -1279,7 +1278,6 @@
         function restorePageCmcvDisplay(data) {
             const cmcvResult = data.page_cmcv;
             if (cmcvResult && cmcvResult.tier_summary) {
-                console.log('[restorePageCmcvDisplay] DOM.pageCmcv.stats:', !!DOM.pageCmcv.stats, 'detail:', !!DOM.pageCmcv.detail, 'empty:', !!DOM.pageCmcv.empty, 'summary:', !!DOM.pageCmcv.summary);
                 const tier_summary = cmcvResult.tier_summary || {};
                 const block_details = cmcvResult.block_details || {};
                 const allTierCounts = {easy: tier_summary.easy || 0, medium: tier_summary.medium || 0, hard: tier_summary.hard || 0};
@@ -2171,8 +2169,9 @@
                 }
 
                 if (DOM.bucket.tabContent) DOM.bucket.tabContent.innerHTML = html;
-                if (DOM.bucket.detail || DOM.bucket.tabContent) {
-                    DOM.bucket.detail || (DOM.bucket.tabContent && DOM.bucket.tabContent.insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>'));
+                if (!DOM.bucket.detail && DOM.bucket.tabContent) {
+                    DOM.bucket.tabContent.insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>');
+                    DOM.bucket.detail = document.getElementById('bucket-detail');
                 }
                 const partPrev = document.getElementById('part-prev');
                 const partNext = document.getElementById('part-next');
@@ -2184,6 +2183,7 @@
             // 需要 detail 容器
             if (!DOM.bucket.detail && DOM.bucket.tabContent) {
                 DOM.bucket.tabContent.innerHTML = '<div id="bucket-detail"></div>';
+                DOM.bucket.detail = document.getElementById('bucket-detail');
             }
             showPartition();
             setTabBadge('bucket', '✅');
