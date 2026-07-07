@@ -1716,34 +1716,19 @@
 
         // 图片查看
         function showSampleImage(sourceId, batchId, sampleId) {
-            DOM.modal.image.el;
-            DOM.modal.image.img.src = ''; DOM.modal.image.img.alt = '加载中...';
             DOM.modal.image.title.textContent = `图片 - ${sampleId}`;
-            img.src = ''; img.alt = '加载中...';
-            modal.classList.remove('hidden');
+            DOM.modal.image.img.src = ''; DOM.modal.image.img.alt = '加载中...';
+            DOM.modal.image.el.classList.remove('hidden');
             Request.get(`/api/index/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/sample/${encodeURIComponent(sampleId)}/image`)
                 .then(r => {
                     const data = r.ok ? r.data : null;
-                    done++;
-                    btn.textContent = `Layout 启动中 (${done}/${targets.length})...`;
-                    if (data.task_id) pollLayoutBatchWithProgress(data.task_id, btn, totalIds);
-                    if (data.task_ids) data.task_ids.forEach(tid => pollLayoutBatchWithProgress(tid, btn, totalIds));
-                    if (done >= targets.length) {
-                        btn.disabled = false;
-                        btn.textContent = '对抽样结果运行 pp-layout 并写入 Lance';
-                    }
+                    if (data) { DOM.modal.image.img.src = `data:image/png;base64,${data.image_base64}`; DOM.modal.image.img.alt = sampleId; }
                 })
-                .catch(err => {
-                    done++;
-                    console.error('[page-cmcv-layout] failed:', err);
-                    statusDiv.innerHTML = `<span class="text-red-600">启动失败: ${err.message}</span>`;
-                    if (done >= targets.length) {
-                        btn.disabled = false;
-                        btn.textContent = '对抽样结果运行 pp-layout 并写入 Lance';
-                    }
-                });
-            });
-        });
+                .catch(err => { DOM.modal.image.img.alt = `加载失败: ${err.message}`; });
+        }
+
+        DOM.modal.image.close.addEventListener('click', () => DOM.modal.image.el.classList.add('hidden'));
+        DOM.modal.image.el.addEventListener('click', function(e) { if (e.target === this) this.classList.add('hidden'); });
 
         function pollLayoutBatchWithProgress(taskId, btn, totalIds) {
             const maxPolls = 3600;
@@ -2914,7 +2899,6 @@
                     console.error('[CMCV] failed:', err);
                 }
             })).then(() => { btn.disabled = false; btn.textContent = '运行 CMCV'; });
-            });
         });
 
         // ── pp-layout + 按类型拆分到 Lance（Page_CMCV 面板）──────────────────
@@ -2956,7 +2940,7 @@
 
         // === Element-Type Clusters (Element-Level card, input from Page_CMCV) ===
 
-        function renderEcBatchSelect() {
+        async function renderEcBatchSelect() {
             const container = DOM.elementCluster.batchSelect;
             const sourceId = DOM.selection.source.value;
             const filtered = sourceId ? Store.batchData.filter(b => b.source_id === sourceId) : Store.batchData;
@@ -3179,72 +3163,72 @@
                 } catch { return {batch: b, data: null}; }
             });
             const entries = await Promise.all(fetches);
-                // Filter to completed results only
-                const completed = entries.filter(e => e.data && e.data.status === 'completed' && e.data.result);
-                if (completed.length === 0) {
-                    const anyFailed = entries.find(e => e.data && e.data.status === 'failed');
-                    DOM.elementCluster.results.classList.add('hidden');
-                    DOM.elementCluster.empty.classList.remove('hidden');
-                    if (anyFailed) {
-                        DOM.elementCluster.empty.innerHTML = `<span class="text-red-600">聚类失败: ${anyFailed.data.message || '未知错误'}</span>`;
-                    } else {
-                        DOM.elementCluster.empty.textContent = '未找到已完成的聚类结果';
-                    }
-                    return;
+            // Filter to completed results only
+            const completed = entries.filter(e => e.data && e.data.status === 'completed' && e.data.result);
+            if (completed.length === 0) {
+                const anyFailed = entries.find(e => e.data && e.data.status === 'failed');
+                DOM.elementCluster.results.classList.add('hidden');
+                DOM.elementCluster.empty.classList.remove('hidden');
+                if (anyFailed) {
+                    DOM.elementCluster.empty.innerHTML = `<span class="text-red-600">聚类失败: ${anyFailed.data.message || '未知错误'}</span>`;
+                } else {
+                    DOM.elementCluster.empty.textContent = '未找到已完成的聚类结果';
                 }
-                DOM.elementCluster.results.classList.remove('hidden');
-                DOM.elementCluster.empty.classList.add('hidden');
+                return;
+            }
+            DOM.elementCluster.results.classList.remove('hidden');
+            DOM.elementCluster.empty.classList.add('hidden');
 
-                // Aggregate across all completed batches
-                const multiBatch = completed.length > 1;
-                ['text', 'formula', 'table'].forEach(cat => {
-                    let totalBlocks = 0, totalClusters = 0;
-                    const allClusterHtmls = [];
+            // Aggregate across all completed batches
+            const multiBatch = completed.length > 1;
+            ['text', 'formula', 'table'].forEach(cat => {
+                let totalBlocks = 0, totalClusters = 0;
+                const allClusterHtmls = [];
 
-                    completed.forEach(entry => {
-                        const info = (entry.data.result[cat] || {});
-                        const blocks = info.total_blocks || 0;
-                        const clusters = info.n_clusters || 0;
-                        totalBlocks += blocks;
-                        totalClusters += clusters;
+                completed.forEach(entry => {
+                    const info = (entry.data.result[cat] || {});
+                    const blocks = info.total_blocks || 0;
+                    const clusters = info.n_clusters || 0;
+                    totalBlocks += blocks;
+                    totalClusters += clusters;
 
-                        if (blocks === 0) return;
-                        const batchLabel = multiBatch ? `<div class="text-[10px] font-semibold text-gray-400 mt-1 mb-0.5 uppercase tracking-wide">${entry.batch.batch_id}</div>` : '';
-                        const statsLine = clusters > 0
-                            ? `<div class="text-[10px] text-gray-400 mb-1">${clusters} 簇 | 轮廓系数: ${info.silhouette?.toFixed(3) || '-'}</div>`
-                            : '';
-                        const clusterCards = Object.entries(info.clusters || {}).map(([cid, cinfo]) => {
-                            const bm = cinfo.bbox_mean || {};
-                            return `<div class="text-xs p-2 bg-gray-50 rounded">
-                                <div class="font-medium">Cluster ${cid} <span class="text-gray-400">(${cinfo.size}块)</span></div>
-                                <div class="text-gray-500 mt-0.5">avg: ${bm.width?.toFixed(0) || '-'}x${bm.height?.toFixed(0) || '-'} px, area=${bm.area?.toFixed(0) || '-'}</div>
-                            </div>`;
-                        }).join('');
-                        allClusterHtmls.push(batchLabel + statsLine + clusterCards);
-                    });
-
-                    document.getElementById(`ec-${cat}-count`).textContent = totalBlocks.toLocaleString();
-                    const statsEl = document.getElementById(`ec-${cat}-stats`);
-                    if (!multiBatch && completed[0]?.data?.result?.[cat]) {
-                        const si = completed[0].data.result[cat];
-                        statsEl.textContent = si.n_clusters > 0 ? `${si.n_clusters} 簇 | 轮廓系数: ${si.silhouette?.toFixed(3) || '-'}` : '无数据';
-                    } else {
-                        statsEl.textContent = totalClusters > 0 ? `${completed.length} 个批次 | ${totalClusters} 簇` : '无数据';
-                    }
-                    document.getElementById(`ec-${cat}-clusters`).innerHTML = allClusterHtmls.join('') || '<div class="text-xs text-gray-400">无数据</div>';
+                    if (blocks === 0) return;
+                    const batchLabel = multiBatch ? `<div class="text-[10px] font-semibold text-gray-400 mt-1 mb-0.5 uppercase tracking-wide">${entry.batch.batch_id}</div>` : '';
+                    const statsLine = clusters > 0
+                        ? `<div class="text-[10px] text-gray-400 mb-1">${clusters} 簇 | 轮廓系数: ${info.silhouette?.toFixed(3) || '-'}</div>`
+                        : '';
+                    const clusterCards = Object.entries(info.clusters || {}).map(([cid, cinfo]) => {
+                        const bm = cinfo.bbox_mean || {};
+                        return `<div class="text-xs p-2 bg-gray-50 rounded">
+                            <div class="font-medium">Cluster ${cid} <span class="text-gray-400">(${cinfo.size}块)</span></div>
+                            <div class="text-gray-500 mt-0.5">avg: ${bm.width?.toFixed(0) || '-'}x${bm.height?.toFixed(0) || '-'} px, area=${bm.area?.toFixed(0) || '-'}</div>
+                        </div>`;
+                    }).join('');
+                    allClusterHtmls.push(batchLabel + statsLine + clusterCards);
                 });
 
-                // Set Store.elementCluster.ecsBatches to ALL completed batches for per-cluster sampling
-                Store.elementCluster.ecsBatches = completed.map(e => ({source_id: e.batch.source_id, batch_id: e.batch.batch_id}));
-                DOM.elementSample.buttons.run.classList.remove('hidden');
-                DOM.elementSample.empty.classList.remove('hidden');
-                DOM.elementSample.results.classList.add('hidden');
+                document.getElementById(`ec-${cat}-count`).textContent = totalBlocks.toLocaleString();
+                const statsEl = document.getElementById(`ec-${cat}-stats`);
+                if (!multiBatch && completed[0]?.data?.result?.[cat]) {
+                    const si = completed[0].data.result[cat];
+                    statsEl.textContent = si.n_clusters > 0 ? `${si.n_clusters} 簇 | 轮廓系数: ${si.silhouette?.toFixed(3) || '-'}` : '无数据';
+                } else {
+                    statsEl.textContent = totalClusters > 0 ? `${completed.length} 个批次 | ${totalClusters} 簇` : '无数据';
+                }
+                document.getElementById(`ec-${cat}-clusters`).innerHTML = allClusterHtmls.join('') || '<div class="text-xs text-gray-400">无数据</div>';
+            });
+
+            // Set Store.elementCluster.ecsBatches to ALL completed batches for per-cluster sampling
+            Store.elementCluster.ecsBatches = completed.map(e => ({source_id: e.batch.source_id, batch_id: e.batch.batch_id}));
+            DOM.elementSample.buttons.run.classList.remove('hidden');
+            DOM.elementSample.empty.classList.remove('hidden');
+            DOM.elementSample.results.classList.add('hidden');
         }
 
         // ── 每桶抽样 ──────────────────────────────────────────────────────
         // _ecsBatches → Store.elementCluster.ecsBatches (Phase 1 migration)
 
-        DOM.elementSample.buttons.run.addEventListener('click', function() {
+        DOM.elementSample.buttons.run.addEventListener('click', async function() {
             if (!Store.elementCluster.ecsBatches || Store.elementCluster.ecsBatches.length === 0) { showToast('请先完成 Element-Type 聚类', 'warning'); return; }
             const btn = this;
             const perCluster = parseInt(DOM.elementSample.perCluster.value) || 5;
@@ -3279,52 +3263,45 @@
                 return;
             }
 
-                // 聚合所有批次的 summary
-                const aggSummary = {};
-                for (const cat of ['text', 'formula', 'table']) {
-                    let totalSampled = 0, totalClusters = 0;
-                    const allDetails = [];
-                    results.forEach(r => {
-                        const s = r.data.summary?.[cat];
-                        if (!s) return;
-                        totalSampled += s.sampled || 0;
-                        totalClusters += s.clusters || 0;
-                        const batchLabel = results.length > 1 ? `[${r.batch.batch_id}] ` : '';
-                        (s.details || []).forEach(d => {
-                            allDetails.push({...d, _label: batchLabel});
-                        });
+            // 聚合所有批次的 summary
+            const aggSummary = {};
+            for (const cat of ['text', 'formula', 'table']) {
+                let totalSampled = 0, totalClusters = 0;
+                const allDetails = [];
+                results.forEach(r => {
+                    const s = r.data.summary?.[cat];
+                    if (!s) return;
+                    totalSampled += s.sampled || 0;
+                    totalClusters += s.clusters || 0;
+                    const batchLabel = results.length > 1 ? `[${r.batch.batch_id}] ` : '';
+                    (s.details || []).forEach(d => {
+                        allDetails.push({...d, _label: batchLabel});
                     });
-                    aggSummary[cat] = {sampled: totalSampled, clusters: totalClusters, details: allDetails};
-                }
+                });
+                aggSummary[cat] = {sampled: totalSampled, clusters: totalClusters, details: allDetails};
+            }
 
-                const totalSampled = aggSummary.text.sampled + aggSummary.formula.sampled + aggSummary.table.sampled;
+            const totalSampled = aggSummary.text.sampled + aggSummary.formula.sampled + aggSummary.table.sampled;
 
-                DOM.elementSample.results.classList.remove('hidden');
-                DOM.elementSample.counts.text.textContent = aggSummary.text.sampled.toLocaleString();
-                DOM.elementSample.counts.formula.textContent = aggSummary.formula.sampled.toLocaleString();
-                DOM.elementSample.counts.table.textContent = aggSummary.table.sampled.toLocaleString();
+            DOM.elementSample.results.classList.remove('hidden');
+            DOM.elementSample.counts.text.textContent = aggSummary.text.sampled.toLocaleString();
+            DOM.elementSample.counts.formula.textContent = aggSummary.formula.sampled.toLocaleString();
+            DOM.elementSample.counts.table.textContent = aggSummary.table.sampled.toLocaleString();
 
-                // 详细每桶信息（多批次时带批次标签）
-                let detailHtml = '';
-                if (results.length > 1) {
-                    detailHtml += `<div class="text-[10px] text-gray-400 mb-1">共 ${results.length} 个批次, 合计抽样 ${totalSampled} 条</div>`;
+            // 详细每桶信息（多批次时带批次标签）
+            let detailHtml = '';
+            if (results.length > 1) {
+                detailHtml += `<div class="text-[10px] text-gray-400 mb-1">共 ${results.length} 个批次, 合计抽样 ${totalSampled} 条</div>`;
+            }
+            for (const cat of ['text', 'formula', 'table']) {
+                const details = aggSummary[cat].details;
+                if (details.length > 0) {
+                    detailHtml += `<div class="mb-2"><b class="text-gray-700">${cat}</b>: `;
+                    detailHtml += details.map(d => `${d._label || ''}Cluster${d.cluster_id}: ${d.sampled}/${d.total}`).join(', ');
+                    detailHtml += `</div>`;
                 }
-                for (const cat of ['text', 'formula', 'table']) {
-                    const details = aggSummary[cat].details;
-                    if (details.length > 0) {
-                        detailHtml += `<div class="mb-2"><b class="text-gray-700">${cat}</b>: `;
-                        detailHtml += details.map(d => `${d._label || ''}Cluster${d.cluster_id}: ${d.sampled}/${d.total}`).join(', ');
-                        detailHtml += `</div>`;
-                    }
-                }
-                DOM.elementSample.detail.innerHTML = detailHtml;
-        } catch (e) {
-            progress.classList.add('hidden');
-            btn.disabled = false;
-            btn.textContent = '运行每桶抽样';
-            DOM.elementSample.empty.classList.remove('hidden');
-            DOM.elementSample.empty.textContent = `抽样失败: ${e.message}`;
-        }
+            }
+            DOM.elementSample.detail.innerHTML = detailHtml;
         });
 
         // 初始化
@@ -3521,7 +3498,6 @@
                         console.error('[el-ocr] 重跑启动失败:', err);
                     }
                 })).then(() => { btn.textContent = '重跑'; });
-                });
             });
         });
 
