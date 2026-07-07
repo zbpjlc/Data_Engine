@@ -1257,6 +1257,8 @@
                 renderBucketResults(merged);
                 DOM.bucket.buttons.runLayout.classList.remove('hidden');
                 updateOcrBatchSelect();
+                // 加载已有的 layout 结果
+                loadLayoutResults(sourceId, '');
 
                 // 恢复 Page CMCV 缓存
                 const firstValid = valid[0];
