@@ -1848,8 +1848,7 @@
 
         // ── 难度桶抽样 ──────────────────────────────────────────────────────
         async function loadCachedBucketSamples(sourceId, batchId) {
-            let url = `/api/bucket-summary/${encodeURIComponent(sourceId)}`;
-            if (batchId) url += `/${encodeURIComponent(batchId)}`;
+            let url = `/api/bucket-samples/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}?count=20&force=false`;
             console.log('[loadCachedBucketSamples]', url);
             const v = Request.begin('bucket');
             try {
@@ -2121,7 +2120,7 @@
             }
 
             // 确保 detail 容器存在（放在 tabContent 外面，不被 innerHTML 覆盖）
-            if (!DOM.bucket.detail) {
+            if (!DOM.bucket.detail || !DOM.bucket.detail.isConnected) {
                 const detailDiv = document.createElement('div');
                 detailDiv.id = 'bucket-detail';
                 container.appendChild(detailDiv);
