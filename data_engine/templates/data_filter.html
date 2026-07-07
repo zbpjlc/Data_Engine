@@ -1259,6 +1259,7 @@
                 updateOcrBatchSelect();
                 // 加载已有的 layout 结果（逐批次查询）
                 const layoutTargets = merged.batch_info || [];
+                console.log('[loadAllCachedBuckets] layout targets:', layoutTargets.map(t => `${t.source_id}/${t.batch_id}`).join(', '));
                 if (layoutTargets.length > 0) {
                     const layoutPromises = layoutTargets.map(t => loadLayoutResults(t.source_id, t.batch_id));
                     Promise.all(layoutPromises).catch(() => {});
@@ -2120,6 +2121,14 @@
                 return;
             }
 
+            // 确保 detail 容器存在（放在 tabContent 外面，不被 innerHTML 覆盖）
+            if (!DOM.bucket.detail) {
+                const detailDiv = document.createElement('div');
+                detailDiv.id = 'bucket-detail';
+                container.appendChild(detailDiv);
+                DOM.bucket.detail = detailDiv;
+            }
+
             let currentIdx = 0;
 
             function showPartition() {
@@ -2175,10 +2184,6 @@
                 }
 
                 if (DOM.bucket.tabContent) DOM.bucket.tabContent.innerHTML = html;
-                if (!DOM.bucket.detail && DOM.bucket.tabContent) {
-                    DOM.bucket.tabContent.insertAdjacentHTML('beforeend', '<div id="bucket-detail"></div>');
-                    DOM.bucket.detail = document.getElementById('bucket-detail');
-                }
                 const partPrev = document.getElementById('part-prev');
                 const partNext = document.getElementById('part-next');
                 if (partPrev) partPrev.onclick = () => { if (currentIdx > 0) { currentIdx--; showPartition(); } };
@@ -2186,11 +2191,6 @@
                 renderSamples();
             }
 
-            // 需要 detail 容器
-            if (!DOM.bucket.detail && DOM.bucket.tabContent) {
-                DOM.bucket.tabContent.innerHTML = '<div id="bucket-detail"></div>';
-                DOM.bucket.detail = document.getElementById('bucket-detail');
-            }
             showPartition();
             setTabBadge('bucket', '✅');
         }
@@ -2343,7 +2343,8 @@
                 queryTargets = (Store.bucket.sample?.batch_info || []).map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
                 if (!queryTargets.length) queryTargets = Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
             }
-            if (!queryTargets.length) return;
+            if (!queryTargets.length) { console.log('[loadLayoutResults] no query targets, returning'); return; }
+            console.log('[loadLayoutResults] querying:', queryTargets.map(t => `${t.source_id}/${t.batch_id}`).join(', '));
 
             // 并发查询所有批次的 layout 结果
             const promises = queryTargets.map(async t => {
@@ -2360,16 +2361,18 @@
                 (data.results || []).forEach(r => { resultMap[r.sample_id] = r; });
             });
 
-            if (!Object.keys(resultMap).length) return;
+            if (!Object.keys(resultMap).length) { console.log('[loadLayoutResults] no layout results found'); return; }
 
             // 合并到 Store.bucket.sample
             if (Store.bucket.sample && Store.bucket.sample.buckets) {
+                let mergedCount = 0;
                 for (const tier of Object.keys(Store.bucket.sample.buckets || {})) {
                     Store.bucket.sample.buckets[tier].forEach(s => {
                         const lr = resultMap[s.sample_id];
-                        if (lr) { s._layout_blocks = lr.blocks; s._layout_block_count = lr.block_count; }
+                        if (lr) { s._layout_blocks = lr.blocks; s._layout_block_count = lr.block_count; mergedCount++; }
                     });
                 }
+                console.log(`[loadLayoutResults] merged ${mergedCount} layout results into ${Object.keys(resultMap).length} samples`);
                 // 刷新分区显示（重新渲染全部导航，layout 数据已合并到 Store.bucket.sample）
                 renderBucketResults(Store.bucket.sample);
             }
