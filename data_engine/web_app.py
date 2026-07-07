@@ -1696,14 +1696,20 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                     key = (sids[i], bidxs[i])
                                     new_patterns.append(pat_map.get(key, patterns[i]))
                                     new_diffs.append(diff_map.get(key, diffs[i]))
-                                import pyarrow as pa
-                                update_table = pa.table({
-                                    "sample_id": pa.array(sids, type=pa.large_string()),
-                                    "block_idx": pa.array(bidxs, type=pa.int32()),
-                                    "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
-                                    "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
-                                })
-                                ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
+                            import pyarrow as pa
+                            # 去重：每个 (sample_id, block_idx) 只保留最后一条
+                            seen = {}
+                            for i in range(len(t)):
+                                key = (sids[i], bidxs[i])
+                                seen[key] = i
+                            dedup_indices = list(seen.values())
+                            update_table = pa.table({
+                                "sample_id": pa.array([sids[i] for i in dedup_indices], type=pa.large_string()),
+                                "block_idx": pa.array([bidxs[i] for i in dedup_indices], type=pa.int32()),
+                                "consistency_pattern": pa.array([new_patterns[i] for i in dedup_indices], type=pa.large_string()),
+                                "block_diff_json": pa.array([new_diffs[i] for i in dedup_indices], type=pa.large_string()),
+                            })
+                            ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
                             print(f"[CMCV] 已将一致性结果写回 {b.source_id}/{b.batch_id}/{cat}.lance", file=sys.stderr)
                         except Exception as e:
                             print(f"[CMCV] 写回 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
