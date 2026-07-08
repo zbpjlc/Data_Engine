@@ -563,11 +563,13 @@ class CMCVEngine:
             return "medium"
         return "easy"
 
-    def process_element_batch(self, element_rows: list[dict]) -> tuple[list[dict], dict[str, str]]:
+    def process_element_batch(self, element_rows: list[dict], progress_callback=None) -> tuple[list[dict], dict[str, str]]:
         by_sample: dict[str, list[dict]] = defaultdict(list)
         for row in element_rows:
             by_sample[row["sample_id"]].append(row)
 
+        total_pages = len(by_sample)
+        processed_pages = 0
         updated_rows: list[dict] = []
         page_tiers: dict[str, str] = {}
 
@@ -576,7 +578,6 @@ class CMCVEngine:
             page_result = self.compare_page(blocks_sorted)
 
             for block, detail in zip(blocks_sorted, page_result["details"]):
-                # 只保留 key 列 + CMCV 结果列，避免写入磁盘 schema 中不存在的列
                 updated_rows.append({
                     "sample_id": block["sample_id"],
                     "block_idx": block.get("block_idx", 0),
@@ -586,9 +587,16 @@ class CMCVEngine:
 
             page_tiers[sample_id] = page_result["tier"]
 
+            processed_pages += 1
+            if progress_callback:
+                try:
+                    progress_callback(processed_pages, total_pages, f"对比页面 {sample_id}")
+                except Exception:
+                    pass
+
         return updated_rows, page_tiers
 
-    def process_element_batch_arrow(self, table) -> tuple[pa.Table, dict[str, str]]:
+    def process_element_batch_arrow(self, table, progress_callback=None) -> tuple[pa.Table, dict[str, str]]:
         import pyarrow as pa
         n = len(table)
         sid_col = table.column("sample_id")
@@ -605,6 +613,8 @@ class CMCVEngine:
                                  "block_type") if k in col_names]
         ocr_cols = {k: table.column(k) for k in ocr_keys}
 
+        total_pages = len(by_sample)
+        processed_pages = 0
         out_sids: list[str] = []
         out_bidxs: list[int] = []
         out_patterns: list[str | None] = []
@@ -629,6 +639,13 @@ class CMCVEngine:
                     json.dumps(detail["diff"], ensure_ascii=False) if detail.get("diff") else None
                 )
             page_tiers[sample_id] = page_result["tier"]
+
+            processed_pages += 1
+            if progress_callback:
+                try:
+                    progress_callback(processed_pages, total_pages, f"对比页面 {sample_id}")
+                except Exception:
+                    pass
 
         result_table = pa.table({
             "sample_id": pa.array(out_sids, type=pa.large_string()),

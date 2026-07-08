@@ -349,7 +349,11 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
     )
 
     cmcv = CMCVEngine()
-    result_table, page_tiers = cmcv.process_element_batch_arrow(combined)
+
+    def _cmcv_progress(cur, tot, msg):
+        progress_tracker.update_progress(task_id=task_id, current=cur, message=f"[{cur}/{tot}] {msg}", total=tot)
+
+    result_table, page_tiers = cmcv.process_element_batch_arrow(combined, progress_callback=_cmcv_progress)
     del combined
 
     up_sids = result_table.column("sample_id")

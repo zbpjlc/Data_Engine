@@ -1663,7 +1663,11 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                 )
 
                 cmcv = CMCVEngine(use_visual_cdm=True)  # Element CMCV 使用视觉渲染（精度优先）
-                updated_rows, page_tiers = cmcv.process_element_batch(element_rows)
+
+                def _cmcv_step_cb(cur, tot, msg):
+                    progress_tracker.update_progress(task_id=task_id, current=cur, message=f"[{cur}/{tot}] {msg}", total=tot)
+
+                updated_rows, page_tiers = cmcv.process_element_batch(element_rows, progress_callback=_cmcv_step_cb)
 
                 for b in global_status.batches:
                     b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
