@@ -2649,20 +2649,19 @@ async def get_difficulty_aware_samples(
 # ─── Judge-and-Refine (Hard Case 自动纠错) ──────────────────────────────────
 
 @app.get("/api/hard-cases/{source_id}/{batch_id}")
-async def get_hard_cases_list(source_id: str, batch_id: str, limit: int = 5000):
-    """轻量级 Hard block 列表（向量化防爆 OOM）。"""
+async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_disagree", limit: int = 5000):
+    """轻量级 block 列表（按 tier 筛选，向量化防爆 OOM）。"""
     try:
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
 
+        tier_filter = f"consistency_pattern = '{tier}'" if tier != "all" else None
         hard_blocks = []
+        real_total = 0
         safe_limit = min(limit, 5000)
 
         for cat in ("text", "formula", "table"):
-            remaining = safe_limit - len(hard_blocks)
-            if remaining <= 0:
-                break
             lp = manifests_dir / f"{cat}.lance"
             if not lp.exists():
                 continue
@@ -2671,12 +2670,19 @@ async def get_hard_cases_list(source_id: str, batch_id: str, limit: int = 5000):
                 cols = ds.schema.names
                 if "consistency_pattern" not in cols:
                     continue
+                if tier_filter:
+                    real_total += ds.count_rows(filter=tier_filter)
+                else:
+                    real_total += ds.count_rows()
+                remaining = safe_limit - len(hard_blocks)
+                if remaining <= 0:
+                    continue
                 light_cols = [c for c in ("sample_id", "block_idx", "block_type",
                                           "consistency_pattern", "judged", "corrected",
                                           "needs_expert", "judge_confidence") if c in cols]
                 scanner = ds.scanner(
                     columns=light_cols,
-                    filter="consistency_pattern = 'all_disagree'",
+                    filter=tier_filter,
                     limit=remaining,
                 )
                 pa_table = scanner.to_table()
@@ -2698,7 +2704,8 @@ async def get_hard_cases_list(source_id: str, batch_id: str, limit: int = 5000):
                 needs_expert_count += 1
 
         return {
-            "total": len(hard_blocks),
+            "total": real_total,
+            "loaded": len(hard_blocks),
             "judged": judged_count,
             "corrected": corrected_count,
             "needs_expert": needs_expert_count,
