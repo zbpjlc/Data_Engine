@@ -274,7 +274,9 @@ def cluster_by_type(
     # 4. 从 Lance 流式加载所有有效 embedding（生成后已全部写回）
     if progress_callback:
         progress_callback(total, total, f"{cat} 加载 embedding 向量...")
-    embeddings: list[list[float] | None] = [None] * total
+    import numpy as _np
+    embeddings_arr = _np.full((total, EMB_DIM), _np.nan, dtype=_np.float32)
+    valid_mask = _np.zeros(total, dtype=bool)
     try:
         import lance as _lance_read
         ds_read = _lance_read.dataset(str(lance_path))
@@ -294,31 +296,30 @@ def cluster_by_type(
                 if emb.is_valid and len(emb) == EMB_DIM:
                     g_idx = key_to_idx.get(f"{s}:{b}")
                     if g_idx is not None:
-                        embeddings[g_idx] = list(emb.as_py())
+                        embeddings_arr[g_idx] = _np.array(emb.as_py(), dtype=_np.float32)
+                        valid_mask[g_idx] = True
     except Exception as e:
         logger.warning("[layout_features] %s: 流式加载 embedding 失败: %s", cat, e)
 
-    # 过滤有效 embedding（确保维度一致）
-    valid_embeddings = [
-        emb for emb in embeddings
-        if emb and len(emb) == EMB_DIM
-    ]
-    if len(valid_embeddings) < 2:
+    valid_count = int(valid_mask.sum())
+    if valid_count < 2:
         return {"n_clusters": 0, "silhouette": 0, "total_blocks": total, "clusters": {}, "labels": {}}
+
+    valid_embeddings_np = embeddings_arr[valid_mask]
 
     # 5. MiniBatchKMeans 聚类（与 Page-Level 相同：find_optimal_clusters + KMeansClusterer）
     if progress_callback:
-        progress_callback(total, total, f"{cat} 开始聚类 ({len(valid_embeddings)} 有效向量)...")
+        progress_callback(total, total, f"{cat} 开始聚类 ({valid_count} 有效向量)...")
     def _cluster_cb(cur, tot, msg):
         if progress_callback:
             progress_callback(total, total, f"{cat} {msg}")
 
-    optimal_k = find_optimal_clusters(valid_embeddings, max_clusters=min(max_k, len(valid_embeddings)), progress_callback=_cluster_cb)
+    optimal_k = find_optimal_clusters(valid_embeddings_np.tolist(), max_clusters=min(max_k, valid_count), progress_callback=_cluster_cb)
     if progress_callback:
         progress_callback(total, total, f"{cat} 聚类 K={optimal_k}...")
 
     clusterer = KMeansClusterer(n_clusters=optimal_k)
-    labels_full = clusterer.fit_predict(embeddings, progress_callback=_cluster_cb)  # -1 for invalid embeddings
+    labels_full = clusterer.fit_predict(embeddings_arr.tolist(), progress_callback=_cluster_cb)  # -1 for invalid embeddings
     stats = clusterer.get_cluster_stats()
 
     # 6. 构建 cluster 统计（bbox 均值）
@@ -509,7 +510,7 @@ def cluster_all_types(
             """
             if progress_callback:
                 if tot > 0:
-                    mapped = int(cur / tot * _cat_total)
+                    mapped = min(int(cur / tot * _cat_total), _cat_total)
                 else:
                     mapped = 0
                 global_cur = min(_completed + mapped, _grand)
