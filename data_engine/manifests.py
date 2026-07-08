@@ -121,6 +121,81 @@ def _arrow_to_record(row: dict) -> dict:
     return record
 
 
+def dedup_by_keys(table: pa.Table, key_columns: list[str]) -> pa.Table:
+    """按主键去重，保留最后一条（last-wins）。"""
+    if table.num_rows == 0:
+        return table
+    seen: dict[tuple, int] = {}
+    for i in range(table.num_rows):
+        key = tuple(table.column(col)[i].as_py() for col in key_columns)
+        seen[key] = i
+    indices = list(seen.values())
+    if len(indices) == table.num_rows:
+        return table
+    return pa.table(
+        {col: table.column(col).take(indices) for col in table.column_names},
+        schema=table.schema,
+    )
+
+
+def assert_unique_keys(table: pa.Table, key_columns: list[str], context: str = "") -> None:
+    """检查主键唯一性，重复则 ValueError。"""
+    seen: set[tuple] = set()
+    for i in range(table.num_rows):
+        key = tuple(table.column(col)[i].as_py() for col in key_columns)
+        if key in seen:
+            raise ValueError(f"Duplicate key {key}" + (f" ({context})" if context else ""))
+        seen.add(key)
+
+
+def validate_merge_keys(update_table: pa.Table, key_columns: list[str], context: str = "") -> None:
+    """确保 update_table 包含所有 key 列且无 null。"""
+    missing = set(key_columns) - set(update_table.column_names)
+    if missing:
+        raise ValueError(f"Missing key columns {missing}" + (f" ({context})" if context else ""))
+    for col in key_columns:
+        if update_table.column(col).null_count > 0:
+            raise ValueError(f"Key column '{col}' has nulls" + (f" ({context})" if context else ""))
+
+
+def safe_merge(
+    ds, update_table: pa.Table, key_columns: list[str],
+    *, context: str = "", when_not_matched: bool = False, max_retries: int = 5,
+) -> None:
+    """去重→校验→merge_insert，事务冲突自动重试。调用者须持有 _lance_write_lock。"""
+    import time as _time
+    update_table = dedup_by_keys(update_table, key_columns)
+    validate_merge_keys(update_table, key_columns, context=context)
+    if update_table.num_rows == 0:
+        return
+    for attempt in range(1, max_retries + 1):
+        try:
+            builder = ds.merge_insert(key_columns).when_matched_update_all()
+            if when_not_matched:
+                builder = builder.when_not_matched_insert_all()
+            builder.execute(update_table)
+            return
+        except Exception as e:
+            if attempt < max_retries and ("Incompatible transaction" in str(e) or "conflict" in str(e).lower()):
+                _time.sleep(0.5 * (2 ** (attempt - 1)))
+            else:
+                raise
+
+
+def open_dataset(path: Path):
+    """打开 Lance 数据集（只读，不持锁）。"""
+    return lance.dataset(str(path))
+
+
+def read_table_streaming(path: Path, columns: list[str] | None = None, batch_size: int = 4096) -> pa.Table:
+    """通过 scanner 流式读取，替代 ds.to_table()。"""
+    ds = open_dataset(path)
+    batches = list(ds.scanner(columns=columns).to_batches(batch_size=batch_size))
+    if not batches:
+        return pa.table({})
+    return pa.Table.from_batches(batches)
+
+
 # ─── Lance manifest I/O ────────────────────────────────────────────────────────
 
 def _rows_to_table(rows: list[dict]) -> pa.Table:
