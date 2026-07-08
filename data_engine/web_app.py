@@ -196,7 +196,7 @@ from starlette.requests import Request
 from fastapi.responses import Response
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest, manifest_count,
-    _lance_write_lock, _safe_write_lance,
+    _lance_write_lock, _safe_write_lance, safe_merge,
 )
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
@@ -784,7 +784,8 @@ async def start_embed(source_id: str, batch_id: str = None):
                             # 写入 Lance 时加锁，避免多线程并发写入导致 glibc 内存死锁
                             with _lance_write_lock:
                                 current_ds = lance.dataset(str(manifest_path))
-                                current_ds.merge_insert("sample_id").when_matched_update_all().execute(update_table)
+                                safe_merge(current_ds, update_table, ["sample_id"], context="embed")
+                            _lance_cache.invalidate(str(manifest_path))
                             print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
 
                             # merge_insert 后重新获取 dataset（版本已变）
@@ -1096,8 +1097,6 @@ async def get_partition_samples(source_id: str, batch_id: str, partition_id: int
 
         if not manifest_path.exists():
             raise HTTPException(status_code=404, detail="Lance 数据集不存在")
-
-        import pyarrow as pa
 
         ds = _open_lance(manifest_path)
 
@@ -1598,16 +1597,22 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                             col = f"{prefix}{suffix}"
                                             if col in all_cols:
                                                 read_cols.append(col)
-                                    rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
-                                for row in rows:
-                                    key = (cat, row["sample_id"], row["block_idx"])
+                                    cols = [c for c in read_cols if c in all_cols]
+                                    tbl = ds.to_table(columns=cols)
+                                json_keys = ("paddle_table", "glm_table", "self_table",
+                                             "paddle_formula", "glm_formula", "self_formula")
+                                sid_col = tbl.column("sample_id")
+                                bidx_col = tbl.column("block_idx")
+                                for i in range(len(tbl)):
+                                    key = (cat, sid_col[i].as_py(), bidx_col[i].as_py())
                                     if key not in sample_keys:
                                         continue
-                                    for k in ("paddle_table", "glm_table", "self_table",
-                                                "paddle_formula", "glm_formula", "self_formula"):
-                                        if k in row and isinstance(row[k], str) and row[k]:
+                                    row = {c: tbl.column(c)[i].as_py() for c in cols}
+                                    for k in json_keys:
+                                        val = row.get(k)
+                                        if isinstance(val, str) and val:
                                             try:
-                                                row[k] = json.loads(row[k])
+                                                row[k] = json.loads(val)
                                             except (json.JSONDecodeError, TypeError):
                                                 pass
                                     all_rows.append(row)
@@ -1696,26 +1701,19 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                     key = (sids[i], bidxs[i])
                                     new_patterns.append(pat_map.get(key, patterns[i]))
                                     new_diffs.append(diff_map.get(key, diffs[i]))
-                            import pyarrow as pa
-                            # 去重：每个 (sample_id, block_idx) 只保留最后一条
-                            seen = {}
-                            for i in range(len(t)):
-                                key = (sids[i], bidxs[i])
-                                seen[key] = i
-                            dedup_indices = list(seen.values())
                             update_table = pa.table({
-                                "sample_id": pa.array([sids[i] for i in dedup_indices], type=pa.large_string()),
-                                "block_idx": pa.array([bidxs[i] for i in dedup_indices], type=pa.int32()),
-                                "consistency_pattern": pa.array([new_patterns[i] for i in dedup_indices], type=pa.large_string()),
-                                "block_diff_json": pa.array([new_diffs[i] for i in dedup_indices], type=pa.large_string()),
+                                "sample_id": pa.array(sids, type=pa.large_string()),
+                                "block_idx": pa.array(bidxs, type=pa.int32()),
+                                "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
+                                "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
                             })
-                            ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
+                            safe_merge(ds, update_table, ["sample_id", "block_idx"], context=f"cmcv/{cat}")
+                            _lance_cache.invalidate(str(lp))
                             print(f"[CMCV] 已将一致性结果写回 {b.source_id}/{b.batch_id}/{cat}.lance", file=sys.stderr)
                         except Exception as e:
                             print(f"[CMCV] 写回 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
 
                 if ingest_path and ingest_path.exists() and page_tiers:
-                    import pyarrow as pa
                     sample_ids = list(page_tiers.keys())
                     tiers = [page_tiers[sid] for sid in sample_ids]
                     update_table = pa.table({
@@ -1724,7 +1722,8 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                     })
                     with _lance_write_lock:
                         ds = _open_lance(ingest_path)
-                        ds.merge_insert(["sample_id"]).when_matched_update_all().execute(update_table)
+                        safe_merge(ds, update_table, ["sample_id"], context="cmcv/ingest_tiers")
+                    _lance_cache.invalidate(str(ingest_path))
 
                 progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(page_tiers)} 页面")
                 invalidate_status_cache()
@@ -3549,11 +3548,10 @@ async def get_layout_batch_results(source_id: str, batch_id: str):
         for cat in ("text", "formula", "table"):
             lp = manifests_dir / f"{cat}.lance"
             if lp.exists():
-                with _lance_write_lock:
-                    ds = _open_lance(lp)
-                    rows = ds.to_table(
-                        columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
-                    ).to_pylist()
+                ds = _open_lance(lp)
+                rows = ds.to_table(
+                    columns=["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                ).to_pylist()
                 for row in rows:
                     sid = row["sample_id"]
                     if sid not in results_map:
@@ -3592,20 +3590,19 @@ async def repair_images(source_id: str, batch_id: str):
         for cat in ("text", "formula", "table"):
             lp = manifests_dir / f"{cat}.lance"
             if lp.exists():
-                with _lance_write_lock:
-                    ds = _open_lance(lp)
-                    cols = ds.schema.names
-                    if "image_data" in cols:
-                        try:
-                            null_rows = ds.to_table(
-                                columns=["sample_id"],
-                                filter="image_data IS NULL"
-                            ).to_pylist()
-                            sids = {r["sample_id"] for r in null_rows}
-                            no_image_sids.update(sids)
-                            no_image_counts[cat] = len(null_rows)
-                        except Exception:
-                            no_image_counts[cat] = 0
+                ds = _open_lance(lp)
+                cols = ds.schema.names
+                if "image_data" in cols:
+                    try:
+                        null_rows = ds.to_table(
+                            columns=["sample_id"],
+                            filter="image_data IS NULL"
+                        ).to_pylist()
+                        sids = {r["sample_id"] for r in null_rows}
+                        no_image_sids.update(sids)
+                        no_image_counts[cat] = len(null_rows)
+                    except Exception:
+                        no_image_counts[cat] = 0
 
         if not no_image_sids:
             return {"message": "所有 block 均已有图片，无需补齐", "no_image": 0}
@@ -3796,7 +3793,9 @@ async def repair_images(source_id: str, batch_id: str):
                                     new_ds = lance.dataset(str(new_lp))
                                     new_table = new_ds.to_table()
                                     ds2 = lance.dataset(str(lp))
-                                    ds2.merge_insert(["sample_id", "block_idx"]).when_not_matched_insert_all().execute(new_table)
+                                    safe_merge(ds2, new_table, ["sample_id", "block_idx"],
+                                               when_not_matched=True, context=f"repair/{cat}")
+                                    _lance_cache.invalidate(str(lp))
 
                             print(f"[repair] {cat}.lance: 保留 {kept_table.num_rows} 行, 新写入 {new_stats.get(cat, 0)} 行", file=sys.stderr)
                     finally:
@@ -4897,9 +4896,11 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                 columns=["sample_id", "block_idx"],
                                 filter=f"{text_col} IS NOT NULL AND {text_col} != '' AND {conf_col} > 0"
                             )
+                            sid_col = tbl.column("sample_id")
+                            bidx_col = tbl.column("block_idx")
                             done_keys.update(
-                                (row["sample_id"], row["block_idx"])
-                                for row in tbl.to_pylist()
+                                (sid_col[i].as_py(), bidx_col[i].as_py())
+                                for i in range(len(tbl))
                             )
                     except Exception as e:
                         print(f"[el-ocr] resume 读 {cat} 失败: {e}", file=sys.stderr)
@@ -5093,15 +5094,21 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                             col = f"{_pfx}{suffix}"
                                             if col in all_cols:
                                                 read_cols.append(col)
-                                    rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
-                                for row in rows:
-                                    for key in ("paddle_table", "glm_table", "self_table",
-                                                "paddle_formula", "glm_formula", "self_formula"):
-                                        if key in row and isinstance(row[key], str) and row[key]:
+                                    cols = [c for c in read_cols if c in all_cols]
+                                    tbl = ds.to_table(columns=cols)
+                                json_keys = ("paddle_table", "glm_table", "self_table",
+                                             "paddle_formula", "glm_formula", "self_formula")
+                                rows = []
+                                for i in range(len(tbl)):
+                                    row = {c: tbl.column(c)[i].as_py() for c in cols}
+                                    for key in json_keys:
+                                        val = row.get(key)
+                                        if isinstance(val, str) and val:
                                             try:
-                                                row[key] = json.loads(row[key])
+                                                row[key] = json.loads(val)
                                             except (json.JSONDecodeError, TypeError):
                                                 pass
+                                    rows.append(row)
                                 updated_rows, _ = cmcv_engine.process_element_batch(rows)
                                 update_map = {}
                                 for r in updated_rows:
@@ -5121,14 +5128,14 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                         diff_map = update_map.get("block_diff_json", {})
                                         new_p = [pat_map.get((sids[i], bidxs[i]), patterns[i]) for i in range(len(t))]
                                         new_d = [diff_map.get((sids[i], bidxs[i]), diffs[i]) for i in range(len(t))]
-                                        import pyarrow as pa
                                         update_table = pa.table({
                                             "sample_id": pa.array(sids, type=pa.large_string()),
                                             "block_idx": pa.array(bidxs, type=pa.int32()),
                                             "consistency_pattern": pa.array(new_p, type=pa.large_string()),
                                             "block_diff_json": pa.array(new_d, type=pa.large_string()),
                                         })
-                                        ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all().execute(update_table)
+                                        safe_merge(ds, update_table, ["sample_id", "block_idx"], context=f"el-ocr-cmcv/{cat}")
+                                        _lance_cache.invalidate(str(lp))
                                     print(f"[el-ocr] CMCV 重算完成 {cat}.lance", file=sys.stderr)
                             except Exception as e:
                                 print(f"[el-ocr] CMCV 重算 {cat} 失败: {e}", file=sys.stderr)
@@ -5158,12 +5165,9 @@ _CAT_TEXT_COL = {"text": "_text", "formula": "_formula", "table": "_table"}
 
 def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, conf_col: str, prefix: str):
     """将 Element OCR 结果 merge_insert 到对应的 category lance。
-    带重试：Lance 并发事务冲突时自动重试（最多 5 次，指数退避）。
     自动检测磁盘 schema，只写入兼容的列。
+    重试和去重由 safe_merge 统一处理。
     """
-    import time as _time
-    import lance as _lance
-    MAX_RETRIES = 5
     for cat, rows in pending_rows.items():
         if not rows:
             continue
@@ -5171,26 +5175,20 @@ def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, c
         if not lp.exists():
             continue
         try:
-            import pyarrow as pa
             cat_text_col = f"{prefix}{_CAT_TEXT_COL.get(cat, '_text')}"
 
-            # 读取磁盘 schema，确保只写入兼容的列
             with _lance_write_lock:
-                ds = _lance.dataset(str(lp))
+                ds = lance.dataset(str(lp))
             disk_names = {f.name for f in ds.schema}
 
             arrays = {}
             for r in rows:
-                # text_col (e.g. paddle_text) 存储了 OCR 文本结果
-                # cat_text_col 是目标 Lance 列名（对 text 类同，对 formula/table 不同）
                 mapped = {
                     "sample_id": r["sample_id"],
                     "block_idx": r["block_idx"],
                 }
-                # 主文本内容：始终从 text_col 读取（OCR 引擎统一存储位置）
                 mapped[cat_text_col] = r.get(text_col, "")
                 mapped[conf_col] = r.get(conf_col, 0.0)
-                # 额外列：表格结构、公式 LaTeX（如存在且磁盘 schema 支持）
                 for extra_key in (f"{prefix}_table", f"{prefix}_formula"):
                     if extra_key in r and extra_key in disk_names:
                         mapped[extra_key] = r[extra_key]
@@ -5200,42 +5198,29 @@ def _flush_el_ocr_rows(manifests_dir: Path, pending_rows: dict, text_col: str, c
                         arrays[k] = []
                     arrays[k].append(v)
 
-            # 只保留磁盘 schema 中存在的列
             arrays = {k: v for k, v in arrays.items() if k in disk_names}
             if "sample_id" not in arrays or "block_idx" not in arrays:
-                continue  # 缺少 key 列，跳过
+                continue
 
             pa_arrays = {}
             for col, vals in arrays.items():
                 field = ds.schema.field(col)
                 if field.type == pa.large_string():
-                    pa_arrays[col] = pa.array([v if v is not None else "" for v in vals], type=pa.large_string())
+                    pa_arrays[col] = pc.fill_null(pa.array(vals), "").cast(pa.large_string())
                 elif field.type == pa.float32():
-                    pa_arrays[col] = pa.array([float(v or 0) for v in vals], type=pa.float32())
+                    pa_arrays[col] = pc.fill_null(pa.array(vals, type=pa.float64()), 0.0).cast(pa.float32())
                 elif field.type == pa.int32():
-                    pa_arrays[col] = pa.array([int(v or 0) for v in vals], type=pa.int32())
+                    pa_arrays[col] = pc.fill_null(pa.array(vals, type=pa.int64()), 0).cast(pa.int32())
                 else:
                     pa_arrays[col] = pa.array(vals)
             table = pa.table(pa_arrays)
 
-            # 重试写入：Lance 事务冲突时指数退避
-            for attempt in range(1, MAX_RETRIES + 1):
-                try:
-                    with _lance_write_lock:
-                        ds = _lance.dataset(str(lp))
-                        builder = ds.merge_insert(["sample_id", "block_idx"]).when_matched_update_all()
-                        # 只有当写入列包含磁盘 schema 所有列时才启用 insert
-                        if set(arrays.keys()) >= disk_names:
-                            builder = builder.when_not_matched_insert_all()
-                        builder.execute(table)
-                    break
-                except Exception as we:
-                    if attempt < MAX_RETRIES and ("Incompatible transaction" in str(we) or "conflict" in str(we).lower()):
-                        wait = 0.5 * (2 ** (attempt - 1))  # 0.5s, 1s, 2s, 4s
-                        print(f"[el-ocr] flush {cat} 事务冲突 (attempt {attempt}/{MAX_RETRIES})，{wait}s 后重试...", file=sys.stderr)
-                        _time.sleep(wait)
-                    else:
-                        raise
+            with _lance_write_lock:
+                ds = lance.dataset(str(lp))
+                safe_merge(ds, table, ["sample_id", "block_idx"],
+                           when_not_matched=set(arrays.keys()) >= disk_names,
+                           context=f"el-ocr/{cat}")
+            _lance_cache.invalidate(str(lp))
         except Exception as e:
             print(f"[el-ocr] flush {cat} 失败: {e}", file=sys.stderr)
 
