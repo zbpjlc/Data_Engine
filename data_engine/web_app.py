@@ -1538,7 +1538,7 @@ async def get_batch_progress(source_id: str, batch_id: str):
 
 
 @app.post("/api/cmcv/{source_id}")
-async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
+async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, force: bool = False):
     """启动 CMCV 一致性比较任务"""
     try:
         task_id = f"cmcv_{source_id}_{batch_id}"
@@ -1560,10 +1560,10 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
                 manifests_dir = batch_dir / "manifests"
                 ingest_path = find_stage_manifest(manifests_dir, "ingest")
 
-                def _read_blocks_from_category_lance(full_mode: bool = False) -> list[dict]:
-                    """读取 block，full_mode=True 时全量，否则优先抽样"""
+                def _read_blocks_from_category_lance(full_mode: bool = False, force: bool = False) -> list[dict]:
+                    """读取 block，full_mode=True 时全量，否则优先抽样；force=True 时忽略已有结果"""
                     if full_mode:
-                        return _read_all_blocks_from_category_lance(manifests_dir)
+                        return _read_all_blocks_from_category_lance(manifests_dir, force=force)
 
                     sample_keys = set()
                     for b in global_status.batches:
@@ -1578,10 +1578,11 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
 
                     if not sample_keys:
                         print("[CMCV] 无 element_samples 数据，回退到全量模式", file=sys.stderr)
-                        return _read_all_blocks_from_category_lance(manifests_dir)
+                        return _read_all_blocks_from_category_lance(manifests_dir, force=force)
 
                     print(f"[CMCV] 从 element_samples 加载 {len(sample_keys)} 个抽样 block", file=sys.stderr)
 
+                    cmcv_filter = None if force else "consistency_pattern IS NULL"
                     all_rows = []
                     json_keys = ("paddle_table", "glm_table", "self_table",
                                  "paddle_formula", "glm_formula", "self_formula")
@@ -1595,7 +1596,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
                                 with _lance_write_lock:
                                     ds = _open_lance(lp)
                                     all_cols = ds.schema.names
-                                    if "consistency_pattern" not in all_cols:
+                                    if not force and "consistency_pattern" not in all_cols:
                                         continue
                                     read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                     for prefix in ("paddle", "glm", "self"):
@@ -1604,7 +1605,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
                                             if col in all_cols:
                                                 read_cols.append(col)
                                     cols = [c for c in read_cols if c in all_cols]
-                                    batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
+                                    batches = list(ds.to_batches(columns=cols, filter=cmcv_filter))
                                 for batch in batches:
                                     sid_col = batch.column("sample_id")
                                     bidx_col = batch.column("block_idx")
@@ -1625,8 +1626,9 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
                                 print(f"[CMCV] 读 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
                     return all_rows
 
-                def _read_all_blocks_from_category_lance(manifests_dir: Path) -> list[dict]:
-                    """全量模式：读取所有 block"""
+                def _read_all_blocks_from_category_lance(manifests_dir: Path, force: bool = False) -> list[dict]:
+                    """全量模式：读取所有 block；force=True 时忽略已有结果"""
+                    cmcv_filter = None if force else "consistency_pattern IS NULL"
                     json_keys = ("paddle_table", "glm_table", "self_table",
                                  "paddle_formula", "glm_formula", "self_formula")
                     all_rows = []
@@ -1638,7 +1640,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
                             with _lance_write_lock:
                                 ds = _open_lance(lp)
                                 all_cols = ds.schema.names
-                                if "consistency_pattern" not in all_cols:
+                                if not force and "consistency_pattern" not in all_cols:
                                     continue
                                 read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                 for prefix in ("paddle", "glm", "self"):
@@ -1647,7 +1649,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
                                         if col in all_cols:
                                             read_cols.append(col)
                                 cols = [c for c in read_cols if c in all_cols]
-                                batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
+                                batches = list(ds.to_batches(columns=cols, filter=cmcv_filter))
                             for batch in batches:
                                 for i in range(len(batch)):
                                     row = {c: batch.column(c)[i].as_py() for c in cols}
@@ -1663,7 +1665,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
                             print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
                     return all_rows
 
-                element_rows = _read_blocks_from_category_lance(full_mode=full)
+                element_rows = _read_blocks_from_category_lance(full_mode=full, force=force)
                 if not element_rows:
                     progress_tracker.fail_task(task_id, "text/formula/table.lance 中无可用 block")
                     return
