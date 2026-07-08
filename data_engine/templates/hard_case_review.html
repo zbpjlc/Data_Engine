@@ -227,25 +227,27 @@
                     allBlocks = data.blocks || [];
                     stats = {total: data.total || 0, corrected: data.corrected || 0, judged: data.judged || 0, needs_expert: data.needs_expert || 0};
                 } else {
-                    // 全部批次
+                    // 全部批次：顺序加载，前端限制总量
                     const batches = src ? allSources.filter(s => s.source_id === src) : allSources;
                     const grouped = {};
                     batches.forEach(s => {
                         const key = `${s.source_id}/${s.batch_id}`;
                         if (!grouped[key]) grouped[key] = s;
                     });
-                    const promises = Object.values(grouped).map(g =>
-                        fetch(`/api/hard-cases/${encodeURIComponent(g.source_id)}/${encodeURIComponent(g.batch_id)}`)
-                            .then(r => r.json()).catch(() => ({blocks: [], total: 0, corrected: 0, judged: 0, needs_expert: 0}))
-                    );
-                    const results = await Promise.all(promises);
-                    results.forEach(data => {
-                        allBlocks = allBlocks.concat(data.blocks || []);
-                        stats.total += data.total || 0;
-                        stats.corrected += data.corrected || 0;
-                        stats.judged += data.judged || 0;
-                        stats.needs_expert += data.needs_expert || 0;
-                    });
+                    const HARD_LIMIT = 5000;
+                    for (const g of Object.values(grouped)) {
+                        if (allBlocks.length >= HARD_LIMIT) break;
+                        try {
+                            const res = await fetch(`/api/hard-cases/${encodeURIComponent(g.source_id)}/${encodeURIComponent(g.batch_id)}`);
+                            const data = await res.json();
+                            const remaining = HARD_LIMIT - allBlocks.length;
+                            allBlocks = allBlocks.concat((data.blocks || []).slice(0, remaining));
+                            stats.total += data.total || 0;
+                            stats.corrected += data.corrected || 0;
+                            stats.judged += data.judged || 0;
+                            stats.needs_expert += data.needs_expert || 0;
+                        } catch (_) {}
+                    }
                 }
                 
                 hardBlocks = allBlocks;
@@ -265,6 +267,8 @@
             }
         }
 
+        let renderLimit = 100;
+
         function renderBlockList() {
             const list = document.getElementById('block-list');
             const filtered = hardBlocks.filter(b => {
@@ -280,7 +284,8 @@
                 return;
             }
 
-            list.innerHTML = filtered.map((b, i) => {
+            const visible = filtered.slice(0, renderLimit);
+            list.innerHTML = visible.map((b, i) => {
                 const statusBadge = b.corrected
                     ? '<span class="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">已纠正</span>'
                     : b.needs_expert
@@ -297,6 +302,14 @@
                 </div>`;
             }).join('');
 
+            if (filtered.length > renderLimit) {
+                list.innerHTML += `<div class="px-4 py-3 text-center">
+                    <button onclick="renderLimit+=100;renderBlockList()" class="text-sm text-blue-600 hover:text-blue-800">
+                        加载更多（${renderLimit}/${filtered.length}）
+                    </button>
+                </div>`;
+            }
+
             list.querySelectorAll('.block-item').forEach(el => {
                 el.addEventListener('click', () => {
                     const idx = parseInt(el.dataset.idx);
@@ -307,7 +320,7 @@
             });
         }
 
-        function selectBlock(block) {
+        async function selectBlock(block) {
             selectedBlock = block;
             document.getElementById('detail-empty').classList.add('hidden');
             document.getElementById('detail-panel').classList.remove('hidden');
@@ -330,14 +343,34 @@
                 statusEl.className = 'ml-2 text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-500';
             }
 
-            // Load image
+            const cat = block.block_type === 'table' ? 'table' : block.block_type === 'formula' ? 'formula' : 'text';
+            document.getElementById('detail-paddle').textContent = '加载中...';
+            document.getElementById('detail-glm').textContent = '';
+            document.getElementById('detail-self').textContent = '';
+
             loadBlockImage(block);
 
-            // Show OCR results
-            const cat = block.block_type === 'table' ? 'table' : block.block_type === 'formula' ? 'formula' : 'text';
-            document.getElementById('detail-paddle').textContent = block[`paddle_${cat}`] || '(无)';
-            document.getElementById('detail-glm').textContent = block[`glm_${cat}`] || '(无)';
-            document.getElementById('detail-self').textContent = block[`self_${cat}`] || '(无)';
+            try {
+                const srcVal = document.getElementById('source-select').value;
+                const batchVal = document.getElementById('batch-select').value;
+                const [sid, bid] = batchVal ? batchVal.split('/') : [srcVal, ''];
+                const res = await fetch(`/api/hard-cases/${encodeURIComponent(sid)}/${encodeURIComponent(bid)}/${cat}/${encodeURIComponent(block.sample_id)}/${block.block_idx}`);
+                if (res.ok) {
+                    const detail = await res.json();
+                    document.getElementById('detail-paddle').textContent = detail[`paddle_${cat}`] || '(无)';
+                    document.getElementById('detail-glm').textContent = detail[`glm_${cat}`] || '(无)';
+                    document.getElementById('detail-self').textContent = detail[`self_${cat}`] || '(无)';
+                    selectedBlock = detail;
+                } else {
+                    document.getElementById('detail-paddle').textContent = block[`paddle_${cat}`] || '(无)';
+                    document.getElementById('detail-glm').textContent = block[`glm_${cat}`] || '(无)';
+                    document.getElementById('detail-self').textContent = block[`self_${cat}`] || '(无)';
+                }
+            } catch (_) {
+                document.getElementById('detail-paddle').textContent = block[`paddle_${cat}`] || '(无)';
+                document.getElementById('detail-glm').textContent = block[`glm_${cat}`] || '(无)';
+                document.getElementById('detail-self').textContent = block[`self_${cat}`] || '(无)';
+            }
 
             // Show judge result
             const judgeEl = document.getElementById('judge-result');
@@ -448,6 +481,7 @@
         document.querySelectorAll('.filter-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 currentFilter = btn.dataset.filter;
+                renderLimit = 100;
                 document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('bg-blue-100', 'text-blue-700'));
                 btn.classList.add('bg-blue-100', 'text-blue-700');
                 renderBlockList();

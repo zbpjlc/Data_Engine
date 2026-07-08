@@ -2649,15 +2649,20 @@ async def get_difficulty_aware_samples(
 # ─── Judge-and-Refine (Hard Case 自动纠错) ──────────────────────────────────
 
 @app.get("/api/hard-cases/{source_id}/{batch_id}")
-async def get_hard_cases_list(source_id: str, batch_id: str):
-    """轻量级 Hard block 列表（不含大字段）。"""
+async def get_hard_cases_list(source_id: str, batch_id: str, limit: int = 5000):
+    """轻量级 Hard block 列表（向量化防爆 OOM）。"""
     try:
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifests_dir = batch_dir / "manifests"
 
         hard_blocks = []
+        safe_limit = min(limit, 5000)
+
         for cat in ("text", "formula", "table"):
+            remaining = safe_limit - len(hard_blocks)
+            if remaining <= 0:
+                break
             lp = manifests_dir / f"{cat}.lance"
             if not lp.exists():
                 continue
@@ -2669,21 +2674,34 @@ async def get_hard_cases_list(source_id: str, batch_id: str):
                 light_cols = [c for c in ("sample_id", "block_idx", "block_type",
                                           "consistency_pattern", "judged", "corrected",
                                           "needs_expert", "judge_confidence") if c in cols]
-                batches = list(ds.to_batches(
+                scanner = ds.scanner(
                     columns=light_cols,
                     filter="consistency_pattern = 'all_disagree'",
-                ))
-                for batch in batches:
-                    for i in range(len(batch)):
-                        hard_blocks.append({c: batch.column(c)[i].as_py() for c in light_cols})
+                    limit=remaining,
+                )
+                pa_table = scanner.to_table()
+                if len(pa_table) > 0:
+                    hard_blocks.extend(pa_table.to_pylist())
             except Exception as e:
                 print(f"[hard-cases] 读 {cat}.lance 失败: {e}", file=sys.stderr)
 
+        # 单次循环完成统计，避免 3 次全量遍历
+        judged_count = 0
+        corrected_count = 0
+        needs_expert_count = 0
+        for b in hard_blocks:
+            if b.get("judged"):
+                judged_count += 1
+            if b.get("corrected"):
+                corrected_count += 1
+            if b.get("needs_expert"):
+                needs_expert_count += 1
+
         return {
             "total": len(hard_blocks),
-            "judged": sum(1 for b in hard_blocks if b.get("judged")),
-            "corrected": sum(1 for b in hard_blocks if b.get("corrected")),
-            "needs_expert": sum(1 for b in hard_blocks if b.get("needs_expert")),
+            "judged": judged_count,
+            "corrected": corrected_count,
+            "needs_expert": needs_expert_count,
             "blocks": hard_blocks,
         }
     except Exception as e:
@@ -2716,12 +2734,20 @@ async def get_hard_cases_detail(source_id: str, batch_id: str, cat: str, sample_
         for batch in batches:
             if len(batch) > 0:
                 row = {c: batch.column(c)[0].as_py() for c in detail_cols}
+                if "block_diff_json" in row and isinstance(row["block_diff_json"], str):
+                    try:
+                        row["block_diff_json"] = json.loads(row["block_diff_json"])
+                    except Exception:
+                        pass
+                if "bbox_json" in row and isinstance(row["bbox_json"], str):
+                    try:
+                        row["bbox_json"] = json.loads(row["bbox_json"])
+                    except Exception:
+                        pass
                 return row
         raise HTTPException(status_code=404, detail="block 未找到")
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
