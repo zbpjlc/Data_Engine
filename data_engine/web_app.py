@@ -1538,7 +1538,7 @@ async def get_batch_progress(source_id: str, batch_id: str):
 
 
 @app.post("/api/cmcv/{source_id}")
-async def start_cmcv(source_id: str, batch_id: str = None):
+async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False):
     """启动 CMCV 一致性比较任务"""
     try:
         task_id = f"cmcv_{source_id}_{batch_id}"
@@ -1560,9 +1560,11 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                 manifests_dir = batch_dir / "manifests"
                 ingest_path = find_stage_manifest(manifests_dir, "ingest")
 
-                def _read_blocks_from_category_lance() -> list[dict]:
-                    """从所有 batch 的 element_samples.json 获取抽样 block 列表，再从 lance 读取完整数据"""
-                    # 收集所有 batch 的抽样列表
+                def _read_blocks_from_category_lance(full_mode: bool = False) -> list[dict]:
+                    """读取 block，full_mode=True 时全量，否则优先抽样"""
+                    if full_mode:
+                        return _read_all_blocks_from_category_lance(manifests_dir)
+
                     sample_keys = set()
                     for b in global_status.batches:
                         try:
@@ -1581,6 +1583,8 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                     print(f"[CMCV] 从 element_samples 加载 {len(sample_keys)} 个抽样 block", file=sys.stderr)
 
                     all_rows = []
+                    json_keys = ("paddle_table", "glm_table", "self_table",
+                                 "paddle_formula", "glm_formula", "self_formula")
                     for b in global_status.batches:
                         b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
                         for cat in ("text", "formula", "table"):
@@ -1591,6 +1595,8 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                 with _lance_write_lock:
                                     ds = _open_lance(lp)
                                     all_cols = ds.schema.names
+                                    if "consistency_pattern" not in all_cols:
+                                        continue
                                     read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                     for prefix in ("paddle", "glm", "self"):
                                         for suffix in ("_text", "_confidence", "_table", "_formula"):
@@ -1598,30 +1604,31 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                                             if col in all_cols:
                                                 read_cols.append(col)
                                     cols = [c for c in read_cols if c in all_cols]
-                                    tbl = ds.to_table(columns=cols)
-                                json_keys = ("paddle_table", "glm_table", "self_table",
-                                             "paddle_formula", "glm_formula", "self_formula")
-                                sid_col = tbl.column("sample_id")
-                                bidx_col = tbl.column("block_idx")
-                                for i in range(len(tbl)):
-                                    key = (cat, sid_col[i].as_py(), bidx_col[i].as_py())
-                                    if key not in sample_keys:
-                                        continue
-                                    row = {c: tbl.column(c)[i].as_py() for c in cols}
-                                    for k in json_keys:
-                                        val = row.get(k)
-                                        if isinstance(val, str) and val:
-                                            try:
-                                                row[k] = json.loads(val)
-                                            except (json.JSONDecodeError, TypeError):
-                                                pass
-                                    all_rows.append(row)
+                                    batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
+                                for batch in batches:
+                                    sid_col = batch.column("sample_id")
+                                    bidx_col = batch.column("block_idx")
+                                    for i in range(len(batch)):
+                                        key = (cat, sid_col[i].as_py(), bidx_col[i].as_py())
+                                        if key not in sample_keys:
+                                            continue
+                                        row = {c: batch.column(c)[i].as_py() for c in cols}
+                                        for k in json_keys:
+                                            val = row.get(k)
+                                            if isinstance(val, str) and val:
+                                                try:
+                                                    row[k] = json.loads(val)
+                                                except (json.JSONDecodeError, TypeError):
+                                                    pass
+                                        all_rows.append(row)
                             except Exception as e:
                                 print(f"[CMCV] 读 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
                     return all_rows
 
                 def _read_all_blocks_from_category_lance(manifests_dir: Path) -> list[dict]:
                     """全量模式：读取所有 block"""
+                    json_keys = ("paddle_table", "glm_table", "self_table",
+                                 "paddle_formula", "glm_formula", "self_formula")
                     all_rows = []
                     for cat in ("text", "formula", "table"):
                         lp = manifests_dir / f"{cat}.lance"
@@ -1631,27 +1638,32 @@ async def start_cmcv(source_id: str, batch_id: str = None):
                             with _lance_write_lock:
                                 ds = _open_lance(lp)
                                 all_cols = ds.schema.names
+                                if "consistency_pattern" not in all_cols:
+                                    continue
                                 read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                 for prefix in ("paddle", "glm", "self"):
                                     for suffix in ("_text", "_confidence", "_table", "_formula"):
                                         col = f"{prefix}{suffix}"
                                         if col in all_cols:
                                             read_cols.append(col)
-                                rows = ds.to_table(columns=[c for c in read_cols if c in all_cols]).to_pylist()
-                            for row in rows:
-                                for k in ("paddle_table", "glm_table", "self_table",
-                                            "paddle_formula", "glm_formula", "self_formula"):
-                                    if k in row and isinstance(row[k], str) and row[k]:
-                                        try:
-                                            row[k] = json.loads(row[k])
-                                        except (json.JSONDecodeError, TypeError):
-                                            pass
-                                all_rows.append(row)
+                                cols = [c for c in read_cols if c in all_cols]
+                                batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
+                            for batch in batches:
+                                for i in range(len(batch)):
+                                    row = {c: batch.column(c)[i].as_py() for c in cols}
+                                    for k in json_keys:
+                                        val = row.get(k)
+                                        if isinstance(val, str) and val:
+                                            try:
+                                                row[k] = json.loads(val)
+                                            except (json.JSONDecodeError, TypeError):
+                                                pass
+                                    all_rows.append(row)
                         except Exception as e:
                             print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
                     return all_rows
 
-                element_rows = _read_blocks_from_category_lance()
+                element_rows = _read_blocks_from_category_lance(full_mode=full)
                 if not element_rows:
                     progress_tracker.fail_task(task_id, "text/formula/table.lance 中无可用 block")
                     return
@@ -5084,6 +5096,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                         from data_engine.ocr.cmcv import CMCVEngine
                         print(f"[el-ocr] 自动触发 CMCV 重算...", file=sys.stderr)
                         cmcv_engine = CMCVEngine(use_visual_cdm=True)  # Element CMCV 使用视觉渲染
+                        json_keys = ("paddle_table", "glm_table", "self_table",
+                                     "paddle_formula", "glm_formula", "self_formula")
                         for cat in ("text", "formula", "table"):
                             lp = manifests_dir / f"{cat}.lance"
                             if not lp.exists():
@@ -5092,6 +5106,8 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                 with _lance_write_lock:
                                     ds = _open_lance(lp)
                                     all_cols = ds.schema.names
+                                    if "consistency_pattern" not in all_cols:
+                                        continue
                                     read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                     for _pfx in ("paddle", "glm", "self"):
                                         for suffix in ("_text", "_confidence", "_table", "_formula"):
@@ -5099,20 +5115,19 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                             if col in all_cols:
                                                 read_cols.append(col)
                                     cols = [c for c in read_cols if c in all_cols]
-                                    tbl = ds.to_table(columns=cols)
-                                json_keys = ("paddle_table", "glm_table", "self_table",
-                                             "paddle_formula", "glm_formula", "self_formula")
+                                    batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
                                 rows = []
-                                for i in range(len(tbl)):
-                                    row = {c: tbl.column(c)[i].as_py() for c in cols}
-                                    for key in json_keys:
-                                        val = row.get(key)
-                                        if isinstance(val, str) and val:
-                                            try:
-                                                row[key] = json.loads(val)
-                                            except (json.JSONDecodeError, TypeError):
-                                                pass
-                                    rows.append(row)
+                                for batch in batches:
+                                    for i in range(len(batch)):
+                                        row = {c: batch.column(c)[i].as_py() for c in cols}
+                                        for key in json_keys:
+                                            val = row.get(key)
+                                            if isinstance(val, str) and val:
+                                                try:
+                                                    row[key] = json.loads(val)
+                                                except (json.JSONDecodeError, TypeError):
+                                                    pass
+                                        rows.append(row)
                                 updated_rows, _ = cmcv_engine.process_element_batch(rows)
                                 update_map = {}
                                 for r in updated_rows:

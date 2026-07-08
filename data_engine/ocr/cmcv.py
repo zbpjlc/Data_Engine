@@ -430,13 +430,13 @@ def compare_block(
     }
 
     # Plan §6.6:
-    # easy   — paddle 和 glm 一致，且 self 也一致
-    # medium — paddle 和 glm 一致，但 self 不一致
+    # easy   — paddle 和 glm 一致，且 self 与其中至少一个一致
+    # medium — paddle 和 glm 一致，但 self 与两者都不一致
     # hard   — paddle 和 glm 不一致
     external_agree = sim_pg >= thr  # paddle 与 glm 一致
-    self_agree_with_external = sim_ps >= thr and sim_gs >= thr  # self 与两者都一致
+    self_agree_with_any = sim_ps >= thr or sim_gs >= thr  # self 与至少一个一致
 
-    if external_agree and self_agree_with_external:
+    if external_agree and self_agree_with_any:
         pattern = "all_agree"
     elif external_agree:
         pattern = "partial_agree"

@@ -293,7 +293,13 @@
                                 <div><label class="text-xs text-yellow-600">Medium %</label><input id="ratio-medium" type="number" value="1.0" min="0" max="100" step="0.1" class="w-full px-2 py-1 border rounded text-sm"></div>
                                 <div><label class="text-xs text-red-600">Hard %</label><input id="ratio-hard" type="number" value="2.0" min="0" max="100" step="0.1" class="w-full px-2 py-1 border rounded text-sm"></div>
                             </div>
-                            <button id="btn-page-cmcv" class="w-full px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 font-medium">CMCV 分类</button>
+                            <div class="flex items-center gap-2">
+                                <button id="btn-page-cmcv" class="flex-1 px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 font-medium">CMCV 分类</button>
+                                <label class="flex items-center gap-1 text-xs text-gray-500 whitespace-nowrap">
+                                    <input type="checkbox" id="page-cmcv-full-mode" class="rounded">
+                                    全量
+                                </label>
+                            </div>
                             <button id="btn-page-cmcv-sample" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium hidden">按比例抽样</button>
                             <button id="btn-page-cmcv-layout" class="w-full px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 font-medium hidden">对抽样结果运行 pp-layout</button>
                             <div class="text-xs text-gray-400">探针数 = 「抽样 & Layout」Tab 的每桶抽样数</div>
@@ -470,6 +476,10 @@
                     <div class="text-xs text-gray-500 mb-4">对三模型 OCR 结果做 Cross-Model Consistency Verification，生成 easy/medium/hard 难度。</div>
                     <div class="flex items-center gap-4 mb-4">
                         <button id="btn-run-ecmcv" class="px-4 py-2 bg-rose-600 text-white rounded-md hover:bg-rose-700 font-medium text-sm hidden">运行 CMCV</button>
+                        <label class="flex items-center gap-1.5 text-xs text-gray-500">
+                            <input type="checkbox" id="ecmcv-full-mode" class="rounded">
+                            全量模式
+                        </label>
                     </div>
                     <div id="ecmcv-progress" class="hidden mb-4">
                         <div class="flex items-center gap-3 mb-1">
@@ -2909,9 +2919,10 @@
             const tasksDiv = DOM.pageOcr.paddleOcrTasks;
 
             const v = Request.begin('page-cmcv');
+            const fullMode = document.getElementById('page-cmcv-full-mode')?.checked || false;
             Promise.all(batches.map(async b => {
                 try {
-                    const r = await Request.post('/api/cmcv/' + b.source_id + '?batch_id=' + b.batch_id);
+                    const r = await Request.post('/api/cmcv/' + b.source_id + '?batch_id=' + b.batch_id + '&full=' + fullMode);
                     if (Request.stale('page-cmcv', v)) return;
                     if (!r.ok) throw new Error(r.error);
                 } catch (err) {
@@ -3534,7 +3545,8 @@
             DOM.elementCmcv.progress.container.classList.remove('hidden');
             DOM.elementCmcv.progress.msg.textContent = '启动 CMCV...';
             try {
-                const resp = await Request.post(`/api/cmcv/${src}?batch_id=${bid}`);
+                const fullMode = document.getElementById('ecmcv-full-mode')?.checked || false;
+                const resp = await Request.post(`/api/cmcv/${src}?batch_id=${bid}&full=${fullMode}`);
                 if (!resp.ok) throw new Error(resp.error);
                 const data = resp.data;
                 if (data.task_id) {

@@ -26,7 +26,6 @@ CATEGORIES = ("text", "formula", "table")
 STAGE_INGEST = "ingest"
 FIELD_CONSISTENCY = "consistency_pattern"
 FIELD_BLOCK_DIFF = "block_diff_json"
-FIELD_DIFFICULTY = "difficulty"
 OCR_ENGINE_PREFIXES = ("paddle", "glm", "self")
 OCR_SUFFIXES = ("_text", "_confidence", "_table", "_formula")
 OCR_JSON_FIELDS = (
@@ -304,7 +303,6 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
     from data_engine.ocr.cmcv import CMCVEngine
 
     source, batch_dir, manifests_dir = _resolve_batch(registry, args.source_id, args.batch)
-    ingest_path = find_stage_manifest(manifests_dir, STAGE_INGEST)
 
     read_errors: list[str] = []
     write_errors: list[str] = []
@@ -320,6 +318,8 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
                 ds = open_dataset(lp)
                 block_idx_type = ds.schema.field("block_idx").type
                 all_cols = ds.schema.names
+                if "consistency_pattern" not in all_cols:
+                    continue
                 read_cols = ["sample_id", "block_idx", "block_type"]
                 for prefix in OCR_ENGINE_PREFIXES:
                     for suffix in OCR_SUFFIXES:
@@ -327,8 +327,9 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
                         if col in all_cols:
                             read_cols.append(col)
                 cols = [c for c in read_cols if c in all_cols]
-
-            arrow_tables.append(ds.to_table(columns=cols))
+                batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
+            if batches:
+                arrow_tables.append(pa.Table.from_batches(batches))
         except Exception as e:
             read_errors.append(f"{cat}.lance: {e}")
             logger.error(f"[CMCV] 读取 {cat}.lance 失败: source_id={args.source_id} "
@@ -348,7 +349,7 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
         f"开始一致性比较: {total_rows} 个 block",
     )
 
-    cmcv = CMCVEngine()
+    cmcv = CMCVEngine(use_visual_cdm=True)
 
     def _cmcv_progress(cur, tot, msg):
         progress_tracker.update_progress(task_id=task_id, current=cur, message=f"[{cur}/{tot}] {msg}", total=tot)
@@ -409,17 +410,6 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
             write_errors.append(f"{cat}.lance: {e}")
             logger.error(f"[CMCV] 写回 {cat}.lance 失败: source_id={args.source_id} "
                          f"batch={args.batch} path={lp} error={e}")
-
-    if ingest_path and ingest_path.exists() and page_tiers:
-        sample_ids = list(page_tiers.keys())
-        tiers = [page_tiers[sid] for sid in sample_ids]
-        tier_table = pa.table({
-            "sample_id": pa.array(sample_ids, type=pa.large_string()),
-            FIELD_DIFFICULTY: pa.array(tiers, type=pa.large_string()),
-        })
-        with _lance_write_lock:
-            ds = open_dataset(ingest_path)
-            safe_merge(ds, tier_table, ["sample_id"], context="cmcv/ingest_tiers")
 
     progress_tracker.complete_task(
         task_id=task_id,
