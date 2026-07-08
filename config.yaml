@@ -78,7 +78,7 @@ ocr:
       max_retries: 3
 
   cmcv:
-    agreement_threshold: 0.9
+    agreement_threshold: 1.0
     text_threshold: null   # 1-编辑距离
     table_threshold: null
     formula_threshold: null
