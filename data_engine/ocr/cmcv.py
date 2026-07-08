@@ -587,3 +587,53 @@ class CMCVEngine:
             page_tiers[sample_id] = page_result["tier"]
 
         return updated_rows, page_tiers
+
+    def process_element_batch_arrow(self, table) -> tuple[pa.Table, dict[str, str]]:
+        import pyarrow as pa
+        n = len(table)
+        sid_col = table.column("sample_id")
+        bidx_col = table.column("block_idx")
+        col_names = set(table.column_names)
+
+        by_sample: dict[str, list[int]] = defaultdict(list)
+        for i in range(n):
+            by_sample[sid_col[i].as_py()].append(i)
+
+        ocr_keys = [k for k in ("paddle_text", "glm_text", "self_text",
+                                 "paddle_table", "glm_table", "self_table",
+                                 "paddle_formula", "glm_formula", "self_formula",
+                                 "block_type") if k in col_names]
+        ocr_cols = {k: table.column(k) for k in ocr_keys}
+
+        out_sids: list[str] = []
+        out_bidxs: list[int] = []
+        out_patterns: list[str | None] = []
+        out_diffs: list[str | None] = []
+        page_tiers: dict[str, str] = {}
+
+        for sample_id, indices in by_sample.items():
+            blocks = []
+            for i in indices:
+                row = {"sample_id": sid_col[i].as_py(), "block_idx": bidx_col[i].as_py()}
+                for k in ocr_keys:
+                    row[k] = ocr_cols[k][i].as_py()
+                blocks.append(row)
+            blocks_sorted = sorted(blocks, key=lambda b: b.get("block_idx", 0))
+            page_result = self.compare_page(blocks_sorted)
+
+            for block, detail in zip(blocks_sorted, page_result["details"]):
+                out_sids.append(block["sample_id"])
+                out_bidxs.append(block.get("block_idx", 0))
+                out_patterns.append(detail["pattern"])
+                out_diffs.append(
+                    json.dumps(detail["diff"], ensure_ascii=False) if detail.get("diff") else None
+                )
+            page_tiers[sample_id] = page_result["tier"]
+
+        result_table = pa.table({
+            "sample_id": pa.array(out_sids, type=pa.large_string()),
+            "block_idx": pa.array(out_bidxs, type=table.schema.field("block_idx").type),
+            "consistency_pattern": pa.array(out_patterns, type=pa.large_string()),
+            "block_diff_json": pa.array(out_diffs, type=pa.large_string()),
+        })
+        return result_table, page_tiers
