@@ -239,7 +239,7 @@
                         const key = `${s.source_id}/${s.batch_id}`;
                         if (!grouped[key]) grouped[key] = s;
                     });
-                    const HARD_LIMIT = 5000;
+                    const HARD_LIMIT = 1000;
                     for (const g of Object.values(grouped)) {
                         if (allBlocks.length >= HARD_LIMIT) break;
                         try {
@@ -289,7 +289,7 @@
             }
         }
 
-        let renderLimit = 100;
+        let renderLimit = 20;
 
         function renderBlockList() {
             const list = document.getElementById('block-list');
@@ -326,7 +326,7 @@
 
             if (filtered.length > renderLimit) {
                 list.innerHTML += `<div class="px-4 py-3 text-center">
-                    <button onclick="renderLimit+=100;renderBlockList()" class="text-sm text-blue-600 hover:text-blue-800">
+                    <button onclick="renderLimit+=20;renderBlockList()" class="text-sm text-blue-600 hover:text-blue-800">
                         加载更多（${renderLimit}/${filtered.length}）
                     </button>
                 </div>`;
@@ -503,7 +503,7 @@
         document.querySelectorAll('.filter-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 currentFilter = btn.dataset.filter;
-                renderLimit = 100;
+                renderLimit = 20;
                 document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('bg-blue-100', 'text-blue-700'));
                 btn.classList.add('bg-blue-100', 'text-blue-700');
                 renderBlockList();
@@ -513,7 +513,7 @@
         document.querySelectorAll('.tier-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 currentTier = btn.dataset.tier;
-                renderLimit = 100;
+                renderLimit = 20;
                 document.querySelectorAll('.tier-btn').forEach(b => {
                     b.classList.remove('bg-red-500', 'text-white', 'shadow-sm', 'bg-yellow-500', 'bg-green-500', 'bg-blue-500');
                     b.classList.add('text-gray-500');

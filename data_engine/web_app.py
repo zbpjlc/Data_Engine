@@ -2649,7 +2649,7 @@ async def get_difficulty_aware_samples(
 # ─── Judge-and-Refine (Hard Case 自动纠错) ──────────────────────────────────
 
 @app.get("/api/hard-cases/{source_id}/{batch_id}")
-async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_disagree", limit: int = 5000):
+async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_disagree", limit: int = 1000):
     """轻量级 block 列表（按 tier 筛选，向量化防爆 OOM）。"""
     try:
         source = registry.get(source_id)
@@ -2659,7 +2659,7 @@ async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_di
         tier_filter = f"consistency_pattern = '{tier}'" if tier != "all" else None
         hard_blocks = []
         real_total = 0
-        safe_limit = min(limit, 5000)
+        safe_limit = min(limit, 1000)
 
         for cat in ("text", "formula", "table"):
             lp = manifests_dir / f"{cat}.lance"
