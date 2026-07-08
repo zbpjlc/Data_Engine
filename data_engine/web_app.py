@@ -196,7 +196,7 @@ from starlette.requests import Request
 from fastapi.responses import Response
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest, manifest_count,
-    _lance_write_lock, _safe_write_lance, safe_merge,
+    _lance_write_lock, _safe_write_lance, safe_merge, ensure_lance_indexes,
 )
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
@@ -1743,6 +1743,13 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
                         safe_merge(ds, update_table, ["sample_id"], context="cmcv/ingest_tiers")
                     _lance_cache.invalidate(str(ingest_path))
 
+                for b in global_status.batches:
+                    b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+                    for cat in ("text", "formula", "table"):
+                        lp = b_manifests / f"{cat}.lance"
+                        if lp.exists():
+                            ensure_lance_indexes(lp, ["consistency_pattern", "block_idx"])
+
                 progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(page_tiers)} 页面")
                 invalidate_status_cache()
 
@@ -1830,9 +1837,6 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                 rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
             except Exception:
                 pass
-
-        if sample_keys:
-            rows = [r for r in rows if (r["sample_id"], r["block_idx"]) in sample_keys]
 
         if tier:
             rows = [r for r in rows if r.get("consistency_pattern") == tier]
@@ -2645,8 +2649,8 @@ async def get_difficulty_aware_samples(
 # ─── Judge-and-Refine (Hard Case 自动纠错) ──────────────────────────────────
 
 @app.get("/api/hard-cases/{source_id}/{batch_id}")
-async def get_hard_cases_detail(source_id: str, batch_id: str):
-    """获取需要 Judge-and-Refine 的 Hard block 列表。"""
+async def get_hard_cases_list(source_id: str, batch_id: str):
+    """轻量级 Hard block 列表（不含大字段）。"""
     try:
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
@@ -2660,20 +2664,18 @@ async def get_hard_cases_detail(source_id: str, batch_id: str):
             try:
                 ds = _open_lance(lp)
                 cols = ds.schema.names
-                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json",
-                             "consistency_pattern"]
-                for c in ("paddle_text", "glm_text", "self_text",
-                          "paddle_table", "glm_table", "self_table",
-                          "paddle_formula", "glm_formula", "self_formula",
-                          "judged", "corrected", "needs_expert",
-                          "judge_confidence", "judge_rounds"):
-                    if c in cols:
-                        read_cols.append(c)
-                tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
-                for row in tbl.to_pylist():
-                    if row.get("consistency_pattern") != "all_disagree":
-                        continue
-                    hard_blocks.append(row)
+                if "consistency_pattern" not in cols:
+                    continue
+                light_cols = [c for c in ("sample_id", "block_idx", "block_type",
+                                          "consistency_pattern", "judged", "corrected",
+                                          "needs_expert", "judge_confidence") if c in cols]
+                batches = list(ds.to_batches(
+                    columns=light_cols,
+                    filter="consistency_pattern = 'all_disagree'",
+                ))
+                for batch in batches:
+                    for i in range(len(batch)):
+                        hard_blocks.append({c: batch.column(c)[i].as_py() for c in light_cols})
             except Exception as e:
                 print(f"[hard-cases] 读 {cat}.lance 失败: {e}", file=sys.stderr)
 
@@ -2684,6 +2686,42 @@ async def get_hard_cases_detail(source_id: str, batch_id: str):
             "needs_expert": sum(1 for b in hard_blocks if b.get("needs_expert")),
             "blocks": hard_blocks,
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/hard-cases/{source_id}/{batch_id}/{cat}/{sample_id}/{block_idx}")
+async def get_hard_cases_detail(source_id: str, batch_id: str, cat: str, sample_id: str, block_idx: int):
+    """单条 Hard block 详情（含 OCR 文本 + diff JSON）。"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        lp = batch_dir / "manifests" / f"{cat}.lance"
+        if not lp.exists():
+            raise HTTPException(status_code=404, detail=f"{cat}.lance 不存在")
+
+        ds = _open_lance(lp)
+        cols = ds.schema.names
+        detail_cols = [c for c in ("sample_id", "block_idx", "block_type", "bbox_json",
+                                    "consistency_pattern", "block_diff_json",
+                                    "paddle_text", "glm_text", "self_text",
+                                    "paddle_table", "glm_table", "self_table",
+                                    "paddle_formula", "glm_formula", "self_formula",
+                                    "judged", "corrected", "needs_expert",
+                                    "judge_confidence", "judge_rounds") if c in cols]
+        batches = list(ds.to_batches(
+            columns=detail_cols,
+            filter=f"sample_id = '{sample_id}' AND block_idx = {block_idx}",
+        ))
+        for batch in batches:
+            if len(batch) > 0:
+                row = {c: batch.column(c)[0].as_py() for c in detail_cols}
+                return row
+        raise HTTPException(status_code=404, detail="block 未找到")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

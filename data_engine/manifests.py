@@ -411,4 +411,23 @@ def iso_now() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+def ensure_lance_indexes(path: Path, columns: list[str] | None = None) -> None:
+    """为 Lance 数据集创建标量索引（幂等，已存在则跳过）。"""
+    if not path.exists():
+        return
+    try:
+        ds = lance.dataset(str(path))
+        existing = {idx.name for idx in ds.list_indices()}
+        target_cols = columns or []
+        for col in target_cols:
+            if col not in ds.schema.names or col in existing:
+                continue
+            try:
+                ds.create_scalar_index(col, index_type="BTREE")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 # ─── Element lance I/O ────────────────────────────────────────────────────────

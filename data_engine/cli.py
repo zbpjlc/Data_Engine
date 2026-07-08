@@ -15,6 +15,7 @@ from data_engine.ingest import run_ingest
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest,
     safe_merge, read_table_streaming, open_dataset, _lance_write_lock,
+    ensure_lance_indexes,
 )
 from data_engine.progress_tracker import progress_tracker
 from data_engine.registry import DEFAULT_REGISTRY_PATH, SourceRegistry
@@ -410,6 +411,11 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
             write_errors.append(f"{cat}.lance: {e}")
             logger.error(f"[CMCV] 写回 {cat}.lance 失败: source_id={args.source_id} "
                          f"batch={args.batch} path={lp} error={e}")
+
+    for cat in CATEGORIES:
+        lp = manifests_dir / f"{cat}.lance"
+        if lp.exists():
+            ensure_lance_indexes(lp, ["consistency_pattern", "block_idx"])
 
     progress_tracker.complete_task(
         task_id=task_id,
