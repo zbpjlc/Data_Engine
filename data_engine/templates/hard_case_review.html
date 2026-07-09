@@ -96,6 +96,12 @@
                             <button class="filter-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-filter="corrected">已纠正</button>
                             <button class="filter-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-filter="expert">需专家</button>
                         </div>
+                        <div class="flex gap-1 mt-1.5">
+                            <button class="type-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200 font-medium" data-type="all">全部</button>
+                            <button class="type-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-type="text">Text</button>
+                            <button class="type-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-type="formula">Formula</button>
+                            <button class="type-btn text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" data-type="table">Table</button>
+                        </div>
                     </div>
                     <div id="block-list" class="divide-y max-h-[70vh] overflow-y-auto">
                         <div class="px-4 py-8 text-center text-gray-400 text-sm">请先选择数据源和批次</div>
@@ -172,6 +178,7 @@
         let selectedBlock = null;
         let currentFilter = 'all';
         let currentTier = 'all_disagree';
+        let currentType = 'all';
 
         // Init
         async function init() {
@@ -227,7 +234,7 @@
                 if (val) {
                     // 单批次
                     const [sourceId, batchId] = val.split('/');
-                    const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}?tier=${currentTier}`);
+                    const res = await fetch(`/api/hard-cases/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}?tier=${currentTier}&block_type=${currentType}`);
                     const data = await res.json();
                     allBlocks = data.blocks || [];
                     stats = {total: data.total || 0, corrected: data.corrected || 0, judged: data.judged || 0, needs_expert: data.needs_expert || 0};
@@ -243,7 +250,7 @@
                     for (const g of Object.values(grouped)) {
                         if (allBlocks.length >= HARD_LIMIT) break;
                         try {
-                            const res = await fetch(`/api/hard-cases/${encodeURIComponent(g.source_id)}/${encodeURIComponent(g.batch_id)}?tier=${currentTier}`);
+                            const res = await fetch(`/api/hard-cases/${encodeURIComponent(g.source_id)}/${encodeURIComponent(g.batch_id)}?tier=${currentTier}&block_type=${currentType}`);
                             const data = await res.json();
                             const remaining = HARD_LIMIT - allBlocks.length;
                             allBlocks = allBlocks.concat((data.blocks || []).slice(0, remaining));
@@ -528,6 +535,21 @@
                     document.getElementById('btn-run').classList.add('hidden');
                     document.getElementById('btn-stop').classList.add('hidden');
                 }
+                loadHardCases();
+            });
+        });
+
+        document.querySelectorAll('.type-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                currentType = btn.dataset.type;
+                renderLimit = 20;
+                document.querySelectorAll('.type-btn').forEach(b => {
+                    b.classList.remove('bg-purple-500', 'text-white', 'shadow-sm', 'font-medium');
+                    b.classList.add('text-gray-500');
+                });
+                btn.classList.add('text-white', 'shadow-sm', 'font-medium');
+                btn.classList.remove('text-gray-500');
+                btn.classList.add('bg-purple-500');
                 loadHardCases();
             });
         });

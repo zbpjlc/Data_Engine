@@ -146,6 +146,7 @@ def _read_json_cached(path):
 from typing import Any
 import shutil
 import pyarrow as pa
+import pyarrow.compute as pc
 # 可选导入 torch，仅用于 CUDA 内存清理
 try:
     import torch
@@ -862,7 +863,7 @@ async def start_embed(source_id: str, batch_id: str = None):
 
 
 @app.post("/api/stop/{source_id}")
-async def stop_task(source_id: str, batch_id: str = None):
+async def stop_task(source_id: str, batch_id: str = None, task_id: str = None):
     """停止运行中的任务"""
     from data_engine.progress_tracker import TaskStatus
     stopped = []
@@ -870,10 +871,14 @@ async def stop_task(source_id: str, batch_id: str = None):
 
     all_tasks = progress_tracker.get_all_tasks()
     for tid, task in all_tasks.items():
-        if source_id and source_id not in tid:
-            continue
-        if batch_id and batch_id not in tid:
-            continue
+        if task_id:
+            if tid != task_id:
+                continue
+        else:
+            if source_id and source_id not in tid:
+                continue
+            if batch_id and batch_id not in tid:
+                continue
         if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
             continue
         progress_tracker.request_stop(tid)
@@ -2660,7 +2665,7 @@ async def get_difficulty_aware_samples(
 # ─── Judge-and-Refine (Hard Case 自动纠错) ──────────────────────────────────
 
 @app.get("/api/hard-cases/{source_id}/{batch_id}")
-async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_disagree", limit: int = 1000):
+async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_disagree", block_type: str = "all", limit: int = 1000):
     """轻量级 block 列表（按 tier 筛选，向量化防爆 OOM）。"""
     try:
         source = registry.get(source_id)
@@ -2698,7 +2703,10 @@ async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_di
                 )
                 pa_table = scanner.to_table()
                 if len(pa_table) > 0:
-                    hard_blocks.extend(pa_table.to_pylist())
+                    rows = pa_table.to_pylist()
+                    if block_type != "all" and "block_type" in light_cols:
+                        rows = [r for r in rows if r.get("block_type") == block_type]
+                    hard_blocks.extend(rows)
             except Exception as e:
                 print(f"[hard-cases] 读 {cat}.lance 失败: {e}", file=sys.stderr)
 
@@ -3229,7 +3237,6 @@ def _write_layout_to_category_lances(
         write_mode: 初始写入模式 ("overwrite" 或 "append")
         image_map: 可选，sample_id -> 原始图片字节；提供时将裁剪每个 block 区域并写入 image_data
     """
-    import pyarrow as pa
     from datetime import datetime, timezone
     from data_engine.ocr import (
         FORMULA_BLOCK_TYPES, TABLE_BLOCK_TYPES, SKIP_BLOCK_TYPES,
@@ -4895,9 +4902,10 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
 
 @app.post("/api/element-ocr/{source_id}/{batch_id}")
 async def element_ocr(source_id: str, batch_id: str, request: Request,
-                      model: str = "paddleocr", force: bool = False):
+                      model: str = "paddleocr", force: bool = False, categories: str = "text,formula,table"):
     """对 Element 抽样 block 运行 OCR，结果写回 text/formula/table.lance。
     force=True 时清空该模型已有结果后全部重跑。
+    categories: 逗号分隔的类别列表，如 "text" 或 "text,formula,table"。
     """
     try:
         prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
@@ -4930,9 +4938,10 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 manifests_dir = batch_dir / "manifests"
 
                 # 阶段 1：仅读元数据统计总数（不加载 image_data）
+                selected_cats = [c.strip() for c in categories.split(",") if c.strip()]
                 cat_paths: list[tuple[str, str]] = []  # (category, lance_path)
                 total_blocks = 0
-                for cat in ("text", "formula", "table"):
+                for cat in selected_cats:
                     lp = manifests_dir / f"{cat}.lance"
                     if not lp.exists():
                         continue
@@ -5137,7 +5146,11 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                             done += 1
                             scan_done += 1
                             err_msg = f"（{errors} 错误）" if errors else ""
-                            progress_tracker.update_progress(task_id, current=done, message=f"{model}: {err_msg}" if err_msg else f"{model}")
+                            pct = round(done / total_blocks * 100) if total_blocks else 0
+                            progress_tracker.update_progress(
+                                task_id, current=done,
+                                message=f"{model}: {cat} {done}/{total_blocks} ({pct}%){err_msg}"
+                            )
 
                             if done % save_interval == 0:
                                 _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
