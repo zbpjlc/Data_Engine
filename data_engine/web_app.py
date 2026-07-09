@@ -197,6 +197,7 @@ from fastapi.responses import Response
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest, manifest_count,
     _lance_write_lock, _safe_write_lance, safe_merge, ensure_lance_indexes,
+    ocr_complete_filter,
 )
 from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
@@ -1595,6 +1596,12 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
                             try:
                                 with _lance_write_lock:
                                     ds = _open_lance(lp)
+                                    all_cols = set(ds.schema.names)
+                                    ocr_filter = ocr_complete_filter(all_cols)
+                                    batch_filter = cmcv_filter
+                                    if ocr_filter:
+                                        batch_filter = f"({cmcv_filter}) AND ({ocr_filter})" if cmcv_filter else ocr_filter
+                                    ds = _open_lance(lp)
                                     all_cols = ds.schema.names
                                     if not force and "consistency_pattern" not in all_cols:
                                         continue
@@ -1605,7 +1612,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
                                             if col in all_cols:
                                                 read_cols.append(col)
                                     cols = [c for c in read_cols if c in all_cols]
-                                    batches = list(ds.to_batches(columns=cols, filter=cmcv_filter))
+                                    batches = list(ds.to_batches(columns=cols, filter=batch_filter))
                                 for batch in batches:
                                     sid_col = batch.column("sample_id")
                                     bidx_col = batch.column("block_idx")
@@ -1628,7 +1635,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
 
                 def _read_all_blocks_from_category_lance(manifests_dir: Path, force: bool = False) -> list[dict]:
                     """全量模式：读取所有 block；force=True 时忽略已有结果"""
-                    cmcv_filter = None if force else "consistency_pattern IS NULL"
+                    base_filter = None if force else "consistency_pattern IS NULL"
                     json_keys = ("paddle_table", "glm_table", "self_table",
                                  "paddle_formula", "glm_formula", "self_formula")
                     all_rows = []
@@ -1639,9 +1646,13 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
                         try:
                             with _lance_write_lock:
                                 ds = _open_lance(lp)
-                                all_cols = ds.schema.names
+                                all_cols = set(ds.schema.names)
                                 if not force and "consistency_pattern" not in all_cols:
                                     continue
+                                ocr_filter = ocr_complete_filter(all_cols)
+                                batch_filter = base_filter
+                                if ocr_filter:
+                                    batch_filter = f"({base_filter}) AND ({ocr_filter})" if base_filter else ocr_filter
                                 read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                 for prefix in ("paddle", "glm", "self"):
                                     for suffix in ("_text", "_confidence", "_table", "_formula"):
@@ -1649,7 +1660,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
                                         if col in all_cols:
                                             read_cols.append(col)
                                 cols = [c for c in read_cols if c in all_cols]
-                                batches = list(ds.to_batches(columns=cols, filter=cmcv_filter))
+                                batches = list(ds.to_batches(columns=cols, filter=batch_filter))
                             for batch in batches:
                                 for i in range(len(batch)):
                                     row = {c: batch.column(c)[i].as_py() for c in cols}
@@ -5020,24 +5031,6 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
 
                 # test_mode: 预加载所有 category lance 的 paddle/glm 结果作为 ref_map
                 _test_ref_map: dict[tuple[str, int], dict] = {}
-                if use_test_mode:
-                    for _cat, _lp in cat_paths:
-                        try:
-                            _ds = lance.dataset(_lp)
-                            _cols_needed = ["sample_id", "block_idx"]
-                            for _col in ("paddle_text", "glm_text", "paddle_table", "glm_table", "paddle_formula", "glm_formula"):
-                                if _col in _ds.schema.names:
-                                    _cols_needed.append(_col)
-                            if len(_cols_needed) > 2:
-                                for _batch in _ds.to_table(columns=_cols_needed).to_batches():
-                                    for _row in _batch.to_pylist():
-                                        _key = (_row["sample_id"], _row["block_idx"])
-                                        _ref = {k: v for k, v in _row.items() if k not in ("sample_id", "block_idx")}
-                                        _test_ref_map[_key] = _ref
-                        except Exception as _e:
-                            print(f"[el-ocr] test_mode 加载 {_cat} ref_map 失败: {_e}", file=sys.stderr)
-                    if _test_ref_map:
-                        print(f"[el-ocr] test_mode: 加载 {len(_test_ref_map)} 条 ref_map", file=sys.stderr)
 
                 # 阶段 2：按类别流式处理，逐批读取并处理
                 for cat, lp_str in cat_paths:
@@ -5120,11 +5113,6 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                                 bbox=[0, 0, _w, _h],
                                 confidence=row.get("layout_confidence", 1.0),
                             )
-                            if use_test_mode:
-                                # idx 在 _recognize_test_mode 中是 regions 列表下标（始终=0），
-                                # 需要把实际 block_idx 的数据映射到 key=(sample_id, 0)
-                                _single_ref = {(sid, 0): _test_ref_map.get((sid, bidx), {})}
-                                engine.set_test_context(sid, _single_ref)
                             try:
                                 results = engine.recognize_regions(tmp_path, [region])
                                 r = results[0] if results else None
@@ -5178,17 +5166,21 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                             try:
                                 with _lance_write_lock:
                                     ds = _open_lance(lp)
-                                    all_cols = ds.schema.names
-                                    if "consistency_pattern" not in all_cols:
+                                    all_cols_set = set(ds.schema.names)
+                                    if "consistency_pattern" not in all_cols_set:
                                         continue
+                                    ocr_filter = ocr_complete_filter(all_cols_set)
                                     read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
                                     for _pfx in ("paddle", "glm", "self"):
                                         for suffix in ("_text", "_confidence", "_table", "_formula"):
                                             col = f"{_pfx}{suffix}"
-                                            if col in all_cols:
+                                            if col in all_cols_set:
                                                 read_cols.append(col)
-                                    cols = [c for c in read_cols if c in all_cols]
-                                    batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
+                                    cols = [c for c in read_cols if c in all_cols_set]
+                                    auto_filter = "consistency_pattern IS NULL"
+                                    if ocr_filter:
+                                        auto_filter = f"({auto_filter}) AND ({ocr_filter})"
+                                    batches = list(ds.to_batches(columns=cols, filter=auto_filter))
                                 rows = []
                                 for batch in batches:
                                     for i in range(len(batch)):

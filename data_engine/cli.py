@@ -15,7 +15,7 @@ from data_engine.ingest import run_ingest
 from data_engine.manifests import (
     read_manifest, write_manifest, find_stage_manifest,
     safe_merge, read_table_streaming, open_dataset, _lance_write_lock,
-    ensure_lance_indexes,
+    ensure_lance_indexes, ocr_complete_filter,
 )
 from data_engine.progress_tracker import progress_tracker
 from data_engine.registry import DEFAULT_REGISTRY_PATH, SourceRegistry
@@ -328,7 +328,11 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
                         if col in all_cols:
                             read_cols.append(col)
                 cols = [c for c in read_cols if c in all_cols]
-                batches = list(ds.to_batches(columns=cols, filter="consistency_pattern IS NULL"))
+                ocr_filter = ocr_complete_filter(set(all_cols))
+                filters = ["consistency_pattern IS NULL"]
+                if ocr_filter:
+                    filters.append(ocr_filter)
+                batches = list(ds.to_batches(columns=cols, filter=" AND ".join(filters)))
             if batches:
                 arrow_tables.append(pa.Table.from_batches(batches))
         except Exception as e:

@@ -430,4 +430,16 @@ def ensure_lance_indexes(path: Path, columns: list[str] | None = None) -> None:
         pass
 
 
+def ocr_complete_filter(existing_cols: set[str]) -> str | None:
+    """生成 Lance filter：确保三个 OCR 引擎各至少有一个非空结果列，且三个引擎都存在。"""
+    engines = []
+    for prefix in ("paddle", "glm", "self"):
+        engine_cols = [f"{prefix}{s}" for s in ("_text", "_table", "_formula") if f"{prefix}{s}" in existing_cols]
+        if not engine_cols:
+            return "1 = 0"
+        or_parts = " OR ".join(f"{c} IS NOT NULL" for c in engine_cols)
+        engines.append(f"({or_parts})")
+    return " AND ".join(engines)
+
+
 # ─── Element lance I/O ────────────────────────────────────────────────────────
