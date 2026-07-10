@@ -143,6 +143,233 @@ def _read_json_cached(path):
     return data
 
 
+# ─── 统一后台任务模型 (P0) ─────────────────────────────────────────────────────
+
+import logging
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+logger = logging.getLogger("data_engine")
+
+
+@dataclass
+class TaskContext:
+    """后台任务上下文，包含停止信号和进度更新工具。"""
+    task_id: str
+    task_type: str
+    source_id: str
+    batch_id: str
+    stop_event: threading.Event = field(default_factory=threading.Event)
+
+    def is_stopped(self) -> bool:
+        return self.stop_event.is_set()
+
+    def check_stop(self) -> bool:
+        """检查停止信号，如果已停止则抛出异常终止任务。"""
+        if self.stop_event.is_set():
+            raise StopTaskError(self.task_id)
+        return False
+
+
+class StopTaskError(Exception):
+    """任务被主动停止时抛出。"""
+    def __init__(self, task_id: str):
+        self.task_id = task_id
+        super().__init__(f"任务 {task_id} 已停止")
+
+
+@dataclass
+class TaskHandle:
+    """运行中任务的句柄，用于统一管理。"""
+    thread: threading.Thread
+    context: TaskContext
+    start_time: float = 0.0
+
+    @property
+    def task_id(self) -> str:
+        return self.context.task_id
+
+    @property
+    def is_alive(self) -> bool:
+        return self.thread.is_alive()
+
+    def stop(self, message: str = "用户手动停止"):
+        """发送停止信号并更新进度状态。"""
+        self.context.stop_event.set()
+        progress_tracker.request_stop(self.task_id)
+        progress_tracker.stop_task(self.task_id, message)
+
+    def join(self, timeout: float = 30.0) -> bool:
+        """等待线程结束，返回是否在超时内完成。"""
+        self.thread.join(timeout=timeout)
+        return not self.thread.is_alive()
+
+
+class TaskManager:
+    """统一的后台任务管理器。
+
+    职责：
+    - start(): 启动后台任务
+    - stop(): 停止指定任务
+    - stop_all(): 停止所有任务
+    - join(): 等待所有任务结束
+    - shutdown(): 优雅关闭（stop_all + join）
+    - get(): 获取任务句柄
+    - list(): 列出所有运行中的任务
+    """
+
+    def __init__(self):
+        self._tasks: dict[str, TaskHandle] = {}
+        self._lock = threading.Lock()
+
+    def start(
+        self,
+        *,
+        task_id: str,
+        task_type: str,
+        source_id: str,
+        batch_id: str,
+        target: Callable[[TaskContext], None],
+        **kwargs,
+    ) -> dict:
+        """启动后台任务。"""
+        with self._lock:
+            existing = self._tasks.get(task_id)
+            if existing and existing.is_alive:
+                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running", "task_id": task_id}
+
+            tracked = progress_tracker.get_task(task_id)
+            if tracked and tracked.status.value in ("running", "pending"):
+                if existing and existing.is_alive:
+                    return {"message": f"任务 {task_id} 已在运行中", "status": "already_running", "task_id": task_id}
+                else:
+                    progress_tracker.stop_task(task_id, "线程已终止，任务停止")
+
+        ctx = TaskContext(
+            task_id=task_id,
+            task_type=task_type,
+            source_id=source_id,
+            batch_id=batch_id,
+        )
+
+        def runner():
+            import time as _time
+            try:
+                handle = self.get(task_id)
+                if handle:
+                    handle.start_time = _time.time()
+
+                target(ctx, **kwargs)
+
+                if ctx.is_stopped():
+                    return
+
+                progress_tracker.complete_task(task_id)
+            except StopTaskError:
+                pass
+            except Exception as e:
+                logger.exception(f"[{task_id}] 任务执行失败")
+                try:
+                    progress_tracker.fail_task(task_id, error_message=str(e))
+                except Exception:
+                    pass
+            finally:
+                with self._lock:
+                    self._tasks.pop(task_id, None)
+
+        thread = threading.Thread(target=runner, name=task_id, daemon=False)
+
+        handle = TaskHandle(thread=thread, context=ctx)
+        with self._lock:
+            self._tasks[task_id] = handle
+
+        thread.start()
+        logger.info(f"[{task_id}] 后台任务已启动 (type={task_type}, source={source_id}, batch={batch_id})")
+
+        return {"message": f"已启动 {source_id} 的 {task_type} 任务", "status": "started", "task_id": task_id}
+
+    def stop(self, task_id: str, message: str = "用户手动停止") -> bool:
+        """停止指定任务。返回是否成功发送停止信号。"""
+        handle = self.get(task_id)
+        if handle and handle.is_alive:
+            handle.stop(message)
+            return True
+        return False
+
+    def stop_all(self, message: str = "服务关闭，任务已停止"):
+        """停止所有运行中的任务。"""
+        with self._lock:
+            tasks = list(self._tasks.values())
+
+        for handle in tasks:
+            try:
+                handle.stop(message)
+            except Exception as e:
+                logger.warning(f"[stop_all] 停止任务 {handle.task_id} 失败: {e}")
+
+    def join(self, timeout: float = 30.0) -> dict[str, bool]:
+        """等待所有任务结束。返回每个任务是否在超时内完成。"""
+        with self._lock:
+            tasks = list(self._tasks.values())
+
+        results = {}
+        for handle in tasks:
+            try:
+                results[handle.task_id] = handle.join(timeout=timeout)
+            except Exception as e:
+                logger.warning(f"[join] 等待任务 {handle.task_id} 失败: {e}")
+                results[handle.task_id] = False
+        return results
+
+    def shutdown(self, timeout: float = 30.0):
+        """优雅关闭：stop_all + join。在 FastAPI shutdown 事件中调用。"""
+        with self._lock:
+            tasks = list(self._tasks.values())
+
+        if not tasks:
+            return
+
+        logger.info(f"[shutdown] 正在停止 {len(tasks)} 个运行中的任务...")
+
+        self.stop_all()
+        results = self.join(timeout=timeout)
+
+        for task_id, ok in results.items():
+            if not ok:
+                logger.warning(f"[shutdown] 任务 {task_id} 超时未结束")
+
+        logger.info("[shutdown] 所有任务已停止")
+
+    def get(self, task_id: str) -> Optional[TaskHandle]:
+        """获取任务句柄。"""
+        with self._lock:
+            return self._tasks.get(task_id)
+
+    def list(self) -> dict[str, TaskHandle]:
+        """列出所有运行中的任务。"""
+        with self._lock:
+            return {tid: h for tid, h in self._tasks.items() if h.is_alive}
+
+    def is_alive(self, task_id: str) -> bool:
+        """检查任务是否存活。"""
+        handle = self.get(task_id)
+        return handle.is_alive if handle else False
+
+
+# 全局 TaskManager 单例
+task_manager = TaskManager()
+
+
+# ─── 分页安全限制 ──────────────────────────────────────────────────────────────
+
+MAX_PAGE_SIZE = 1000  # 分页接口最大 page_size
+
+
+def clamp_page_size(page_size: int, max_size: int = MAX_PAGE_SIZE) -> int:
+    """限制 page_size 在合理范围内，防止恶意请求。"""
+    return min(max(page_size, 1), max_size)
+
+
 from typing import Any
 import shutil
 import pyarrow as pa
@@ -211,6 +438,12 @@ for _tid, _task in progress_tracker.get_all_tasks().items():
     if _task.status.value in ("running", "pending"):
         progress_tracker.stop_task(_tid, "服务重启，任务已中断")
         print(f"[startup] marked stale task {_tid} as stopped", file=__import__('sys').stderr)
+
+
+@app.on_event("shutdown")
+def _on_shutdown():
+    """服务关闭时优雅终止所有后台任务，确保 Lance 写入不中断。"""
+    task_manager.shutdown(timeout=30.0)
 
 # Static files and templates
 static_dir = Path(__file__).parent / "static"
@@ -348,6 +581,7 @@ async def filter_data(
 ):
     """筛选数据API"""
     try:
+        page_size = clamp_page_size(page_size)
         # 解析筛选参数
         source_list = sources.split(',') if sources else []
         batch_list = batches.split(',') if batches else []
@@ -437,84 +671,44 @@ async def get_hard_cases(batch_id: str):
 async def start_ingest(source_id: str, batch_id: str = None):
     """启动INGEST任务"""
     try:
-        
-        # 检查是否已有运行中的任务
-        if batch_id:
-            task_id = f"ingest_{source_id}_{batch_id}"
-            existing = progress_tracker.get_task(task_id)
-            if existing and existing.status.value in ["running", "pending"]:
-                # 检查线程是否还活着，如果死了则标记为stopped
-                alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-                if task_id not in alive_threads:
-                    progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-                    print(f"[INGEST] 检测到线程 {task_id} 已终止，标记为stopped", file=sys.stderr)
-                else:
-                    return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
-        
-        print(f"\n========== 启动INGEST任务请求 ==========")
-        print(f"source_id: '{source_id}' (类型: {type(source_id).__name__})")
-        
-        def execute_ingest_task():
-            try:
-                print(f"[INGEST后台线程] 开始执行INGEST任务: {source_id}")
-                # 导入外部的run_ingest函数
-                from data_engine.ingest import run_ingest as ingest_run
-                
-                # 获取该数据源的所有批次
-                global_status = collect_global_status(registry)
-                print(f"[INGEST后台线程] 系统中total batches: {len(global_status.batches)}")
-                
-                source_batches = [b for b in global_status.batches if b.source_id == source_id]
-                if batch_id:
-                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
-                print(f"[INGEST后台线程] 找到 {len(source_batches)} 个source_id='{source_id}'的批次")
-                
-                if not source_batches:
-                    print(f"[INGEST后台线程] ⚠ 未找到数据源 {source_id} 的批次")
-                    all_source_ids = set(b.source_id for b in global_status.batches)
-                    print(f"[INGEST后台线程] 系统中存在的source_id: {all_source_ids}")
-                    progress_tracker.start_task(
-                        task_id=task_id,
-                        task_type="ingest",
-                        source_id=source_id,
-                        batch_id=batch_id or "",
-                        total=0,
-                        message="无可处理的批次（数据源可能离线或无 ingest.lance）"
-                    )
-                    progress_tracker.fail_task(task_id=task_id, error_message="无可处理的批次（数据源可能离线或无 ingest.lance）")
-                    return
-                
-                for batch in source_batches:
-                    print(f"[INGEST后台线程] 开始处理批次: {batch.batch_id}")
-                    try:
-                        # 调用run_ingest函数，传入registry参数
-                        result = ingest_run(registry, source_id, batch.batch_id)
-                        print(f"[INGEST后台线程] ✓ 批次 {batch.batch_id} 处理成功")
-                        print(f"[INGEST后台线程]   - 处理记录数: {len(result.records)}")
-                        print(f"[INGEST后台线程]   - 统计信息: {result.stats}")
-                    except Exception as e:
-                        print(f"[INGEST后台线程] ✗ 批次 {batch.batch_id} 处理失败: {e}")
-                        traceback.print_exc()
-                        
-            except Exception as e:
-                print(f"[INGEST后台线程] ✗ INGEST任务执行失败: {e}")
-                traceback.print_exc()
-        
-        # 在后台线程中运行
-        print(f"[主线程] 启动后台线程进行INGEST处理...")
-        task_id = f"ingest_{source_id}_{batch_id}"
-        thread = threading.Thread(target=execute_ingest_task, name=task_id)
-        thread.daemon = True
-        thread.start()
-        print(f"[主线程] 后台线程已启动，立即返回响应")
-        
-        return {
-            "message": f"已启动 {source_id} 的INGEST任务",
-            "status": "started"
-        }
+        task_id = f"ingest_{source_id}_{batch_id}" if batch_id else f"ingest_{source_id}"
+
+        def _execute_ingest(ctx: TaskContext):
+            from data_engine.ingest import run_ingest as ingest_run
+
+            global_status = collect_global_status(registry)
+            source_batches = [b for b in global_status.batches if b.source_id == ctx.source_id]
+            if ctx.batch_id:
+                source_batches = [b for b in source_batches if b.batch_id == ctx.batch_id]
+
+            if not source_batches:
+                progress_tracker.start_task(
+                    task_id=ctx.task_id, task_type="ingest",
+                    source_id=ctx.source_id, batch_id=ctx.batch_id or "",
+                    total=0, message="无可处理的批次"
+                )
+                progress_tracker.fail_task(task_id=ctx.task_id, error_message="无可处理的批次")
+                return
+
+            for batch in source_batches:
+                ctx.check_stop()
+                progress_tracker.start_task(
+                    task_id=ctx.task_id, task_type="ingest",
+                    source_id=ctx.source_id, batch_id=batch.batch_id,
+                    total=0, message=f"处理批次 {batch.batch_id}"
+                )
+                result = ingest_run(registry, ctx.source_id, batch.batch_id)
+                progress_tracker.update_progress(
+                    ctx.task_id, current=1, total=1,
+                    message=f"批次 {batch.batch_id} 完成: {len(result.records)} 条"
+                )
+
+        return task_manager.start(
+            task_id=task_id, task_type="ingest",
+            source_id=source_id, batch_id=batch_id or "",
+            target=_execute_ingest,
+        )
     except Exception as e:
-        print(f"启动INGEST API错误: {e}")
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -658,208 +852,117 @@ async def restart_ingest(source_id: str):
 @app.post("/api/embed/{source_id}")
 async def start_embed(source_id: str, batch_id: str = None):
     """启动embedding生成任务"""
-    try:
-        
-        # 检查是否已有运行中的任务
-        if batch_id:
-            task_id = f"embed_{source_id}_{batch_id}"
-            existing = progress_tracker.get_task(task_id)
-            if existing and existing.status.value in ["running", "pending"]:
-                # 检查线程是否还活着，如果死了则标记为stopped
-                alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-                if task_id not in alive_threads:
-                    progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-                    print(f"[Embedding] 检测到线程 {task_id} 已终止，标记为stopped", file=sys.stderr)
-                else:
-                    return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
-        
-        print(f"\n========== 启动Embedding任务请求 ==========")
-        print(f"source_id: '{source_id}' (类型: {type(source_id).__name__})")
-        
-        def execute_embed_task():
-            try:
-                print(f"[Embedding后台线程] 开始执行Embedding任务: {source_id}")
-                # 导入embedding函数
-                from data_engine.embedding import extract_embeddings_for_records
-                from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
-                
-                # 获取该数据源的所有批次
-                global_status = collect_global_status(registry)
-                print(f"[Embedding后台线程] 系统中total batches: {len(global_status.batches)}")
-                
-                source_batches = [b for b in global_status.batches if b.source_id == source_id]
-                if batch_id:
-                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
-                print(f"[Embedding后台线程] 找到 {len(source_batches)} 个source_id='{source_id}'的批次")
-                
-                if not source_batches:
-                    print(f"[Embedding后台线程] ⚠ 未找到数据源 {source_id} 的批次")
-                    all_source_ids = set(b.source_id for b in global_status.batches)
-                    print(f"[Embedding后台线程] 系统中存在的source_id: {all_source_ids}")
-                    progress_tracker.start_task(
-                        task_id=task_id,
-                        task_type="embed",
-                        source_id=source_id,
-                        batch_id=batch_id or "",
-                        total=0,
-                        message="无可处理的批次（数据源可能离线或无 ingest.lance）"
-                    )
-                    progress_tracker.fail_task(task_id=task_id, error_message="无可处理的批次（数据源可能离线或无 ingest.lance）")
-                    return
-                
-                for batch in source_batches:
-                    print(f"[Embedding后台线程] 开始处理批次: {batch.batch_id}")
-                    try:
-                        # 获取source信息
-                        source = registry.get(source_id)
-                        batch_dir = source.resolve_batch_dir(batch.batch_id)
-                        manifests_dir = batch_dir / "manifests"
-                        manifest_path = find_stage_manifest(manifests_dir, "ingest")
-                        
-                        if not manifest_path or not manifest_path.exists():
-                            print(f"[Embedding后台线程] ⚠ manifest文件不存在")
-                            continue
-                        
-                        # 使用 manifest_count 获取总数，避免读取全部数据导致 overflow
-                        total_count = manifest_count(manifest_path)
-                        task_id = f"embed_{source_id}_{batch.batch_id}"
-                        
-                        # 开始任务
-                        progress_tracker.start_task(
-                            task_id=task_id,
-                            task_type="embed",
-                            source_id=source_id,
-                            batch_id=batch.batch_id,
-                            total=total_count,
-                            message=f"开始提取 {total_count} 个样本的embedding"
-                        )
-                        
-                        # 分批读取和处理记录，避免 offset overflow
-                        with _lance_write_lock:
-                            ds = lance.dataset(str(manifest_path))
-                        chunk_size = get_config("embedding", "batch_update_interval", default=10000)
-                        
-                        # 创建一次 extractor，复用模型
-                        from data_engine.embedding import CLIPEmbeddingExtractor
-                        extractor = CLIPEmbeddingExtractor()
-                        
-                        # 用 count_rows 计算实际已处理数，作为续跑起点
-                        try:
-                            with _lance_write_lock:
-                                processed_count = ds.count_rows(filter="embedding IS NOT NULL")
-                            start_offset = (processed_count // chunk_size) * chunk_size
-                            print(f"[Embedding] 实际已有 {processed_count} 条记录含embedding，从 offset={start_offset} 开始")
-                        except Exception:
-                            start_offset = 0
-                        
-                        for offset in range(start_offset, total_count, chunk_size):
-                            if progress_tracker.is_stopped(task_id):
-                                print(f"[Embedding] 收到停止信号，已处理到第 {offset} 条", file=sys.stderr)
-                                progress_tracker.stop_task(task_id, f"用户停止，已处理 {offset}/{total_count} 个样本")
-                                break
-                            
-                            limit = min(chunk_size, total_count - offset)
-                            with _lance_write_lock:
-                                chunk_table = ds.to_table(offset=offset, limit=limit)
-                            chunk_records = chunk_table.to_pylist()
-                            
-                            # 跳过已处理的记录（在当前 chunk 内检查）
-                            records_to_process = [r for r in chunk_records if r.get("embedding") is None]
-                            if not records_to_process:
-                                print(f"[Embedding] 跳过第 {offset+1}-{offset+len(chunk_records)} 条（已处理）")
-                                continue
-                            
-                            print(f"[Embedding] 处理第 {offset+1}-{offset+len(chunk_records)} 条，需处理 {len(records_to_process)} 条...")
-                            updated_records = extract_embeddings_for_records(records_to_process, batch_dir, extractor=extractor, task_id=task_id, offset=offset)
-                            
-                            # 构建 sample_id -> embedding 映射
-                            embedding_map = {r["sample_id"]: r.get("embedding") for r in updated_records}
-                            
-                            # 用 Lance update 原地更新 embedding
-                            update_ids = list(embedding_map.keys())
-                            update_embeddings = [embedding_map[sid] for sid in update_ids]
-                            embedding_dim = get_config("embedding", "embedding_dim", default=768)
-                            update_table = pa.table({
-                                "sample_id": pa.array(update_ids, type=pa.large_string()),
-                                "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32(), embedding_dim)),
-                            })
-                            # 写入 Lance 时加锁，避免多线程并发写入导致 glibc 内存死锁
-                            with _lance_write_lock:
-                                current_ds = lance.dataset(str(manifest_path))
-                                safe_merge(current_ds, update_table, ["sample_id"], context="embed")
-                            _lance_cache.invalidate(str(manifest_path))
-                            print(f"[Embedding] 已更新 {len(update_ids)} 条记录的 embedding")
+    task_id = f"embed_{source_id}_{batch_id}" if batch_id else f"embed_{source_id}"
 
-                            # merge_insert 后重新获取 dataset（版本已变）
-                            with _lance_write_lock:
-                                ds = lance.dataset(str(manifest_path))
-                            
-                            # 保存 chunk 长度用于进度更新
-                            chunk_len = len(chunk_records)
-                            
-                            # 清理 chunk 内存，避免大规模处理时 segfault
-                            del chunk_table, chunk_records, records_to_process, updated_records, embedding_map, update_table
-                            gc.collect()
-                            if HAS_TORCH and torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            
-                            # 更新进度到下一个 chunk 位置
-                            next_offset = offset + chunk_len
-                            progress_tracker.update_progress(
-                                task_id=task_id,
-                                current=next_offset,
-                                message=f"已处理 {next_offset}/{total_count}"
-                            )
-                        
-                        task_obj = progress_tracker.get_task(task_id)
-                        if task_obj and task_obj.status.value == "stopped":
-                            print(f"[Embedding] 任务已停止，不标记完成", file=sys.stderr)
-                        else:
-                            # 统计实际成功的embedding数
-                            with _lance_write_lock:
-                                verify_table = ds.to_table(columns=["embedding"])
-                            total_rows = verify_table.num_rows
-                            actual_success = total_rows - verify_table.column("embedding").null_count
-                            msg = f"完成: {actual_success}/{total_rows} 条成功"
-                            if actual_success == 0:
-                                msg += " (全部失败，请检查GPU显存)"
-                            progress_tracker.complete_task(
-                                task_id=task_id,
-                                message=msg
-                            )
-                        invalidate_status_cache()
-                        
-                        print(f"[Embedding后台线程] ✓ 批次 {batch.batch_id} embedding生成成功")
-                        print(f"[Embedding后台线程]   - 已处理记录数: {actual_success}/{total_rows}")
-                        
-                    except Exception as e:
-                        print(f"[Embedding后台线程] ✗ 批次 {batch.batch_id} embedding生成失败: {e}")
-                        traceback.print_exc()
-                        progress_tracker.fail_task(
-                            task_id=f"embed_{source_id}_{batch.batch_id}",
-                            error_message=str(e)
-                        )
-                        
-            except Exception as e:
-                print(f"[Embedding后台线程] ✗ Embedding任务执行失败: {e}")
-                traceback.print_exc()
-        
-        # 在后台线程中运行
-        print(f"[主线程] 启动后台线程进行Embedding处理...")
-        task_id = f"embed_{source_id}_{batch_id}"
-        thread = threading.Thread(target=execute_embed_task, name=task_id)
-        thread.daemon = True
-        thread.start()
-        print(f"[主线程] 后台线程已启动，立即返回响应")
-        
-        return {
-            "message": f"已启动 {source_id} 的Embedding任务",
-            "status": "started"
-        }
-    except Exception as e:
-        print(f"启动Embedding API错误: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    def _execute_embed(ctx: TaskContext):
+        from data_engine.embedding import extract_embeddings_for_records
+        from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
+
+        global_status = collect_global_status(registry)
+        source_batches = [b for b in global_status.batches if b.source_id == ctx.source_id]
+        if ctx.batch_id:
+            source_batches = [b for b in source_batches if b.batch_id == ctx.batch_id]
+
+        if not source_batches:
+            progress_tracker.start_task(
+                task_id=ctx.task_id, task_type="embed",
+                source_id=ctx.source_id, batch_id=ctx.batch_id or "",
+                total=0, message="无可处理的批次"
+            )
+            progress_tracker.fail_task(task_id=ctx.task_id, error_message="无可处理的批次")
+            return
+
+        for batch in source_batches:
+            ctx.check_stop()
+            source = registry.get(ctx.source_id)
+            batch_dir = source.resolve_batch_dir(batch.batch_id)
+            manifests_dir = batch_dir / "manifests"
+            manifest_path = find_stage_manifest(manifests_dir, "ingest")
+
+            if not manifest_path or not manifest_path.exists():
+                continue
+
+            total_count = manifest_count(manifest_path)
+            batch_task_id = f"embed_{ctx.source_id}_{batch.batch_id}"
+
+            progress_tracker.start_task(
+                task_id=batch_task_id, task_type="embed",
+                source_id=ctx.source_id, batch_id=batch.batch_id,
+                total=total_count,
+                message=f"开始提取 {total_count} 个样本的embedding"
+            )
+
+            with _lance_write_lock:
+                ds = lance.dataset(str(manifest_path))
+            chunk_size = get_config("embedding", "batch_update_interval", default=10000)
+
+            from data_engine.embedding import CLIPEmbeddingExtractor
+            extractor = CLIPEmbeddingExtractor()
+
+            try:
+                with _lance_write_lock:
+                    processed_count = ds.count_rows(filter="embedding IS NOT NULL")
+                start_offset = (processed_count // chunk_size) * chunk_size
+            except Exception:
+                start_offset = 0
+
+            for offset in range(start_offset, total_count, chunk_size):
+                ctx.check_stop()
+
+                limit = min(chunk_size, total_count - offset)
+                with _lance_write_lock:
+                    chunk_table = ds.to_table(offset=offset, limit=limit)
+                chunk_records = chunk_table.to_pylist()
+
+                records_to_process = [r for r in chunk_records if r.get("embedding") is None]
+                if not records_to_process:
+                    continue
+
+                updated_records = extract_embeddings_for_records(records_to_process, batch_dir, extractor=extractor, task_id=batch_task_id, offset=offset)
+
+                embedding_map = {r["sample_id"]: r.get("embedding") for r in updated_records}
+                update_ids = list(embedding_map.keys())
+                update_embeddings = [embedding_map[sid] for sid in update_ids]
+                embedding_dim = get_config("embedding", "embedding_dim", default=768)
+                update_table = pa.table({
+                    "sample_id": pa.array(update_ids, type=pa.large_string()),
+                    "embedding": pa.array(update_embeddings, type=pa.list_(pa.float32(), embedding_dim)),
+                })
+                with _lance_write_lock:
+                    current_ds = lance.dataset(str(manifest_path))
+                    safe_merge(current_ds, update_table, ["sample_id"], context="embed")
+                _lance_cache.invalidate(str(manifest_path))
+
+                with _lance_write_lock:
+                    ds = lance.dataset(str(manifest_path))
+
+                chunk_len = len(chunk_records)
+                del chunk_table, chunk_records, records_to_process, updated_records, embedding_map, update_table
+                gc.collect()
+                if HAS_TORCH and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                next_offset = offset + chunk_len
+                progress_tracker.update_progress(
+                    task_id=batch_task_id, current=next_offset,
+                    message=f"已处理 {next_offset}/{total_count}"
+                )
+
+            with _lance_write_lock:
+                verify_table = ds.to_table(columns=["embedding"])
+            total_rows = verify_table.num_rows
+            actual_success = total_rows - verify_table.column("embedding").null_count
+            msg = f"完成: {actual_success}/{total_rows} 条成功"
+            if actual_success == 0:
+                msg += " (全部失败，请检查GPU显存)"
+            progress_tracker.complete_task(task_id=batch_task_id, message=msg)
+            invalidate_status_cache()
+
+    return task_manager.start(
+        task_id=task_id, task_type="embed",
+        source_id=source_id, batch_id=batch_id or "",
+        target=_execute_embed,
+    )
 
 
 @app.post("/api/stop/{source_id}")
@@ -867,14 +970,28 @@ async def stop_task(source_id: str, batch_id: str = None, task_id: str = None):
     """停止运行中的任务"""
     from data_engine.progress_tracker import TaskStatus
     stopped = []
-    alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
 
+    # 优先通过 TaskManager 停止
+    if task_id:
+        if task_manager.stop(task_id):
+            stopped.append(task_id)
+    else:
+        for tid, handle in task_manager.list().items():
+            if source_id and source_id not in tid:
+                continue
+            if batch_id and batch_id not in tid:
+                continue
+            if task_manager.stop(tid):
+                stopped.append(tid)
+
+    # 兼容旧任务（不在 TaskManager 中的）
     all_tasks = progress_tracker.get_all_tasks()
     for tid, task in all_tasks.items():
-        if task_id:
-            if tid != task_id:
-                continue
-        else:
+        if tid in stopped:
+            continue
+        if task_id and tid != task_id:
+            continue
+        if not task_id:
             if source_id and source_id not in tid:
                 continue
             if batch_id and batch_id not in tid:
@@ -882,8 +999,6 @@ async def stop_task(source_id: str, batch_id: str = None, task_id: str = None):
         if task.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
             continue
         progress_tracker.request_stop(tid)
-        if tid not in alive_threads:
-            progress_tracker.stop_task(tid, "线程已终止，任务异常停止")
         stopped.append(tid)
 
     if stopped:
@@ -894,183 +1009,125 @@ async def stop_task(source_id: str, batch_id: str = None, task_id: str = None):
 @app.post("/api/cluster/{source_id}")
 async def start_cluster(source_id: str, batch_id: str = None, n_clusters: int = 5, auto_optimize: bool = True):
     """启动聚类任务"""
-    try:
+    is_all = source_id == "__all__"
+    task_id = f"cluster_{source_id}_{batch_id}" if batch_id else f"cluster_{source_id}"
 
-        is_all = source_id == "__all__"
+    def _execute_cluster(ctx: TaskContext):
+        from data_engine.clustering import cluster_records
+        from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
 
-        # 检查是否已有运行中的任务
-        if batch_id and not is_all:
-            task_id = f"cluster_{source_id}_{batch_id}"
-            existing = progress_tracker.get_task(task_id)
-            if existing and existing.status.value in ["running", "pending"]:
-                alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-                if task_id not in alive_threads:
-                    progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-                    print(f"[Cluster] 检测到线程 {task_id} 已终止，标记为stopped", file=sys.stderr)
-                else:
-                    return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+        global_status = collect_global_status(registry)
+        if is_all:
+            source_batches = global_status.batches
+        else:
+            source_batches = [b for b in global_status.batches if b.source_id == ctx.source_id]
+        if ctx.batch_id:
+            source_batches = [b for b in source_batches if b.batch_id == ctx.batch_id]
 
-        def execute_cluster_task():
-            try:
-                from data_engine.clustering import cluster_records
-                from data_engine.manifests import read_manifest, write_manifest, find_stage_manifest
+        for batch in source_batches:
+            ctx.check_stop()
+            bid = batch.batch_id
+            s_id = batch.source_id
+            source = registry.get(s_id)
+            batch_dir = source.resolve_batch_dir(bid)
+            manifests_dir = batch_dir / "manifests"
+            manifest_path = find_stage_manifest(manifests_dir, "ingest")
 
-                global_status = collect_global_status(registry)
-                if is_all:
-                    source_batches = global_status.batches
-                else:
-                    source_batches = [b for b in global_status.batches if b.source_id == source_id]
-                if batch_id:
-                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
+            if not manifest_path or not manifest_path.exists():
+                continue
 
-                for batch in source_batches:
-                    try:
-                        bid = batch.batch_id
-                        s_id = batch.source_id
-                        source = registry.get(s_id)
-                        batch_dir = source.resolve_batch_dir(bid)
-                        manifests_dir = batch_dir / "manifests"
-                        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+            records = read_manifest(manifest_path)
+            t_id = f"cluster_{s_id}_{bid}"
 
-                        if not manifest_path or not manifest_path.exists():
-                            continue
+            progress_tracker.start_task(
+                task_id=t_id, task_type="cluster",
+                source_id=s_id, batch_id=bid,
+                total=len(records),
+                message=f"开始对 {len(records)} 个样本聚类"
+            )
 
-                        records = read_manifest(manifest_path)
-                        t_id = f"cluster_{s_id}_{bid}"
+            updated_records, stats = cluster_records(
+                records, n_clusters=n_clusters, auto_optimize=auto_optimize)
 
-                        progress_tracker.start_task(
-                            task_id=t_id,
-                            task_type="cluster",
-                            source_id=s_id,
-                            batch_id=bid,
-                            total=len(records),
-                            message=f"开始对 {len(records)} 个样本聚类"
-                        )
+            with _lance_write_lock:
+                write_manifest(manifest_path, updated_records)
 
-                        updated_records, stats = cluster_records(
-                            records, n_clusters=n_clusters, auto_optimize=auto_optimize)
+            progress_tracker.complete_task(
+                task_id=t_id,
+                message=f"聚类完成: {stats.get('n_clusters', '?')} 簇, 轮廓系数 {stats.get('silhouette_score', 0):.3f}"
+            )
+            invalidate_status_cache()
 
-                        with _lance_write_lock:
-                            write_manifest(manifest_path, updated_records)
-
-                        progress_tracker.complete_task(
-                            task_id=t_id,
-                            message=f"聚类完成: {stats.get('n_clusters', '?')} 簇, 轮廓系数 {stats.get('silhouette_score', 0):.3f}"
-                        )
-                        invalidate_status_cache()
-
-                    except Exception as e:
-                        print(f"[聚类后台线程] ✗ 批次 {batch.batch_id} 聚类失败: {e}")
-                        traceback.print_exc()
-                        progress_tracker.fail_task(
-                            task_id=f"cluster_{batch.source_id}_{batch.batch_id}",
-                            error_message=str(e)
-                        )
-
-            except Exception as e:
-                print(f"[聚类后台线程] ✗ 聚类任务执行失败: {e}")
-                traceback.print_exc()
-
-        task_id = f"cluster_{source_id}_{batch_id}"
-        thread = threading.Thread(target=execute_cluster_task, name=task_id)
-        thread.daemon = True
-        thread.start()
-
-        return {"message": f"已启动 {label} 的聚类任务", "status": "started"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return task_manager.start(
+        task_id=task_id, task_type="cluster",
+        source_id=source_id, batch_id=batch_id or "",
+        target=_execute_cluster,
+    )
 
 
 @app.post("/api/index/{source_id}")
 async def start_index_build(source_id: str, batch_id: str = None, num_partitions: int = 256, num_sub_vectors: int = 16):
     """构建向量索引（IVF_PQ）"""
-    try:
-        task_id = f"index_{source_id}_{batch_id}" if batch_id else f"index_{source_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-            if task_id not in alive_threads:
-                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-            else:
-                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+    task_id = f"index_{source_id}_{batch_id}" if batch_id else f"index_{source_id}"
 
-        def execute_index_task():
-            try:
-                from data_engine.index import build_ivf_pq_index
+    def _execute_index(ctx: TaskContext):
+        from data_engine.index import build_ivf_pq_index
 
-                global_status = collect_global_status(registry)
-                source_batches = [b for b in global_status.batches if b.source_id == source_id]
-                if batch_id:
-                    source_batches = [b for b in source_batches if b.batch_id == batch_id]
+        global_status = collect_global_status(registry)
+        source_batches = [b for b in global_status.batches if b.source_id == ctx.source_id]
+        if ctx.batch_id:
+            source_batches = [b for b in source_batches if b.batch_id == ctx.batch_id]
 
-                if not source_batches:
-                    progress_tracker.start_task(
-                        task_id=task_id,
-                        task_type="index",
-                        source_id=source_id,
-                        batch_id=batch_id or "",
-                        total=0,
-                        message="无可处理的批次（数据源可能离线或无 ingest.lance）"
-                    )
-                    progress_tracker.fail_task(task_id=task_id, error_message="无可处理的批次（数据源可能离线或无 ingest.lance）")
-                    return
+        if not source_batches:
+            progress_tracker.start_task(
+                task_id=ctx.task_id, task_type="index",
+                source_id=ctx.source_id, batch_id=ctx.batch_id or "",
+                total=0, message="无可处理的批次"
+            )
+            progress_tracker.fail_task(task_id=ctx.task_id, error_message="无可处理的批次")
+            return
 
-                for batch in source_batches:
-                    bid = batch.batch_id
-                    s_id = batch.source_id
-                    source = registry.get(s_id)
-                    batch_dir = source.resolve_batch_dir(bid)
-                    manifest_path = batch_dir / "manifests" / "ingest.lance"
+        for batch in source_batches:
+            ctx.check_stop()
+            bid = batch.batch_id
+            s_id = batch.source_id
+            source = registry.get(s_id)
+            batch_dir = source.resolve_batch_dir(bid)
+            manifest_path = batch_dir / "manifests" / "ingest.lance"
 
-                    if not manifest_path.exists():
-                        print(f"[Index] 跳过 {bid}: ingest.lance 不存在", file=sys.stderr)
-                        continue
+            if not manifest_path.exists():
+                continue
 
-                    t_id = f"index_{s_id}_{bid}" if len(source_batches) > 1 else task_id
-                    total_count = manifest_count(manifest_path)
+            t_id = f"index_{s_id}_{bid}" if len(source_batches) > 1 else ctx.task_id
+            total_count = manifest_count(manifest_path)
 
-                    progress_tracker.start_task(
-                        task_id=t_id,
-                        task_type="index",
-                        source_id=s_id,
-                        batch_id=bid,
-                        total=total_count,
-                        message=f"开始构建向量索引 ({total_count} 条)"
-                    )
+            progress_tracker.start_task(
+                task_id=t_id, task_type="index",
+                source_id=s_id, batch_id=bid,
+                total=total_count,
+                message=f"开始构建向量索引 ({total_count} 条)"
+            )
 
-                    try:
-                        accelerator = "cuda" if (HAS_TORCH and torch.cuda.is_available()) else None
-                        result = build_ivf_pq_index(
-                            manifest_path,
-                            num_partitions=num_partitions,
-                            num_sub_vectors=num_sub_vectors,
-                            accelerator=accelerator,
-                            task_id=t_id,
-                        )
+            accelerator = "cuda" if (HAS_TORCH and torch.cuda.is_available()) else None
+            result = build_ivf_pq_index(
+                manifest_path,
+                num_partitions=num_partitions,
+                num_sub_vectors=num_sub_vectors,
+                accelerator=accelerator,
+                task_id=t_id,
+            )
 
-                        progress_tracker.complete_task(
-                            task_id=t_id,
-                            message=f"索引构建完成: {num_partitions} 分区, 版本 {result['lance_version']}"
-                        )
-                        invalidate_status_cache()
-                        print(f"[Index] ✓ 批次 {bid} 索引构建成功", file=sys.stderr)
+            progress_tracker.complete_task(
+                task_id=t_id,
+                message=f"索引构建完成: {num_partitions} 分区, 版本 {result['lance_version']}"
+            )
+            invalidate_status_cache()
 
-                    except Exception as e:
-                        print(f"[Index] ✗ 批次 {bid} 索引构建失败: {e}", file=sys.stderr)
-                        traceback.print_exc()
-                        progress_tracker.fail_task(task_id=t_id, error_message=str(e))
-
-            except Exception as e:
-                print(f"[Index] ✗ 索引任务执行失败: {e}", file=sys.stderr)
-                traceback.print_exc()
-
-        thread = threading.Thread(target=execute_index_task, name=task_id)
-        thread.daemon = True
-        thread.start()
-
-        return {"message": f"已启动 {source_id} 的向量索引构建任务", "status": "started"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return task_manager.start(
+        task_id=task_id, task_type="index",
+        source_id=source_id, batch_id=batch_id or "",
+        target=_execute_index,
+    )
 
 
 @app.get("/api/index/{source_id}/{batch_id}/stats")
@@ -1097,6 +1154,7 @@ async def get_index_stats(source_id: str, batch_id: str):
 async def get_partition_samples(source_id: str, batch_id: str, partition_id: int, page: int = 1, page_size: int = 20):
     """获取指定分区的样本列表"""
     try:
+        page_size = clamp_page_size(page_size)
         source = registry.get(source_id)
         batch_dir = source.resolve_batch_dir(batch_id)
         manifest_path = batch_dir / "manifests" / "ingest.lance"
@@ -1271,6 +1329,7 @@ async def lancedb_query_data(
 ):
     """查询Lance数据（支持 ingest / element）"""
     try:
+        page_size = clamp_page_size(page_size)
         global_status = collect_global_status(registry)
         batch = next(
             (b for b in global_status.batches if b.source_id == source_id and b.batch_id == batch_id),
@@ -1430,9 +1489,8 @@ async def get_progress():
     """获取所有任务进度（自动检测死线程）"""
     try:
         # 自动检测死线程：如果任务状态为 running/pending 但线程已死，标记为 stopped
-        alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
         for task_id, task in progress_tracker.get_all_tasks().items():
-            if task.status.value in ("running", "pending") and task_id not in alive_threads:
+            if task.status.value in ("running", "pending") and not task_manager.is_alive(task_id):
                 progress_tracker.stop_task(task_id, "线程已终止，任务异常停止")
 
         tasks = progress_tracker.get_all_tasks()
@@ -1465,11 +1523,10 @@ async def get_task_status(task_id: str):
     """获取单个任务进度（供 TaskPoller 轮询）"""
     try:
         # 自动检测死线程
-        alive_threads = {t.name for t in threading.enumerate() if t.is_alive()}
         task = progress_tracker.get_task(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="任务不存在")
-        if task.status.value in ("running", "pending") and task_id not in alive_threads:
+        if task.status.value in ("running", "pending") and not task_manager.is_alive(task_id):
             progress_tracker.stop_task(task_id, "线程已终止，任务异常停止")
             task = progress_tracker.get_task(task_id)
 
@@ -1546,241 +1603,225 @@ async def get_batch_progress(source_id: str, batch_id: str):
 @app.post("/api/cmcv/{source_id}")
 async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, force: bool = False):
     """启动 CMCV 一致性比较任务"""
-    try:
-        task_id = f"cmcv_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-            if task_id not in alive_threads:
-                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-            else:
-                return {"message": f"任务 {task_id} 已在运行中", "status": "already_running"}
+    task_id = f"cmcv_{source_id}_{batch_id}"
 
-        def execute_cmcv_task():
-            try:
-                from data_engine.ocr.cmcv import CMCVEngine
+    def _execute_cmcv(ctx: TaskContext):
+        from data_engine.ocr.cmcv import CMCVEngine
 
-                global_status = collect_global_status(registry)
-                source = registry.get(source_id)
-                batch_dir = source.resolve_batch_dir(batch_id)
-                manifests_dir = batch_dir / "manifests"
-                ingest_path = find_stage_manifest(manifests_dir, "ingest")
+        global_status = collect_global_status(registry)
+        source = registry.get(ctx.source_id)
+        batch_dir = source.resolve_batch_dir(ctx.batch_id)
+        manifests_dir = batch_dir / "manifests"
+        ingest_path = find_stage_manifest(manifests_dir, "ingest")
 
-                def _read_blocks_from_category_lance(full_mode: bool = False, force: bool = False) -> list[dict]:
-                    """读取 block，full_mode=True 时全量，否则优先抽样；force=True 时忽略已有结果"""
-                    if full_mode:
-                        return _read_all_blocks_from_category_lance(manifests_dir, force=force)
+        def _read_blocks_from_category_lance(full_mode: bool = False, force: bool = False) -> list[dict]:
+            if full_mode:
+                return _read_all_blocks_from_category_lance(manifests_dir, force=force)
 
-                    sample_keys = set()
-                    for b in global_status.batches:
-                        try:
-                            sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
-                            if sp.exists():
-                                sd = _read_json_cached(sp)
-                                for s in sd.get("samples", []):
-                                    sample_keys.add((s["category"], s["sample_id"], s["block_idx"]))
-                        except Exception:
-                            pass
+            sample_keys = set()
+            for b in global_status.batches:
+                try:
+                    sp = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "artifacts" / "element_samples.json"
+                    if sp.exists():
+                        sd = _read_json_cached(sp)
+                        for s in sd.get("samples", []):
+                            sample_keys.add((s["category"], s["sample_id"], s["block_idx"]))
+                except Exception:
+                    pass
 
-                    if not sample_keys:
-                        print("[CMCV] 无 element_samples 数据，回退到全量模式", file=sys.stderr)
-                        return _read_all_blocks_from_category_lance(manifests_dir, force=force)
+            if not sample_keys:
+                return _read_all_blocks_from_category_lance(manifests_dir, force=force)
 
-                    print(f"[CMCV] 从 element_samples 加载 {len(sample_keys)} 个抽样 block", file=sys.stderr)
-
-                    cmcv_filter = None if force else "consistency_pattern IS NULL"
-                    all_rows = []
-                    json_keys = ("paddle_table", "glm_table", "self_table",
-                                 "paddle_formula", "glm_formula", "self_formula")
-                    for b in global_status.batches:
-                        b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
-                        for cat in ("text", "formula", "table"):
-                            lp = b_manifests / f"{cat}.lance"
-                            if not lp.exists():
+            cmcv_filter = None if force else "consistency_pattern IS NULL"
+            all_rows = []
+            json_keys = ("paddle_table", "glm_table", "self_table",
+                         "paddle_formula", "glm_formula", "self_formula")
+            for b in global_status.batches:
+                b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+                for cat in ("text", "formula", "table"):
+                    lp = b_manifests / f"{cat}.lance"
+                    if not lp.exists():
+                        continue
+                    try:
+                        with _lance_write_lock:
+                            ds = _open_lance(lp)
+                            all_cols = set(ds.schema.names)
+                            ocr_filter = ocr_complete_filter(all_cols)
+                            batch_filter = cmcv_filter
+                            if ocr_filter:
+                                batch_filter = f"({cmcv_filter}) AND ({ocr_filter})" if cmcv_filter else ocr_filter
+                            ds = _open_lance(lp)
+                            all_cols = ds.schema.names
+                            if not force and "consistency_pattern" not in all_cols:
                                 continue
-                            try:
-                                with _lance_write_lock:
-                                    ds = _open_lance(lp)
-                                    all_cols = set(ds.schema.names)
-                                    ocr_filter = ocr_complete_filter(all_cols)
-                                    batch_filter = cmcv_filter
-                                    if ocr_filter:
-                                        batch_filter = f"({cmcv_filter}) AND ({ocr_filter})" if cmcv_filter else ocr_filter
-                                    ds = _open_lance(lp)
-                                    all_cols = ds.schema.names
-                                    if not force and "consistency_pattern" not in all_cols:
-                                        continue
-                                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
-                                    for prefix in ("paddle", "glm", "self"):
-                                        for suffix in ("_text", "_confidence", "_table", "_formula"):
-                                            col = f"{prefix}{suffix}"
-                                            if col in all_cols:
-                                                read_cols.append(col)
-                                    cols = [c for c in read_cols if c in all_cols]
-                                    batches = list(ds.to_batches(columns=cols, filter=batch_filter))
-                                for batch in batches:
-                                    sid_col = batch.column("sample_id")
-                                    bidx_col = batch.column("block_idx")
-                                    for i in range(len(batch)):
-                                        key = (cat, sid_col[i].as_py(), bidx_col[i].as_py())
-                                        if key not in sample_keys:
-                                            continue
-                                        row = {c: batch.column(c)[i].as_py() for c in cols}
-                                        for k in json_keys:
-                                            val = row.get(k)
-                                            if isinstance(val, str) and val:
-                                                try:
-                                                    row[k] = json.loads(val)
-                                                except (json.JSONDecodeError, TypeError):
-                                                    pass
-                                        all_rows.append(row)
-                            except Exception as e:
-                                print(f"[CMCV] 读 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
-                    return all_rows
-
-                def _read_all_blocks_from_category_lance(manifests_dir: Path, force: bool = False) -> list[dict]:
-                    """全量模式：读取所有 block；force=True 时忽略已有结果"""
-                    base_filter = None if force else "consistency_pattern IS NULL"
-                    json_keys = ("paddle_table", "glm_table", "self_table",
-                                 "paddle_formula", "glm_formula", "self_formula")
-                    all_rows = []
-                    for cat in ("text", "formula", "table"):
-                        lp = manifests_dir / f"{cat}.lance"
-                        if not lp.exists():
-                            continue
-                        try:
-                            with _lance_write_lock:
-                                ds = _open_lance(lp)
-                                all_cols = set(ds.schema.names)
-                                if not force and "consistency_pattern" not in all_cols:
+                            read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                            for prefix in ("paddle", "glm", "self"):
+                                for suffix in ("_text", "_confidence", "_table", "_formula"):
+                                    col = f"{prefix}{suffix}"
+                                    if col in all_cols:
+                                        read_cols.append(col)
+                            cols = [c for c in read_cols if c in all_cols]
+                            batches = list(ds.to_batches(columns=cols, filter=batch_filter))
+                        for batch in batches:
+                            sid_col = batch.column("sample_id")
+                            bidx_col = batch.column("block_idx")
+                            for i in range(len(batch)):
+                                key = (cat, sid_col[i].as_py(), bidx_col[i].as_py())
+                                if key not in sample_keys:
                                     continue
-                                ocr_filter = ocr_complete_filter(all_cols)
-                                batch_filter = base_filter
-                                if ocr_filter:
-                                    batch_filter = f"({base_filter}) AND ({ocr_filter})" if base_filter else ocr_filter
-                                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
-                                for prefix in ("paddle", "glm", "self"):
-                                    for suffix in ("_text", "_confidence", "_table", "_formula"):
-                                        col = f"{prefix}{suffix}"
-                                        if col in all_cols:
-                                            read_cols.append(col)
-                                cols = [c for c in read_cols if c in all_cols]
-                                batches = list(ds.to_batches(columns=cols, filter=batch_filter))
-                            for batch in batches:
-                                for i in range(len(batch)):
-                                    row = {c: batch.column(c)[i].as_py() for c in cols}
-                                    for k in json_keys:
-                                        val = row.get(k)
-                                        if isinstance(val, str) and val:
-                                            try:
-                                                row[k] = json.loads(val)
-                                            except (json.JSONDecodeError, TypeError):
-                                                pass
-                                    all_rows.append(row)
-                        except Exception as e:
-                            print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
-                    return all_rows
+                                row = {c: batch.column(c)[i].as_py() for c in cols}
+                                for k in json_keys:
+                                    val = row.get(k)
+                                    if isinstance(val, str) and val:
+                                        try:
+                                            row[k] = json.loads(val)
+                                        except (json.JSONDecodeError, TypeError):
+                                            pass
+                                all_rows.append(row)
+                    except Exception as e:
+                        print(f"[CMCV] 读 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
+            return all_rows
 
-                element_rows = _read_blocks_from_category_lance(full_mode=full, force=force)
-                if not element_rows:
-                    progress_tracker.fail_task(task_id, "text/formula/table.lance 中无可用 block")
-                    return
-
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="cmcv",
-                    source_id=source_id, batch_id=batch_id,
-                    total=len(element_rows), message="开始一致性比较",
-                )
-
-                cmcv = CMCVEngine(use_visual_cdm=True)  # Element CMCV 使用视觉渲染（精度优先）
-
-                def _cmcv_step_cb(cur, tot, msg):
-                    progress_tracker.update_progress(task_id=task_id, current=cur, message=f"[{cur}/{tot}] {msg}", total=tot)
-
-                updated_rows, page_tiers = cmcv.process_element_batch(element_rows, progress_callback=_cmcv_step_cb)
-
-                for b in global_status.batches:
-                    b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
-                    for cat in ("text", "formula", "table"):
-                        lp = b_manifests / f"{cat}.lance"
-                        if not lp.exists():
+        def _read_all_blocks_from_category_lance(manifests_dir: Path, force: bool = False) -> list[dict]:
+            base_filter = None if force else "consistency_pattern IS NULL"
+            json_keys = ("paddle_table", "glm_table", "self_table",
+                         "paddle_formula", "glm_formula", "self_formula")
+            all_rows = []
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+                try:
+                    with _lance_write_lock:
+                        ds = _open_lance(lp)
+                        all_cols = set(ds.schema.names)
+                        if not force and "consistency_pattern" not in all_cols:
                             continue
-                        try:
-                            with _lance_write_lock:
-                                ds = _open_lance(lp)
-                                col_names = set(ds.schema.names)
-                                if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
-                                    continue
-                            update_map: dict[str, dict] = {}
-                            for r in updated_rows:
-                                key = (r["sample_id"], r["block_idx"])
-                                if r.get("consistency_pattern"):
-                                    update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
-                                if r.get("block_diff_json"):
-                                    update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
-                            if not update_map:
-                                continue
-                            with _lance_write_lock:
-                                ds = _open_lance(lp)
-                                t = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern", "block_diff_json"])
-                                patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
-                                diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
-                                sids = t.column("sample_id").to_pylist()
-                                bidxs = t.column("block_idx").to_pylist()
-                                pat_map = update_map.get("consistency_pattern", {})
-                                diff_map = update_map.get("block_diff_json", {})
-                                new_patterns = []
-                                new_diffs = []
-                                for i in range(len(t)):
-                                    key = (sids[i], bidxs[i])
-                                    new_patterns.append(pat_map.get(key, patterns[i]))
-                                    new_diffs.append(diff_map.get(key, diffs[i]))
-                            update_table = pa.table({
+                        ocr_filter = ocr_complete_filter(all_cols)
+                        batch_filter = base_filter
+                        if ocr_filter:
+                            batch_filter = f"({base_filter}) AND ({ocr_filter})" if base_filter else ocr_filter
+                        read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                        for prefix in ("paddle", "glm", "self"):
+                            for suffix in ("_text", "_confidence", "_table", "_formula"):
+                                col = f"{prefix}{suffix}"
+                                if col in all_cols:
+                                    read_cols.append(col)
+                        cols = [c for c in read_cols if c in all_cols]
+                        batches = list(ds.to_batches(columns=cols, filter=batch_filter))
+                    for batch in batches:
+                        for i in range(len(batch)):
+                            row = {c: batch.column(c)[i].as_py() for c in cols}
+                            for k in json_keys:
+                                val = row.get(k)
+                                if isinstance(val, str) and val:
+                                    try:
+                                        row[k] = json.loads(val)
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                            all_rows.append(row)
+                except Exception as e:
+                    print(f"[CMCV] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+            return all_rows
+
+        element_rows = _read_blocks_from_category_lance(full_mode=full, force=force)
+        if not element_rows:
+            progress_tracker.fail_task(ctx.task_id, "text/formula/table.lance 中无可用 block")
+            return
+
+        progress_tracker.start_task(
+            task_id=ctx.task_id, task_type="cmcv",
+            source_id=ctx.source_id, batch_id=ctx.batch_id,
+            total=len(element_rows), message="开始一致性比较",
+        )
+
+        cmcv = CMCVEngine(use_visual_cdm=True)
+
+        def _cmcv_step_cb(cur, tot, msg):
+            progress_tracker.update_progress(task_id=ctx.task_id, current=cur, message=f"[{cur}/{tot}] {msg}", total=tot)
+
+        updated_rows, page_tiers = cmcv.process_element_batch(element_rows, progress_callback=_cmcv_step_cb)
+
+        for b in global_status.batches:
+            b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+            for cat in ("text", "formula", "table"):
+                lp = b_manifests / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+                try:
+                    with _lance_write_lock:
+                        ds = _open_lance(lp)
+                        col_names = set(ds.schema.names)
+                        if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
+                            continue
+                    update_map: dict[str, dict] = {}
+                    for r in updated_rows:
+                        key = (r["sample_id"], r["block_idx"])
+                        if r.get("consistency_pattern"):
+                            update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
+                        if r.get("block_diff_json"):
+                            update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
+                    if not update_map:
+                        continue
+                    with _lance_write_lock:
+                        ds = _open_lance(lp)
+                        # 流式读取，逐批更新，避免全表加载
+                        read_cols = ["sample_id", "block_idx", "consistency_pattern", "block_diff_json"]
+                        scanner = ds.scanner(columns=[c for c in read_cols if c in ds.schema.names])
+                        update_batches = []
+                        pat_map = update_map.get("consistency_pattern", {})
+                        diff_map = update_map.get("block_diff_json", {})
+                        for batch in scanner.to_batches():
+                            sids = batch.column("sample_id").to_pylist()
+                            bidxs = batch.column("block_idx").to_pylist()
+                            patterns = batch.column("consistency_pattern").to_pylist() if "consistency_pattern" in batch.column_names else [None] * len(batch)
+                            diffs = batch.column("block_diff_json").to_pylist() if "block_diff_json" in batch.column_names else [None] * len(batch)
+                            new_patterns = []
+                            new_diffs = []
+                            for i in range(len(batch)):
+                                key = (sids[i], bidxs[i])
+                                new_patterns.append(pat_map.get(key, patterns[i]))
+                                new_diffs.append(diff_map.get(key, diffs[i]))
+                            update_batches.append(pa.table({
                                 "sample_id": pa.array(sids, type=pa.large_string()),
                                 "block_idx": pa.array(bidxs, type=pa.int32()),
                                 "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
                                 "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
-                            })
-                            safe_merge(ds, update_table, ["sample_id", "block_idx"], context=f"cmcv/{cat}")
-                            _lance_cache.invalidate(str(lp))
-                            print(f"[CMCV] 已将一致性结果写回 {b.source_id}/{b.batch_id}/{cat}.lance", file=sys.stderr)
-                        except Exception as e:
-                            print(f"[CMCV] 写回 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
+                            }))
+                        _lance_cache.invalidate(str(lp))
+                    if update_batches:
+                        update_table = pa.concat_tables(update_batches)
+                        safe_merge(ds, update_table, ["sample_id", "block_idx"], context=f"cmcv/{cat}")
+                except Exception as e:
+                    print(f"[CMCV] 写回 {b.source_id}/{b.batch_id}/{cat}.lance 失败: {e}", file=sys.stderr)
 
-                if ingest_path and ingest_path.exists() and page_tiers:
-                    sample_ids = list(page_tiers.keys())
-                    tiers = [page_tiers[sid] for sid in sample_ids]
-                    update_table = pa.table({
-                        "sample_id": pa.array(sample_ids, type=pa.large_string()),
-                        "difficulty": pa.array(tiers, type=pa.large_string()),
-                    })
-                    with _lance_write_lock:
-                        ds = _open_lance(ingest_path)
-                        safe_merge(ds, update_table, ["sample_id"], context="cmcv/ingest_tiers")
-                    _lance_cache.invalidate(str(ingest_path))
+        if ingest_path and ingest_path.exists() and page_tiers:
+            sample_ids = list(page_tiers.keys())
+            tiers = [page_tiers[sid] for sid in sample_ids]
+            update_table = pa.table({
+                "sample_id": pa.array(sample_ids, type=pa.large_string()),
+                "difficulty": pa.array(tiers, type=pa.large_string()),
+            })
+            with _lance_write_lock:
+                ds = _open_lance(ingest_path)
+                safe_merge(ds, update_table, ["sample_id"], context="cmcv/ingest_tiers")
+            _lance_cache.invalidate(str(ingest_path))
 
-                for b in global_status.batches:
-                    b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
-                    for cat in ("text", "formula", "table"):
-                        lp = b_manifests / f"{cat}.lance"
-                        if lp.exists():
-                            ensure_lance_indexes(lp, ["consistency_pattern", "block_idx"])
+        for b in global_status.batches:
+            b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+            for cat in ("text", "formula", "table"):
+                lp = b_manifests / f"{cat}.lance"
+                if lp.exists():
+                    ensure_lance_indexes(lp, ["consistency_pattern", "block_idx"])
 
-                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(page_tiers)} 页面")
-                invalidate_status_cache()
+        progress_tracker.complete_task(task_id=ctx.task_id, message=f"完成 {len(page_tiers)} 页面")
+        invalidate_status_cache()
 
-            except Exception as e:
-                print(f"[CMCV] 任务失败: {e}", file=sys.stderr)
-                traceback.print_exc()
-                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
-
-        thread = threading.Thread(target=execute_cmcv_task, name=task_id)
-        thread.daemon = True
-        thread.start()
-
-        return {"message": f"已启动 {source_id} 的 CMCV 任务", "status": "started", "task_id": task_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return task_manager.start(
+        task_id=task_id, task_type="cmcv",
+        source_id=source_id, batch_id=batch_id or "",
+        target=_execute_cmcv,
+    )
 
 
 _cmcv_results_cache = {}  # key: (source_id, batch_id) → (result, lance_version)
@@ -1850,7 +1891,11 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                     col = f"{prefix}_text"
                     if col in col_names:
                         read_cols.append(col)
-                rows.extend(ds.to_table(columns=[c for c in read_cols if c in col_names]).to_pylist())
+                # 流式读取，避免全表加载
+                available = [c for c in read_cols if c in col_names]
+                scanner = ds.scanner(columns=available)
+                for batch in scanner.to_batches():
+                    rows.extend(batch.to_pylist())
             except Exception:
                 pass
 
@@ -2502,27 +2547,27 @@ async def get_difficulty_aware_samples(
                 ds = _open_lance(lp)
                 if "consistency_pattern" not in ds.schema.names:
                     continue
-                tbl = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern"])
-                for row in tbl.to_pylist():
-                    # 构建 block_tier_map（用于后续按 tier 分配）
-                    bk = f"{row['sample_id']}:{row['block_idx']}"
-                    pattern = row.get("consistency_pattern")
-                    if pattern and pattern in PATTERN_TIER:
-                        block_tier_map_global[bk] = PATTERN_TIER[pattern]
+                # 流式读取，避免全表加载
+                scanner = ds.scanner(columns=["sample_id", "block_idx", "consistency_pattern"])
+                for batch in scanner.to_batches():
+                    for row in batch.to_pylist():
+                        bk = f"{row['sample_id']}:{row['block_idx']}"
+                        pattern = row.get("consistency_pattern")
+                        if pattern and pattern in PATTERN_TIER:
+                            block_tier_map_global[bk] = PATTERN_TIER[pattern]
 
-                    # 构建 cluster_diff_map（用于比例计算）
-                    key = (row["sample_id"], row["block_idx"])
-                    if key not in all_sample_keys:
-                        continue
-                    if not pattern:
-                        continue
-                    tier = PATTERN_TIER.get(pattern)
-                    if not tier:
-                        continue
-                    cat_info = clusters_data.get(cat, {})
-                    labels_map = cat_info.get("labels", {})
-                    ckey = f"{row['sample_id']}:{row['block_idx']}"
-                    cid = labels_map.get(ckey)
+                        key = (row["sample_id"], row["block_idx"])
+                        if key not in all_sample_keys:
+                            continue
+                        if not pattern:
+                            continue
+                        tier = PATTERN_TIER.get(pattern)
+                        if not tier:
+                            continue
+                        cat_info = clusters_data.get(cat, {})
+                        labels_map = cat_info.get("labels", {})
+                        ckey = f"{row['sample_id']}:{row['block_idx']}"
+                        cid = labels_map.get(ckey)
                     if cid is None:
                         continue
                     cluster_key = (cat, cid)
@@ -2781,162 +2826,142 @@ async def get_hard_cases_detail(source_id: str, batch_id: str, cat: str, sample_
 @app.post("/api/judge-refine/{source_id}/{batch_id}")
 async def start_judge_refine(source_id: str, batch_id: str, request: Request):
     """启动 Judge-and-Refine 纠错流程。"""
-    try:
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        max_rounds: int = body.get("max_rounds", 3)
-        force: bool = body.get("force", False)
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    max_rounds: int = body.get("max_rounds", 3)
+    force: bool = body.get("force", False)
 
-        task_id = f"judge_refine_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-            if task_id in alive_threads:
-                return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
-            progress_tracker.stop_task(task_id, "线程已终止")
+    task_id = f"judge_refine_{source_id}_{batch_id}"
 
-        def execute():
+    def _execute_judge_refine(ctx: TaskContext):
+        from data_engine.ocr.judge_refine import JudgeRefineEngine
+
+        source = registry.get(ctx.source_id)
+        batch_dir = source.resolve_batch_dir(ctx.batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        hard_blocks = []
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
             try:
-                from data_engine.ocr.judge_refine import JudgeRefineEngine
+                ds = _open_lance(lp)
+                cols = ds.schema.names
+                read_cols = ["sample_id", "block_idx", "block_type", "bbox_json"]
+                for c in ("paddle_text", "glm_text", "self_text",
+                          "paddle_table", "glm_table", "self_table",
+                          "paddle_formula", "glm_formula", "self_formula",
+                          "image_data", "judged", "consistency_pattern"):
+                    if c in cols:
+                        read_cols.append(c)
+                # 流式读取，避免全表加载
+                available_cols = [c for c in read_cols if c in cols]
+                scanner = ds.scanner(columns=available_cols)
+                for batch in scanner.to_batches():
+                    for row in batch.to_pylist():
+                        if row.get("consistency_pattern") != "all_disagree":
+                            continue
+                        if not force and row.get("judged"):
+                            continue
+                        row["_cat"] = cat
+                        hard_blocks.append(row)
+            except Exception:
+                pass
 
-                source = registry.get(source_id)
-                batch_dir = source.resolve_batch_dir(batch_id)
-                manifests_dir = batch_dir / "manifests"
+        if not hard_blocks:
+            progress_tracker.complete_task(task_id=ctx.task_id, message="无需纠错的 Hard block")
+            return
 
-                # 收集所有 Hard blocks
-                hard_blocks = []
-                for cat in ("text", "formula", "table"):
-                    lp = manifests_dir / f"{cat}.lance"
-                    if not lp.exists():
-                        continue
-                    try:
-                        ds = _open_lance(lp)
-                        cols = ds.schema.names
-                        read_cols = ["sample_id", "block_idx", "block_type", "bbox_json"]
-                        for c in ("paddle_text", "glm_text", "self_text",
-                                  "paddle_table", "glm_table", "self_table",
-                                  "paddle_formula", "glm_formula", "self_formula",
-                                  "image_data", "judged", "consistency_pattern"):
-                            if c in cols:
-                                read_cols.append(c)
-                        tbl = ds.to_table(columns=[c for c in read_cols if c in cols])
-                        for row in tbl.to_pylist():
-                            if row.get("consistency_pattern") != "all_disagree":
-                                continue
-                            if not force and row.get("judged"):
-                                continue
-                            row["_cat"] = cat
-                            hard_blocks.append(row)
-                    except Exception as e:
-                        print(f"[judge-refine] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+        progress_tracker.start_task(
+            task_id=ctx.task_id, task_type="judge_refine",
+            source_id=ctx.source_id, batch_id=ctx.batch_id,
+            total=len(hard_blocks), message=f"开始纠错 {len(hard_blocks)} 个 Hard block",
+        )
 
-                if not hard_blocks:
-                    progress_tracker.complete_task(task_id=task_id, message="无需纠错的 Hard block")
-                    return
+        engine = JudgeRefineEngine(max_rounds=max_rounds)
 
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="judge_refine",
-                    source_id=source_id, batch_id=batch_id,
-                    total=len(hard_blocks), message=f"开始纠错 {len(hard_blocks)} 个 Hard block",
+        for i, block in enumerate(hard_blocks):
+            ctx.check_stop()
+
+            cat = block.pop("_cat")
+            sid = block["sample_id"]
+            bidx = block["block_idx"]
+
+            img_bytes = block.get("image_data")
+            if isinstance(img_bytes, str):
+                img_bytes = img_bytes.encode("latin-1")
+
+            try:
+                rounds = engine.judge_and_refine(
+                    block_type=block.get("block_type", "text"),
+                    paddle_text=block.get("paddle_text"),
+                    glm_text=block.get("glm_text"),
+                    self_text=block.get("self_text"),
+                    paddle_table=block.get("paddle_table"),
+                    glm_table=block.get("glm_table"),
+                    self_table=block.get("self_table"),
+                    paddle_formula=block.get("paddle_formula"),
+                    glm_formula=block.get("glm_formula"),
+                    self_formula=block.get("self_formula"),
+                    original_image=img_bytes,
                 )
+            except Exception:
+                rounds = []
 
-                engine = JudgeRefineEngine(max_rounds=max_rounds)
+            judged = True
+            corrected = False
+            needs_expert = True
+            refined_text = None
+            refined_table = None
+            refined_formula = None
+            confidence = 0.0
+            rounds_count = len(rounds)
+            error_locations = []
 
-                for i, block in enumerate(hard_blocks):
-                    if progress_tracker.is_stopped(task_id):
-                        break
+            if rounds:
+                last = rounds[-1].result
+                confidence = last.confidence
+                needs_expert = last.needs_expert
+                refined_text = last.corrected_text
+                refined_table = last.corrected_table
+                refined_formula = last.corrected_formula
+                error_locations = last.error_locations
+                corrected = (refined_text is not None or refined_table is not None or refined_formula is not None) and not needs_expert
 
-                    cat = block.pop("_cat")
-                    sid = block["sample_id"]
-                    bidx = block["block_idx"]
+            try:
+                lp = manifests_dir / f"{cat}.lance"
+                with _lance_write_lock:
+                    ds = _open_lance(lp)
+                    update_data = {
+                        "judged": [True],
+                        "corrected": [corrected],
+                        "needs_expert": [needs_expert],
+                        "judge_confidence": [confidence],
+                        "judge_rounds": [rounds_count],
+                        "judge_error_locations": [json.dumps(error_locations, ensure_ascii=False)],
+                    }
+                    if refined_text is not None:
+                        update_data["judge_refined_text"] = [refined_text]
+                    if refined_table is not None:
+                        update_data["judge_refined_table"] = [refined_table if isinstance(refined_table, str) else json.dumps(refined_table, ensure_ascii=False)]
+                    if refined_formula is not None:
+                        update_data["judge_refined_formula"] = [refined_formula]
+                    ds.update(update_data, where=f"sample_id = '{sid}' AND block_idx = {bidx}")
+            except Exception:
+                pass
 
-                    # 获取原始图片
-                    img_bytes = block.get("image_data")
-                    if isinstance(img_bytes, str):
-                        img_bytes = img_bytes.encode("latin-1")
+            progress_tracker.update_progress(
+                task_id=ctx.task_id, current=i + 1,
+                message=f"Judge-Refine: {i + 1}/{len(hard_blocks)} ({'corrected' if corrected else 'needs_expert'})",
+            )
 
-                    # 执行 Judge-and-Refine
-                    try:
-                        rounds = engine.judge_and_refine(
-                            block_type=block.get("block_type", "text"),
-                            paddle_text=block.get("paddle_text"),
-                            glm_text=block.get("glm_text"),
-                            self_text=block.get("self_text"),
-                            paddle_table=block.get("paddle_table"),
-                            glm_table=block.get("glm_table"),
-                            self_table=block.get("self_table"),
-                            paddle_formula=block.get("paddle_formula"),
-                            glm_formula=block.get("glm_formula"),
-                            self_formula=block.get("self_formula"),
-                            original_image=img_bytes,
-                        )
-                    except Exception as e:
-                        print(f"[judge-refine] {sid}/{bidx} 失败: {e}", file=sys.stderr)
-                        rounds = []
+        progress_tracker.complete_task(task_id=ctx.task_id, message=f"完成 {len(hard_blocks)} 个 Hard block 纠错")
 
-                    # 解析最终结果
-                    judged = True
-                    corrected = False
-                    needs_expert = True
-                    refined_text = None
-                    refined_table = None
-                    refined_formula = None
-                    confidence = 0.0
-                    rounds_count = len(rounds)
-                    error_locations = []
-
-                    if rounds:
-                        last = rounds[-1].result
-                        confidence = last.confidence
-                        needs_expert = last.needs_expert
-                        refined_text = last.corrected_text
-                        refined_table = last.corrected_table
-                        refined_formula = last.corrected_formula
-                        error_locations = last.error_locations
-                        corrected = (refined_text is not None or refined_table is not None or refined_formula is not None) and not needs_expert
-
-                    # 写回 lance
-                    try:
-                        lp = manifests_dir / f"{cat}.lance"
-                        with _lance_write_lock:
-                            ds = _open_lance(lp)
-                            update_data = {
-                                "judged": [True],
-                                "corrected": [corrected],
-                                "needs_expert": [needs_expert],
-                                "judge_confidence": [confidence],
-                                "judge_rounds": [rounds_count],
-                                "judge_error_locations": [json.dumps(error_locations, ensure_ascii=False)],
-                            }
-                            if refined_text is not None:
-                                update_data["judge_refined_text"] = [refined_text]
-                            if refined_table is not None:
-                                update_data["judge_refined_table"] = [refined_table if isinstance(refined_table, str) else json.dumps(refined_table, ensure_ascii=False)]
-                            if refined_formula is not None:
-                                update_data["judge_refined_formula"] = [refined_formula]
-                            ds.update(update_data, where=f"sample_id = '{sid}' AND block_idx = {bidx}")
-                    except Exception as e:
-                        print(f"[judge-refine] 写回 {cat}.lance 失败: {e}", file=sys.stderr)
-
-                    progress_tracker.update_progress(
-                        task_id=task_id, current=i + 1,
-                        message=f"Judge-Refine: {i + 1}/{len(hard_blocks)} ({'✓' if corrected else '✗'})",
-                    )
-
-                progress_tracker.complete_task(task_id=task_id, message=f"完成 {len(hard_blocks)} 个 Hard block 纠错")
-
-            except Exception as e:
-                print(f"[judge-refine] 任务失败: {e}", file=sys.stderr)
-                import traceback
-                traceback.print_exc()
-                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
-
-        thread = threading.Thread(target=execute, name=task_id)
-        thread.daemon = True
-        thread.start()
-
-        return {"message": f"已启动 Judge-and-Refine 纠错", "task_id": task_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return task_manager.start(
+        task_id=task_id, task_type="judge_refine",
+        source_id=source_id, batch_id=batch_id,
+        target=_execute_judge_refine,
+    )
 
 
 @app.get("/api/judge-refine/{source_id}/{batch_id}/results")
@@ -2956,17 +2981,19 @@ async def get_judge_refine_results(source_id: str, batch_id: str):
                 ds = _open_lance(lp)
                 if "judged" not in ds.schema.names:
                     continue
-                tbl = ds.to_table(columns=["consistency_pattern", "judged", "corrected", "needs_expert"])
-                for row in tbl.to_pylist():
-                    if row.get("consistency_pattern") != "all_disagree":
-                        continue
-                    stats["total"] += 1
-                    if row.get("judged"):
-                        stats["judged"] += 1
-                    if row.get("corrected"):
-                        stats["corrected"] += 1
-                    if row.get("needs_expert"):
-                        stats["needs_expert"] += 1
+                # 流式读取
+                scanner = ds.scanner(columns=["consistency_pattern", "judged", "corrected", "needs_expert"])
+                for batch in scanner.to_batches():
+                    for row in batch.to_pylist():
+                        if row.get("consistency_pattern") != "all_disagree":
+                            continue
+                        stats["total"] += 1
+                        if row.get("judged"):
+                            stats["judged"] += 1
+                        if row.get("corrected"):
+                            stats["corrected"] += 1
+                        if row.get("needs_expert"):
+                            stats["needs_expert"] += 1
             except Exception:
                 pass
 
@@ -3360,275 +3387,237 @@ def _start_single_layout(task_id: str, source_id: str, batch_id: str, sample_ids
     if existing and existing.status.value in ["running", "pending"]:
         return False
 
-    def execute():
-        try:
-            source = registry.get(source_id)
-            batch_dir = source.resolve_batch_dir(batch_id)
-            manifests_dir = batch_dir / "manifests"
-            manifest_path = find_stage_manifest(manifests_dir, "ingest")
-            if not manifest_path:
-                progress_tracker.fail_task(task_id, "ingest manifest 不存在")
+    def _execute_layout(ctx: TaskContext):
+        source = registry.get(ctx.source_id)
+        batch_dir = source.resolve_batch_dir(ctx.batch_id)
+        manifests_dir = batch_dir / "manifests"
+        manifest_path = find_stage_manifest(manifests_dir, "ingest")
+        if not manifest_path:
+            progress_tracker.fail_task(ctx.task_id, "ingest manifest 不存在")
+            return
+
+        ids = list(sample_ids) if sample_ids else []
+        if not ids:
+            cpath = batch_dir / "artifacts" / "bucket_samples.json"
+            if cpath.exists():
+                try:
+                    cached = _read_json_cached(cpath)
+                    for samples in cached.get("buckets", {}).values():
+                        for s in samples:
+                            sid = s if isinstance(s, str) else s.get("sample_id", "")
+                            if sid:
+                                ids.append(sid)
+                except Exception:
+                    pass
+
+        if not ids:
+            progress_tracker.fail_task(ctx.task_id, "无抽样样本")
+            return
+
+        mode_label = "写入" if write_lance else "预览"
+        progress_tracker.start_task(
+            task_id=ctx.task_id, task_type="layout_batch",
+            source_id=ctx.source_id, batch_id=ctx.batch_id,
+            total=len(ids), message=f"layout({mode_label}) {len(ids)} 样本",
+        )
+
+        from data_engine.ocr.layout_provider import get_layout_provider
+        layout = get_layout_provider()
+        errors: list[dict] = []
+        layout_stats: dict[str, int] = {"text": 0, "formula": 0, "table": 0}
+        all_results: list[dict] = []
+
+        done_ids: set[str] = set()
+        lance_write_mode = "overwrite"
+        if write_lance:
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if lp.exists():
+                    try:
+                        ds = _open_lance(lp)
+                        ids_col = ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
+                        done_ids.update(ids_col)
+                    except Exception:
+                        pass
+            if done_ids:
+                lance_write_mode = "append"
+        else:
+            lr_path = batch_dir / "artifacts" / "layout_results.json"
+            if lr_path.exists():
+                try:
+                    cached = _read_json_cached(lr_path)
+                    existing_results = cached.get("results", [])
+                    for r in existing_results:
+                        sid = r.get("sample_id", "")
+                        if sid:
+                            done_ids.add(sid)
+                    all_results = list(existing_results)
+                except Exception:
+                    pass
+
+        pending_ids = [sid for sid in ids if sid not in done_ids]
+        done = len(ids) - len(pending_ids)
+
+        if not pending_ids:
+            progress_tracker.update_progress(ctx.task_id, current=done, message=f"全部 {done} 样本已完成，跳过 layout")
+        else:
+            progress_tracker.update_progress(ctx.task_id, current=done, message="加载模型中...")
+            try:
+                _ = layout._ensure_model()
+                progress_tracker.update_progress(ctx.task_id, current=done, message=f"模型就绪，开始处理 {done}/{len(ids)}")
+            except Exception as e:
+                progress_tracker.fail_task(ctx.task_id, f"模型加载失败: {e}")
                 return
 
-            # 从缓存读取 sample_ids
-            ids = list(sample_ids) if sample_ids else []
-            if not ids:
-                cpath = batch_dir / "artifacts" / "bucket_samples.json"
-                if cpath.exists():
+            process_batch_size = 500
+
+            for batch_start in range(0, len(pending_ids), process_batch_size):
+                ctx.check_stop()
+
+                batch_ids = pending_ids[batch_start:batch_start + process_batch_size]
+
+                image_map: dict[str, bytes] = {}
+                loaded_in_batch = 0
+                try:
+                    ds = _open_lance(manifest_path)
+                    query_batch = get_config("layout", "query_batch", default=200)
+                    for qi in range(0, len(batch_ids), query_batch):
+                        ctx.check_stop()
+                        chunk = batch_ids[qi:qi + query_batch]
+                        ids_str = ",".join(repr(s) for s in chunk)
+                        try:
+                            recs = ds.to_table(
+                                columns=["sample_id", "image_data"],
+                                filter=f"sample_id IN ({ids_str})",
+                            ).to_pylist()
+                            for r in recs:
+                                if r.get("image_data"):
+                                    image_map[r["sample_id"]] = r["image_data"]
+                        except Exception:
+                            pass
+                        loaded_in_batch += len(chunk)
+                        progress_tracker.update_progress(
+                            ctx.task_id, current=done + loaded_in_batch,
+                            message=f"加载图片 {done+1}-{done+loaded_in_batch}/{len(ids)}"
+                        )
+                except Exception as e:
+                    print(f"[layout] 加载图片失败 batch {batch_start}: {e}", file=sys.stderr)
+
+                batch_results: list[dict] = []
+                ctx.check_stop()
+
+                valid_sids = [sid for sid in batch_ids if image_map.get(sid)]
+                missing_sids = [sid for sid in batch_ids if not image_map.get(sid)]
+                done += len(missing_sids)
+
+                if valid_sids:
+                    import tempfile
+                    tmp_dir = tempfile.mkdtemp(prefix="layout_batch_")
                     try:
-                        cached = _read_json_cached(cpath)
-                        for samples in cached.get("buckets", {}).values():
-                            for s in samples:
-                                sid = s if isinstance(s, str) else s.get("sample_id", "")
-                                if sid:
-                                    ids.append(sid)
+                        for si, sid in enumerate(valid_sids):
+                            ctx.check_stop()
+                            tmp_path = Path(tmp_dir) / f"{sid}.png"
+                            tmp_path.write_bytes(image_map[sid])
+                            try:
+                                blocks = layout.detect_layout(tmp_path)
+                                result_entry = {
+                                    "sample_id": sid,
+                                    "blocks": [
+                                        {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                                        for b in blocks
+                                    ],
+                                    "block_count": len(blocks),
+                                }
+                                batch_results.append(result_entry)
+                                if not write_lance:
+                                    all_results.append(result_entry)
+                            except Exception as e:
+                                errors.append({"sample_id": sid, "error": str(e)})
+                            done += 1
+                            if (si + 1) % 10 == 0 or si == len(valid_sids) - 1:
+                                progress_tracker.update_progress(
+                                    ctx.task_id, current=done,
+                                    message=f"layout 推理 {done}/{len(ids)}"
+                                )
+                    finally:
+                        import shutil
+                        try:
+                            shutil.rmtree(tmp_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+
+                error_summary = f"（{len(errors)} 错误）" if errors else ""
+                progress_tracker.update_progress(
+                    ctx.task_id, current=done,
+                    message=f"layout {done}/{len(ids)}{error_summary}"
+                )
+                if write_lance and batch_results:
+                    try:
+                        batch_write_stats = _write_layout_to_category_lances(
+                            batch_results, manifests_dir,
+                            flush_size=get_config("layout", "flush_size", default=10_000),
+                            write_mode=lance_write_mode,
+                            image_map=image_map,
+                        )
+                        for k in layout_stats:
+                            layout_stats[k] += batch_write_stats.get(k, 0)
+                        lance_write_mode = "append"
+                    except Exception as e:
+                        if "different schema" in str(e) or "did not match" in str(e):
+                            try:
+                                batch_write_stats = _write_layout_to_category_lances(
+                                    batch_results, manifests_dir,
+                                    flush_size=get_config("layout", "flush_size", default=10_000),
+                                    write_mode="overwrite",
+                                    image_map=image_map,
+                                )
+                                for k in layout_stats:
+                                    layout_stats[k] += batch_write_stats.get(k, 0)
+                                lance_write_mode = "append"
+                            except Exception:
+                                pass
+
+        if write_lance:
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if lp.exists():
+                    try:
+                        ds = _open_lance(lp)
+                        ds.optimize.compact_files()
+                        ds.cleanup_old_versions(keep_versions=1)
                     except Exception:
                         pass
 
-            if not ids:
-                progress_tracker.fail_task(task_id, "无抽样样本")
-                return
+        if write_lance:
+            split_msg = ""
+            for cat in ("text", "formula", "table"):
+                n = layout_stats.get(cat, 0)
+                if n:
+                    split_msg += f"{cat}: {n}, "
+            split_msg = split_msg.rstrip(", ")
+        else:
+            split_msg = f"{len(all_results)} 样本"
 
-            mode_label = "写入" if write_lance else "预览"
-            progress_tracker.start_task(
-                task_id=task_id, task_type="layout_batch",
-                source_id=source_id, batch_id=batch_id,
-                total=len(ids), message=f"layout({mode_label}) {len(ids)} 样本",
-            )
+        final_msg = f"完成 {done} 样本"
+        if split_msg:
+            final_msg += f"，{split_msg}"
+        progress_tracker.complete_task(ctx.task_id, message=final_msg)
 
-            from data_engine.ocr.layout_provider import get_layout_provider
-            layout = get_layout_provider()
-            errors: list[dict] = []
-            layout_stats: dict[str, int] = {"text": 0, "formula": 0, "table": 0}
-            all_results: list[dict] = []  # write_lance=False 时积累全部结果（含续跑已有）
+        if not write_lance and all_results:
+            try:
+                out_path = batch_dir / "artifacts" / "layout_results.json"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(json.dumps({"results": all_results}, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
 
-            # 断点续跑：根据模式从不同来源读取已处理的 sample_id
-            done_ids: set[str] = set()
-            lance_write_mode = "overwrite"
-            if write_lance:
-                for cat in ("text", "formula", "table"):
-                    lp = manifests_dir / f"{cat}.lance"
-                    if lp.exists():
-                        try:
-                            ds = _open_lance(lp)
-                            ids_col = ds.to_table(columns=["sample_id"]).column("sample_id").to_pylist()
-                            done_ids.update(ids_col)
-                        except Exception as e:
-                            print(f"[layout] resume: failed to read {cat}.lance: {e}", file=sys.stderr)
-                if done_ids:
-                    lance_write_mode = "append"
-                    print(f"[layout] resume: {len(done_ids)} done sample_ids from Lance", file=sys.stderr)
-            else:
-                # 预览模式：从 layout_results.json 读取已有结果
-                lr_path = batch_dir / "artifacts" / "layout_results.json"
-                if lr_path.exists():
-                    try:
-                        cached = _read_json_cached(lr_path)
-                        existing = cached.get("results", [])
-                        for r in existing:
-                            sid = r.get("sample_id", "")
-                            if sid:
-                                done_ids.add(sid)
-                        all_results = list(existing)  # 预加载已有结果，后续追加新结果
-                        print(f"[layout] resume: {len(done_ids)} done sample_ids from layout_results.json", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[layout] resume: failed to read layout_results.json: {e}", file=sys.stderr)
+        invalidate_status_cache()
 
-            # 过滤掉已处理的
-            pending_ids = [sid for sid in ids if sid not in done_ids]
-            done = len(ids) - len(pending_ids)
-            print(f"[layout] mode={mode_label} total={len(ids)} done={done} pending={len(pending_ids)}", file=sys.stderr)
-
-            if not pending_ids:
-                progress_tracker.update_progress(task_id, current=done, message=f"全部 {done} 样本已完成，跳过 layout")
-            else:
-                # 先触发模型加载
-                progress_tracker.update_progress(task_id, current=done, message="加载模型中...")
-                try:
-                    _ = layout._ensure_model()
-                    progress_tracker.update_progress(task_id, current=done, message=f"模型就绪，开始处理 {done}/{len(ids)}")
-                except Exception as e:
-                    progress_tracker.fail_task(task_id, f"模型加载失败: {e}")
-                    return
-
-                # 流式处理：分批加载图片 + 跑 layout + 报进度
-                process_batch_size = 500
-
-                for batch_start in range(0, len(pending_ids), process_batch_size):
-                    if progress_tracker.is_stopped(task_id):
-                        break
-
-                    batch_ids = pending_ids[batch_start:batch_start + process_batch_size]
-
-                    # 加载本批图片（分块加载，逐块更新进度）
-                    image_map: dict[str, bytes] = {}
-                    loaded_in_batch = 0
-                    try:
-                        ds = _open_lance(manifest_path)
-                        query_batch = get_config("layout", "query_batch", default=200)
-                        for qi in range(0, len(batch_ids), query_batch):
-                            if progress_tracker.is_stopped(task_id):
-                                break
-                            chunk = batch_ids[qi:qi + query_batch]
-                            ids_str = ",".join(repr(s) for s in chunk)
-                            try:
-                                recs = ds.to_table(
-                                    columns=["sample_id", "image_data"],
-                                    filter=f"sample_id IN ({ids_str})",
-                                ).to_pylist()
-                                for r in recs:
-                                    if r.get("image_data"):
-                                        image_map[r["sample_id"]] = r["image_data"]
-                            except Exception:
-                                pass
-                            loaded_in_batch += len(chunk)
-                            progress_tracker.update_progress(
-                                task_id, current=done + loaded_in_batch,
-                                message=f"加载图片 {done+1}-{done+loaded_in_batch}/{len(ids)}"
-                            )
-                    except Exception as e:
-                        print(f"[layout] 加载图片失败 batch {batch_start}: {e}", file=sys.stderr)
-
-                    # 跑 layout（批量推理，比逐张快 10-16 倍）
-                    batch_results: list[dict] = []
-                    if progress_tracker.is_stopped(task_id):
-                        break
-
-                    # 收集有效图片的 sample_id
-                    valid_sids = [sid for sid in batch_ids if image_map.get(sid)]
-                    missing_sids = [sid for sid in batch_ids if not image_map.get(sid)]
-                    done += len(missing_sids)
-
-                    if valid_sids:
-                        import tempfile
-                        tmp_dir = tempfile.mkdtemp(prefix="layout_batch_")
-                        try:
-                            # 逐张推理，每张都更新进度
-                            for si, sid in enumerate(valid_sids):
-                                if progress_tracker.is_stopped(task_id):
-                                    break
-                                tmp_path = Path(tmp_dir) / f"{sid}.png"
-                                tmp_path.write_bytes(image_map[sid])
-                                try:
-                                    blocks = layout.detect_layout(tmp_path)
-                                    result_entry = {
-                                        "sample_id": sid,
-                                        "blocks": [
-                                            {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
-                                            for b in blocks
-                                        ],
-                                        "block_count": len(blocks),
-                                    }
-                                    batch_results.append(result_entry)
-                                    if not write_lance:
-                                        all_results.append(result_entry)
-                                except Exception as e:
-                                    errors.append({"sample_id": sid, "error": str(e)})
-                                done += 1
-                                if (si + 1) % 10 == 0 or si == len(valid_sids) - 1:
-                                    progress_tracker.update_progress(
-                                        task_id, current=done,
-                                        message=f"layout 推理 {done}/{len(ids)}"
-                                    )
-                        finally:
-                            # 清理临时目录
-                            import shutil
-                            try:
-                                shutil.rmtree(tmp_dir, ignore_errors=True)
-                            except Exception:
-                                pass
-
-                    # 每批结束：更新进度
-                    error_summary = f"（{len(errors)} 错误）" if errors else ""
-                    progress_tracker.update_progress(
-                        task_id, current=done,
-                        message=f"layout {done}/{len(ids)}{error_summary}"
-                    )
-                    # write_lance 模式：增量写 Lance
-                    if write_lance and batch_results:
-                        try:
-                            batch_write_stats = _write_layout_to_category_lances(
-                                batch_results, manifests_dir,
-                                flush_size=get_config("layout", "flush_size", default=10_000),
-                                write_mode=lance_write_mode,
-                                image_map=image_map,
-                            )
-                            for k in layout_stats:
-                                layout_stats[k] += batch_write_stats.get(k, 0)
-                            lance_write_mode = "append"
-                        except Exception as e:
-                            if "different schema" in str(e) or "did not match" in str(e):
-                                print(f"[layout] schema mismatch, overwriting lance files", file=sys.stderr)
-                                try:
-                                    batch_write_stats = _write_layout_to_category_lances(
-                                        batch_results, manifests_dir,
-                                        flush_size=get_config("layout", "flush_size", default=10_000),
-                                        write_mode="overwrite",
-                                        image_map=image_map,
-                                    )
-                                    for k in layout_stats:
-                                        layout_stats[k] += batch_write_stats.get(k, 0)
-                                    lance_write_mode = "append"
-                                except Exception as e2:
-                                    print(f"[layout] overwrite also failed: {e2}", file=sys.stderr)
-                            else:
-                                print(f"[layout] incremental lance write failed: {e}", file=sys.stderr)
-
-            # 所有批次处理完毕后，执行 Lance Compaction 合并碎片
-            if write_lance:
-                for cat in ("text", "formula", "table"):
-                    lp = manifests_dir / f"{cat}.lance"
-                    if lp.exists():
-                        try:
-                            print(f"[layout] compacting {cat}.lance...", file=sys.stderr)
-                            ds = _open_lance(lp)
-                            ds.optimize.compact_files()
-                            ds.cleanup_old_versions(keep_versions=1)
-                            print(f"[layout] {cat}.lance compacted", file=sys.stderr)
-                        except Exception as e:
-                            print(f"[layout] compact {cat}.lance failed: {e}", file=sys.stderr)
-            stopped = progress_tracker.is_stopped(task_id)
-
-            # 完成消息
-            if write_lance:
-                split_msg = ""
-                for cat in ("text", "formula", "table"):
-                    n = layout_stats.get(cat, 0)
-                    if n:
-                        split_msg += f"{cat}: {n}, "
-                split_msg = split_msg.rstrip(", ")
-            else:
-                split_msg = f"{len(all_results)} 样本"
-
-            if stopped:
-                final_msg = f"已停止（已处理 {done}/{len(ids)}"
-                if split_msg:
-                    final_msg += f"，{split_msg}"
-                final_msg += "）"
-                progress_tracker.stop_task(task_id, final_msg)
-            else:
-                final_msg = f"完成 {done} 样本"
-                if split_msg:
-                    final_msg += f"，{split_msg}"
-                progress_tracker.complete_task(task_id, message=final_msg)
-
-            # write_lance=False 模式：保存结果到 layout_results.json
-            if not write_lance and all_results:
-                try:
-                    out_path = batch_dir / "artifacts" / "layout_results.json"
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_text(json.dumps({"results": all_results}, ensure_ascii=False), encoding="utf-8")
-                    print(f"[layout] saved {len(all_results)} results to {out_path}", file=sys.stderr)
-                except Exception as e:
-                    print(f"[layout] failed to save layout_results.json: {e}", file=sys.stderr)
-
-            invalidate_status_cache()
-        except Exception as e:
-            progress_tracker.fail_task(task_id, str(e))
-
-    thread = threading.Thread(target=execute, name=task_id)
-    thread.daemon = True
-    thread.start()
+    task_manager.start(
+        task_id=task_id, task_type="layout_batch",
+        source_id=source_id, batch_id=batch_id,
+        target=_execute_layout,
+    )
     return True
 
 
@@ -3686,257 +3675,227 @@ async def repair_images(source_id: str, batch_id: str):
 
     扫描无图 block → 找出涉及页面 → 重新跑 layout + 拆分 → 替换旧行写入。
     """
-    try:
-        source = registry.get(source_id)
-        batch_dir = source.resolve_batch_dir(batch_id)
-        manifests_dir = batch_dir / "manifests"
+    source = registry.get(source_id)
+    batch_dir = source.resolve_batch_dir(batch_id)
+    manifests_dir = batch_dir / "manifests"
 
-        # 1. 扫描无图 block 涉及的 sample_id
-        no_image_sids: set[str] = set()
-        no_image_counts: dict[str, int] = {}
-        for cat in ("text", "formula", "table"):
-            lp = manifests_dir / f"{cat}.lance"
-            if lp.exists():
-                ds = _open_lance(lp)
-                cols = ds.schema.names
-                if "image_data" in cols:
+    no_image_sids: set[str] = set()
+    no_image_counts: dict[str, int] = {}
+    for cat in ("text", "formula", "table"):
+        lp = manifests_dir / f"{cat}.lance"
+        if lp.exists():
+            ds = _open_lance(lp)
+            cols = ds.schema.names
+            if "image_data" in cols:
+                try:
+                    null_rows = ds.to_table(
+                        columns=["sample_id"],
+                        filter="image_data IS NULL"
+                    ).to_pylist()
+                    sids = {r["sample_id"] for r in null_rows}
+                    no_image_sids.update(sids)
+                    no_image_counts[cat] = len(null_rows)
+                except Exception:
+                    no_image_counts[cat] = 0
+
+    if not no_image_sids:
+        return {"message": "所有 block 均已有图片，无需补齐", "no_image": 0}
+
+    ingest_path = find_stage_manifest(manifests_dir, "ingest")
+    if not ingest_path or not ingest_path.exists():
+        raise HTTPException(status_code=400, detail="ingest.lance 不存在，无法获取页面原图")
+
+    task_id = f"repair_{source_id}_{batch_id}"
+    total_pages = len(no_image_sids)
+
+    def _execute_repair(ctx: TaskContext):
+        progress_tracker.start_task(
+            task_id=ctx.task_id, task_type="repair",
+            source_id=ctx.source_id, batch_id=ctx.batch_id,
+            total=total_pages,
+            message=f"补齐 {total_pages} 个页面的无图 block",
+        )
+
+        image_map: dict[str, bytes] = {}
+        try:
+            with _lance_write_lock:
+                ds = _open_lance(ingest_path)
+                all_sids = list(no_image_sids)
+                chunk_size = 200
+                for ci in range(0, len(all_sids), chunk_size):
+                    chunk = all_sids[ci:ci + chunk_size]
+                    ids_str = ",".join(repr(s) for s in chunk)
                     try:
-                        null_rows = ds.to_table(
-                            columns=["sample_id"],
-                            filter="image_data IS NULL"
+                        recs = ds.to_table(
+                            columns=["sample_id", "image_data"],
+                            filter=f"sample_id IN ({ids_str})",
                         ).to_pylist()
-                        sids = {r["sample_id"] for r in null_rows}
-                        no_image_sids.update(sids)
-                        no_image_counts[cat] = len(null_rows)
+                        for r in recs:
+                            if r.get("image_data"):
+                                image_map[r["sample_id"]] = r["image_data"]
                     except Exception:
-                        no_image_counts[cat] = 0
+                        pass
+        except Exception as e:
+            progress_tracker.fail_task(ctx.task_id, f"加载页面图片失败: {e}")
+            return
 
-        if not no_image_sids:
-            return {"message": "所有 block 均已有图片，无需补齐", "no_image": 0}
+        if not image_map:
+            progress_tracker.complete_task(ctx.task_id, "无法加载任何页面图片")
+            return
 
-        # 检查 ingest.lance 是否存在
-        ingest_path = find_stage_manifest(manifests_dir, "ingest")
-        if not ingest_path or not ingest_path.exists():
-            raise HTTPException(status_code=400, detail="ingest.lance 不存在，无法获取页面原图")
+        from data_engine.ocr.layout_provider import get_layout_provider
+        layout = get_layout_provider()
 
-        task_id = f"repair_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            return {"message": "补齐任务已在运行中", "task_id": task_id}
+        progress_tracker.update_progress(ctx.task_id, current=0, message="加载模型中...")
+        try:
+            _ = layout._ensure_model()
+        except Exception as e:
+            progress_tracker.fail_task(ctx.task_id, f"模型加载失败: {e}")
+            return
 
-        total_pages = len(no_image_sids)
+        import tempfile, shutil
+        tmp_dir = tempfile.mkdtemp(prefix="repair_")
+        errors: list[dict] = []
+        repaired_results: list[dict] = []
+        done = 0
+        process_batch_size = 200
+        pending_sids = [sid for sid in no_image_sids if sid in image_map]
 
-        def execute():
+        for batch_start in range(0, len(pending_sids), process_batch_size):
+            ctx.check_stop()
+
+            batch_ids = pending_sids[batch_start:batch_start + process_batch_size]
+            tmp_paths: list[Path] = []
             try:
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="repair",
-                    source_id=source_id, batch_id=batch_id,
-                    total=total_pages,
-                    message=f"补齐 {total_pages} 个页面的无图 block",
+                for sid in batch_ids:
+                    tmp_path = Path(tmp_dir) / f"{sid}.png"
+                    tmp_path.write_bytes(image_map[sid])
+                    tmp_paths.append(tmp_path)
+
+                try:
+                    all_blocks_list = layout.detect_layout_batch(tmp_paths)
+                    for sid, blocks in zip(batch_ids, all_blocks_list):
+                        repaired_results.append({
+                            "sample_id": sid,
+                            "blocks": [
+                                {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                                for b in blocks
+                            ],
+                            "block_count": len(blocks),
+                        })
+                except Exception:
+                    for sid in batch_ids:
+                        try:
+                            blocks = layout.detect_layout_from_bytes(image_map[sid])
+                            repaired_results.append({
+                                "sample_id": sid,
+                                "blocks": [
+                                    {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
+                                    for b in blocks
+                                ],
+                                "block_count": len(blocks),
+                            })
+                        except Exception as e2:
+                            errors.append({"sample_id": sid, "error": str(e2)})
+            finally:
+                for p in tmp_paths:
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+
+            done += len(batch_ids)
+            error_summary = f"（{len(errors)} 错误）" if errors else ""
+            progress_tracker.update_progress(
+                ctx.task_id, current=done,
+                message=f"layout {done}/{total_pages}{error_summary}",
+            )
+
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        ctx.check_stop()
+
+        progress_tracker.update_progress(ctx.task_id, current=done, message="写入 Lance...")
+        repair_sids_set = set(no_image_sids)
+
+        new_stats: dict[str, int] = {"text": 0, "formula": 0, "table": 0}
+        if repaired_results:
+            tmp_manifests = Path(tempfile.mkdtemp(prefix="repair_manifests_"))
+            try:
+                new_stats = _write_layout_to_category_lances(
+                    repaired_results, tmp_manifests,
+                    flush_size=10_000,
+                    write_mode="create",
+                    image_map=image_map,
                 )
 
-                # 2. 从 ingest.lance 加载页面图片
-                image_map: dict[str, bytes] = {}
-                try:
+                for cat in ("text", "formula", "table"):
+                    lp = manifests_dir / f"{cat}.lance"
+                    new_lp = tmp_manifests / f"{cat}.lance"
+                    if not lp.exists():
+                        if new_lp.exists():
+                            import shutil as _sh
+                            _sh.copytree(str(new_lp), str(lp))
+                        continue
+
+                    # 流式过滤：逐批读取，只保留不在 repair_sids_set 中的行
                     with _lance_write_lock:
-                        ds = _open_lance(ingest_path)
-                        all_sids = list(no_image_sids)
-                        chunk_size = 200
-                        for ci in range(0, len(all_sids), chunk_size):
-                            chunk = all_sids[ci:ci + chunk_size]
-                            ids_str = ",".join(repr(s) for s in chunk)
-                            try:
-                                recs = ds.to_table(
-                                    columns=["sample_id", "image_data"],
-                                    filter=f"sample_id IN ({ids_str})",
-                                ).to_pylist()
-                                for r in recs:
-                                    if r.get("image_data"):
-                                        image_map[r["sample_id"]] = r["image_data"]
-                            except Exception:
-                                pass
-                except Exception as e:
-                    progress_tracker.fail_task(task_id, f"加载页面图片失败: {e}")
-                    return
+                        ds = _open_lance(lp)
+                        scanner = ds.scanner()
+                        kept_batches = []
+                        for batch in scanner.to_batches():
+                            sids = batch.column("sample_id").to_pylist()
+                            keep_mask = [sid not in repair_sids_set for sid in sids]
+                            if any(keep_mask):
+                                kept_batches.append(batch.filter(pa.array(keep_mask)))
+                        _lance_cache.invalidate(str(lp))
 
-                if not image_map:
-                    progress_tracker.complete_task(task_id, "无法加载任何页面图片")
-                    return
+                    if kept_batches:
+                        kept_table = pa.concat_tables(kept_batches)
+                        with _lance_write_lock:
+                            lance.write_dataset(kept_table, str(lp), mode="overwrite")
+                    else:
+                        with _lance_write_lock:
+                            empty_table = pa.table({f.name: pa.array([], type=f.type) for f in ds.schema})
+                            lance.write_dataset(empty_table, str(lp), mode="overwrite")
 
-                # 3. 重新跑 layout 检测
-                from data_engine.ocr.layout_provider import get_layout_provider
-                layout = get_layout_provider()
-
-                progress_tracker.update_progress(task_id, current=0, message="加载模型中...")
+                    if new_lp.exists() and new_stats.get(cat, 0) > 0:
+                        with _lance_write_lock:
+                            new_ds = lance.dataset(str(new_lp))
+                            # 流式读取新数据，避免全表加载
+                            new_batches = list(new_ds.scanner().to_batches())
+                            if new_batches:
+                                new_table = pa.concat_tables(new_batches)
+                                ds2 = lance.dataset(str(lp))
+                                safe_merge(ds2, new_table, ["sample_id", "block_idx"],
+                                           when_not_matched=True, context=f"repair/{cat}")
+                                _lance_cache.invalidate(str(lp))
+            finally:
                 try:
-                    _ = layout._ensure_model()
-                except Exception as e:
-                    progress_tracker.fail_task(task_id, f"模型加载失败: {e}")
-                    return
-
-                # 写入临时文件，批量推理
-                import tempfile, shutil
-                tmp_dir = tempfile.mkdtemp(prefix="repair_")
-                errors: list[dict] = []
-                repaired_results: list[dict] = []
-                done = 0
-                process_batch_size = 200
-                pending_sids = [sid for sid in no_image_sids if sid in image_map]
-
-                for batch_start in range(0, len(pending_sids), process_batch_size):
-                    if progress_tracker.is_stopped(task_id):
-                        break
-
-                    batch_ids = pending_sids[batch_start:batch_start + process_batch_size]
-                    tmp_paths: list[Path] = []
-                    try:
-                        for sid in batch_ids:
-                            tmp_path = Path(tmp_dir) / f"{sid}.png"
-                            tmp_path.write_bytes(image_map[sid])
-                            tmp_paths.append(tmp_path)
-
-                        try:
-                            all_blocks_list = layout.detect_layout_batch(tmp_paths)
-                            for sid, blocks in zip(batch_ids, all_blocks_list):
-                                repaired_results.append({
-                                    "sample_id": sid,
-                                    "blocks": [
-                                        {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
-                                        for b in blocks
-                                    ],
-                                    "block_count": len(blocks),
-                                })
-                        except Exception as e:
-                            print(f"[repair] batch failed, fallback to single: {e}", file=sys.stderr)
-                            for sid in batch_ids:
-                                try:
-                                    blocks = layout.detect_layout_from_bytes(image_map[sid])
-                                    repaired_results.append({
-                                        "sample_id": sid,
-                                        "blocks": [
-                                            {"block_type": b.block_type, "bbox": [round(c, 1) for c in b.bbox], "confidence": round(b.confidence, 3)}
-                                            for b in blocks
-                                        ],
-                                        "block_count": len(blocks),
-                                    })
-                                except Exception as e2:
-                                    errors.append({"sample_id": sid, "error": str(e2)})
-                    finally:
-                        for p in tmp_paths:
-                            try:
-                                p.unlink()
-                            except Exception:
-                                pass
-
-                    done += len(batch_ids)
-                    error_summary = f"（{len(errors)} 错误）" if errors else ""
-                    progress_tracker.update_progress(
-                        task_id, current=done,
-                        message=f"layout {done}/{total_pages}{error_summary}",
-                    )
-
-                try:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    shutil.rmtree(str(tmp_manifests), ignore_errors=True)
                 except Exception:
                     pass
 
-                if progress_tracker.is_stopped(task_id):
-                    progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{total_pages}）")
-                    return
+        err_msg = f"（{len(errors)} 错误）" if errors else ""
+        final_msg = f"补齐完成: {done} 页面{err_msg}"
+        progress_tracker.complete_task(ctx.task_id, message=final_msg)
+        invalidate_status_cache()
 
-                # 4. 删除旧行 + 写入新行
-                progress_tracker.update_progress(task_id, current=done, message="写入 Lance...")
-                repair_sids_set = set(no_image_sids)
+    task_manager.start(
+        task_id=task_id, task_type="repair",
+        source_id=source_id, batch_id=batch_id,
+        target=_execute_repair,
+    )
 
-                # 先生成新行（写入临时 lance 文件）
-                new_stats: dict[str, int] = {"text": 0, "formula": 0, "table": 0}
-                if repaired_results:
-                    # 用临时目录避免覆盖现有数据
-                    tmp_manifests = Path(tempfile.mkdtemp(prefix="repair_manifests_"))
-                    try:
-                        new_stats = _write_layout_to_category_lances(
-                            repaired_results, tmp_manifests,
-                            flush_size=10_000,
-                            write_mode="create",
-                            image_map=image_map,
-                        )
-
-                        # 对每个 category，合并：删除旧行 + 追加新行
-                        for cat in ("text", "formula", "table"):
-                            lp = manifests_dir / f"{cat}.lance"
-                            new_lp = tmp_manifests / f"{cat}.lance"
-                            if not lp.exists():
-                                # 如果原来不存在，直接复制新文件
-                                if new_lp.exists():
-                                    import shutil as _sh
-                                    _sh.copytree(str(new_lp), str(lp))
-                                continue
-
-                            with _lance_write_lock:
-                                ds = _open_lance(lp)
-                                # 只读 key 列，避免加载 image_data 大二进制
-                                key_table = ds.to_table(columns=["sample_id"])
-                                sids_col = key_table.column("sample_id").to_pylist()
-                                keep_indices = [i for i, sid in enumerate(sids_col) if sid not in repair_sids_set]
-
-                            if keep_indices:
-                                # 需要保留行，读完整表但只取保留的行
-                                with _lance_write_lock:
-                                    ds = _open_lance(lp)
-                                    full_table = ds.to_table()
-                                    kept_table = full_table.take(keep_indices)
-                                # overwrite 保留的行
-                                with _lance_write_lock:
-                                    lance.write_dataset(kept_table, str(lp), mode="overwrite")
-                            else:
-                                # 所有行都需要替换，直接清空
-                                with _lance_write_lock:
-                                    empty_table = pa.table({f.name: pa.array([], type=f.type) for f in ds.schema})
-                                    lance.write_dataset(empty_table, str(lp), mode="overwrite")
-
-                            # append 新行
-                            if new_lp.exists() and new_stats.get(cat, 0) > 0:
-                                with _lance_write_lock:
-                                    new_ds = lance.dataset(str(new_lp))
-                                    new_table = new_ds.to_table()
-                                    ds2 = lance.dataset(str(lp))
-                                    safe_merge(ds2, new_table, ["sample_id", "block_idx"],
-                                               when_not_matched=True, context=f"repair/{cat}")
-                                    _lance_cache.invalidate(str(lp))
-
-                            print(f"[repair] {cat}.lance: 保留 {kept_table.num_rows} 行, 新写入 {new_stats.get(cat, 0)} 行", file=sys.stderr)
-                    finally:
-                        try:
-                            shutil.rmtree(str(tmp_manifests), ignore_errors=True)
-                        except Exception:
-                            pass
-
-                # 5. 完成
-                err_msg = f"（{len(errors)} 错误）" if errors else ""
-                final_msg = f"补齐完成: {done} 页面{err_msg}"
-                progress_tracker.complete_task(task_id, message=final_msg)
-                invalidate_status_cache()
-
-            except Exception as e:
-                print(f"[repair] 任务失败: {e}", file=sys.stderr)
-                import traceback
-                traceback.print_exc()
-                progress_tracker.fail_task(task_id=task_id, error_message=str(e))
-
-        thread = threading.Thread(target=execute, name=task_id)
-        thread.daemon = True
-        thread.start()
-
-        return {
-            "message": f"已启动补齐任务: {total_pages} 个页面",
-            "task_id": task_id,
-            "no_image": no_image_counts,
-            "pages": total_pages,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "message": f"已启动补齐任务: {total_pages} 个页面",
+        "task_id": task_id,
+        "no_image": no_image_counts,
+        "pages": total_pages,
+    }
 
 
 # ─── Element-Type Layout 聚类 API ─────────────────────────────────────────────────────
@@ -3945,95 +3904,66 @@ async def repair_images(source_id: str, batch_id: str):
 @app.post("/api/element-clusters/{source_id}/{batch_id}")
 async def start_element_clusters(source_id: str, batch_id: str, request: Request):
     """触发 Element-Type Layout 聚类（后台任务）。
-    
+
     对 text/formula/table.lance 中的 block 分别用 SigLIP2 提取特征向量，独立做 KMeans 聚类。
     """
-    try:
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        max_k: int = body.get("max_k", 10)
-        
-        source = registry.get(source_id)
-        batch_dir = source.resolve_batch_dir(batch_id)
-        manifests_dir = batch_dir / "manifests"
-        
-        # 检查是否有 text/formula/table.lance
-        has_any = any((manifests_dir / f"{cat}.lance").exists() for cat in ("text", "formula", "table"))
-        if not has_any:
-            raise HTTPException(status_code=400, detail="未找到 text/formula/table.lance，请先运行 layout 拆分")
-        
-        task_id = f"element_clusters_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
-        
-        def execute_element_clustering():
-            try:
-                print(f"[DEBUG-Thread] step 1: imports...", flush=True)
-                import json
-                import lance
-                
-                print(f"[DEBUG-Thread] step 2: import layout_features...", flush=True)
-                from data_engine.ocr.layout_features import cluster_all_types
-                
-                print(f"[DEBUG-Thread] step 3: counting blocks...", flush=True)
-                total_blocks = 0
-                for cat in ("text", "formula", "table"):
-                    lp = manifests_dir / f"{cat}.lance"
-                    if lp.exists():
-                        try:
-                            total_blocks += lance.dataset(str(lp)).count_rows()
-                        except Exception:
-                            pass
-                
-                progress_tracker.start_task(
-                    task_id, task_type="element_clusters",
-                    source_id=source_id, batch_id=batch_id,
-                    total=max(total_blocks, 1),
-                    message=f"Element-Type 聚类 {total_blocks} blocks..."
-                )
-                
-                def cb(cur, tot, msg):
-                    progress_tracker.update_progress(task_id, current=cur, total=tot, message=msg)
-                
-                print(f"[DEBUG-Thread] step 4: calling cluster_all_types...", flush=True)
-                result = cluster_all_types(manifests_dir, max_k=max_k, progress_callback=cb)
-                print(f"[DEBUG-Thread] step 5: cluster_all_types done!", flush=True)
-                
-                # 保存结果
-                out_path = batch_dir / "artifacts" / "element_clusters.json"
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
-                
-                summary_parts = []
-                for cat in ("text", "formula", "table"):
-                    info = result.get(cat, {})
-                    if info.get("total_blocks", 0) > 0:
-                        summary_parts.append(f"{cat}: {info['n_clusters']}簇/{info['total_blocks']}块")
-                summary = ", ".join(summary_parts) if summary_parts else "无结果"
-                
-                progress_tracker.complete_task(task_id, f"完成: {summary}")
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    max_k: int = body.get("max_k", 10)
+
+    source = registry.get(source_id)
+    batch_dir = source.resolve_batch_dir(batch_id)
+    manifests_dir = batch_dir / "manifests"
+
+    has_any = any((manifests_dir / f"{cat}.lance").exists() for cat in ("text", "formula", "table"))
+    if not has_any:
+        raise HTTPException(status_code=400, detail="未找到 text/formula/table.lance，请先运行 layout 拆分")
+
+    task_id = f"element_clusters_{source_id}_{batch_id}"
+
+    def _execute_element_clusters(ctx: TaskContext):
+        import json
+        import lance
+        from data_engine.ocr.layout_features import cluster_all_types
+
+        total_blocks = 0
+        for cat in ("text", "formula", "table"):
+            lp = manifests_dir / f"{cat}.lance"
+            if lp.exists():
                 try:
-                    progress_tracker.fail_task(task_id, str(e))
+                    total_blocks += lance.dataset(str(lp)).count_rows()
                 except Exception:
                     pass
-        
-        thread = threading.Thread(target=execute_element_clustering, name=task_id)
-        thread.daemon = True
-        thread.start()
-        
-        print(f"[INFO] Element clustering started in thread: {task_id}", flush=True)
-        
-        return {"message": "已启动 Element-Type 聚类", "task_id": task_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"[ERROR] start_element_clusters failed: {type(e).__name__}: {e}", flush=True)
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+        progress_tracker.start_task(
+            ctx.task_id, task_type="element_clusters",
+            source_id=ctx.source_id, batch_id=ctx.batch_id,
+            total=max(total_blocks, 1),
+            message=f"Element-Type 聚类 {total_blocks} blocks..."
+        )
+
+        def cb(cur, tot, msg):
+            progress_tracker.update_progress(ctx.task_id, current=cur, total=tot, message=msg)
+
+        result = cluster_all_types(manifests_dir, max_k=max_k, progress_callback=cb)
+
+        out_path = batch_dir / "artifacts" / "element_clusters.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+
+        summary_parts = []
+        for cat in ("text", "formula", "table"):
+            info = result.get(cat, {})
+            if info.get("total_blocks", 0) > 0:
+                summary_parts.append(f"{cat}: {info['n_clusters']}簇/{info['total_blocks']}块")
+        summary = ", ".join(summary_parts) if summary_parts else "无结果"
+
+        progress_tracker.complete_task(ctx.task_id, f"完成: {summary}")
+
+    return task_manager.start(
+        task_id=task_id, task_type="element_clusters",
+        source_id=source_id, batch_id=batch_id,
+        target=_execute_element_clusters,
+    )
 
 
 @app.get("/api/element-clusters/{source_id}/{batch_id}")
@@ -4132,18 +4062,16 @@ async def element_sample(source_id: str, batch_id: str, request: Request):
 
             try:
                 ds = _open_lance(lance_path)
-                # 只读 key 列，避免加载 image_data 二进制
-                key_table = ds.to_table(columns=["sample_id", "block_idx"])
-                key_rows = key_table.to_pylist()
+                # 流式读取 key 列，避免全表加载
+                key_set: set[str] = set()
+                scanner = ds.scanner(columns=["sample_id", "block_idx"])
+                for batch in scanner.to_batches():
+                    for row in batch.to_pylist():
+                        key = f"{row.get('sample_id', '')}:{row.get('block_idx', 0)}"
+                        key_set.add(key)
             except Exception:
                 summary[cat] = {"clusters": len(cluster_members), "sampled": 0}
                 continue
-
-            # 构建 key 集合（只用于存在性检查）
-            key_set: set[str] = set()
-            for row in key_rows:
-                key = f"{row.get('sample_id', '')}:{row.get('block_idx', 0)}"
-                key_set.add(key)
 
             # 每桶抽样
             cat_sampled = 0
@@ -4582,322 +4510,275 @@ async def page_cmcv_sample(
 async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
                    resume: bool = True):
     """对抽样页面运行 Page OCR，结果写回 bucket_samples.json。"""
-    try:
-        prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
-        prefix = prefix_map.get(model)
-        if not prefix:
-            raise HTTPException(status_code=400, detail=f"未知模型：{model}")
+    prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
+    prefix = prefix_map.get(model)
+    if not prefix:
+        raise HTTPException(status_code=400, detail=f"未知模型：{model}")
 
-        task_id = f"ocr_{model}_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-            if task_id not in alive_threads:
-                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-            else:
-                return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
+    task_id = f"ocr_{model}_{source_id}_{batch_id}"
 
-        def execute():
+    def _execute_page_ocr(ctx: TaskContext):
+        import tempfile, lance
+
+        source = registry.get(ctx.source_id)
+        batch_dir = source.resolve_batch_dir(ctx.batch_id)
+        manifests_dir = batch_dir / "artifacts"
+        cache_path = manifests_dir / "bucket_samples.json"
+
+        if not cache_path.exists():
+            progress_tracker.fail_task(ctx.task_id, "bucket_samples.json 不存在，请先抽样")
+            return
+
+        cached = _read_json_cached(cache_path)
+        buckets = cached.get("buckets", {})
+        if not buckets:
+            progress_tracker.fail_task(ctx.task_id, "抽样数据为空")
+            return
+
+        all_samples = []
+        for tier, samples in buckets.items():
+            for s in samples:
+                sid = s if isinstance(s, str) else s.get("sample_id", "")
+                if sid:
+                    all_samples.append((tier, sid))
+
+        if not all_samples:
+            progress_tracker.fail_task(ctx.task_id, "无抽样样本")
+            return
+
+        progress_tracker.update_progress(ctx.task_id, current=0, total=len(all_samples), message=f"{model}: 共 {len(all_samples)} 页面，准备中...")
+
+        ingest_dir = batch_dir / "manifests"
+        ingest_path = find_stage_manifest(ingest_dir, "ingest")
+        if not ingest_path:
+            progress_tracker.fail_task(ctx.task_id, "ingest manifest 不存在")
+            return
+
+        ds = _open_lance(ingest_path)
+
+        lr_path = batch_dir / "artifacts" / "layout_results.json"
+        layout_map: dict[str, list] = {}
+        if lr_path.exists():
             try:
-                import tempfile, lance
+                lr_data = _read_json_cached(lr_path)
+                for r in lr_data.get("results", []):
+                    sid = r.get("sample_id", "")
+                    blocks = r.get("blocks", [])
+                    if sid and blocks:
+                        layout_map[sid] = [b for b in blocks if "bbox" in b]
+            except Exception:
+                pass
 
-                source = registry.get(source_id)
-                batch_dir = source.resolve_batch_dir(batch_id)
-                manifests_dir = batch_dir / "artifacts"
-                cache_path = manifests_dir / "bucket_samples.json"
+        if model == "paddleocr":
+            from data_engine.ocr.paddle_ocr import PaddleOCREngine
+            engine = PaddleOCREngine()
+        elif model == "glm_ocr":
+            from data_engine.ocr.glm_ocr import GLMOCREngine
+            engine = GLMOCREngine()
+        else:
+            from data_engine.ocr.self_ocr import SelfOCREngine
+            engine = SelfOCREngine()
 
-                if not cache_path.exists():
-                    progress_tracker.fail_task(task_id, "bucket_samples.json 不存在，请先抽样")
-                    return
+        from data_engine.ocr.base import LayoutBlock
 
-                cached = _read_json_cached(cache_path)
-                buckets = cached.get("buckets", {})
-                if not buckets:
-                    progress_tracker.fail_task(task_id, "抽样数据为空")
-                    return
+        text_col = f"{prefix}_text"
+        conf_col = f"{prefix}_confidence"
 
-                # 收集所有 sample_id
-                all_samples = []
-                for tier, samples in buckets.items():
-                    for s in samples:
-                        sid = s if isinstance(s, str) else s.get("sample_id", "")
-                        if sid:
-                            all_samples.append((tier, sid))
+        done_count = 0
+        if resume:
+            for tier, samples in buckets.items():
+                for s in samples:
+                    if isinstance(s, dict):
+                        blocks = s.get("blocks", [])
+                        all_done = True
+                        for b in blocks:
+                            if text_col not in b:
+                                all_done = False
+                                break
+                            if b.get(conf_col, 1.0) == 0.0:
+                                all_done = False
+                                break
+                            raw_output = b.get("raw_output", {})
+                            if isinstance(raw_output, dict) and "error" in raw_output:
+                                all_done = False
+                                break
+                        if all_done and blocks:
+                            done_count += 1
 
-                if not all_samples:
-                    progress_tracker.fail_task(task_id, "无抽样样本")
-                    return
-
-                progress_tracker.update_progress(task_id, current=0, total=len(all_samples), message=f"{model}: 共 {len(all_samples)} 页面，准备中...")
-
-                # 读取 ingest.lance（只打开 dataset，不加载数据）
-                ingest_dir = batch_dir / "manifests"
-                ingest_path = find_stage_manifest(ingest_dir, "ingest")
-                if not ingest_path:
-                    progress_tracker.fail_task(task_id, "ingest manifest 不存在")
-                    return
-
-                ds = _open_lance(ingest_path)
-                print(f"[page-ocr] ingest rows: {ds.count_rows()}", file=sys.stderr)
-
-                # 读取 layout block bboxes（JSON 较小，可以预加载）
-                lr_path = batch_dir / "artifacts" / "layout_results.json"
-                layout_map: dict[str, list] = {}  # sid -> [{"block_type", "bbox"}, ...]
-                if lr_path.exists():
-                    try:
-                        lr_data = _read_json_cached(lr_path)
-                        for r in lr_data.get("results", []):
-                            sid = r.get("sample_id", "")
-                            blocks = r.get("blocks", [])
-                            if sid and blocks:
-                                layout_map[sid] = [b for b in blocks if "bbox" in b]
-                    except Exception as e:
-                        print(f"[page-ocr] layout_results.json 读取失败：{e}", file=sys.stderr)
-
-                print(f"[page-ocr] sampled={len(all_samples)}, layout_blocks={sum(len(v) for v in layout_map.values())}", file=sys.stderr)
-
-                # 初始化 OCR 引擎
-                if model == "paddleocr":
-                    from data_engine.ocr.paddle_ocr import PaddleOCREngine
-                    engine = PaddleOCREngine()
-                elif model == "glm_ocr":
-                    from data_engine.ocr.glm_ocr import GLMOCREngine
-                    engine = GLMOCREngine()
-                else:
-                    from data_engine.ocr.self_ocr import SelfOCREngine
-                    engine = SelfOCREngine()
-
-                from data_engine.ocr.base import LayoutBlock
-
-                text_col = f"{prefix}_text"
-                conf_col = f"{prefix}_confidence"
-
-                # 断点续跑：检查已有结果（需要有文本且 confidence > 0，或者 raw_output 无 error）
-                done_count = 0
-                if resume:
-                    for tier, samples in buckets.items():
-                        for s in samples:
-                            if isinstance(s, dict):
-                                blocks = s.get("blocks", [])
-                                # 检查所有 block 是否都成功完成
-                                all_done = True
-                                for b in blocks:
-                                    # text/formula/table 都检查 text_col 存在 + confidence > 0
-                                    # formula/table 的 text_col 为空是正常的（GLM 不返回 text）
-                                    if text_col not in b:
-                                        all_done = False
-                                        break
-                                    if b.get(conf_col, 1.0) == 0.0:
-                                        all_done = False
-                                        break
-                                    raw_output = b.get("raw_output", {})
-                                    if isinstance(raw_output, dict) and "error" in raw_output:
-                                        all_done = False
-                                        break
-                                if all_done and blocks:
-                                    done_count += 1
-
-                # 收集待处理任务
-                tasks = []
-                skipped = 0
-                for tier, samples in buckets.items():
-                    for idx, s in enumerate(samples):
-                        sid = s if isinstance(s, str) else s.get("sample_id", "")
-                        if not sid:
-                            continue
-                        if isinstance(s, dict) and resume:
-                            blocks = s.get("blocks", [])
-                            if blocks:
-                                # 检查所有 block 是否都成功完成
-                                all_done = True
-                                for b in blocks:
-                                    # text/formula/table 都检查 text_col 存在 + confidence > 0
-                                    # formula/table 的 text_col 为空是正常的（GLM 不返回 text）
-                                    if text_col not in b:
-                                        all_done = False
-                                        break
-                                    # SelfOCR 空结果视为未完成（服务可能不可用）
-                                    block_type = b.get("block_type", "text")
-                                    if model == "self_ocr" and block_type not in ("formula", "table"):
-                                        if not b.get(text_col, ""):
-                                            all_done = False
-                                            break
-                                    if b.get(conf_col, 1.0) == 0.0:
-                                        all_done = False
-                                        break
-                                    raw_output = b.get("raw_output", {})
-                                    if isinstance(raw_output, dict) and "error" in raw_output:
-                                        all_done = False
-                                        break
-                                if all_done:
-                                    skipped += 1
-                                    continue
-                        # 检查是否有 layout 结果
-                        blocks = layout_map.get(sid, [])
-                        if not blocks:
-                            print(f"[page-ocr] skip {sid}: 无 layout 结果", file=sys.stderr)
+        tasks = []
+        skipped = 0
+        for tier, samples in buckets.items():
+            for idx, s in enumerate(samples):
+                sid = s if isinstance(s, str) else s.get("sample_id", "")
+                if not sid:
+                    continue
+                if isinstance(s, dict) and resume:
+                    blocks = s.get("blocks", [])
+                    if blocks:
+                        all_done = True
+                        for b in blocks:
+                            if text_col not in b:
+                                all_done = False
+                                break
+                            block_type = b.get("block_type", "text")
+                            if model == "self_ocr" and block_type not in ("formula", "table"):
+                                if not b.get(text_col, ""):
+                                    all_done = False
+                                    break
+                            if b.get(conf_col, 1.0) == 0.0:
+                                all_done = False
+                                break
+                            raw_output = b.get("raw_output", {})
+                            if isinstance(raw_output, dict) and "error" in raw_output:
+                                all_done = False
+                                break
+                        if all_done:
                             skipped += 1
                             continue
-                        # 传递 ds 引用，按需加载图片
-                        tasks.append((tier, idx, sid, s, ds, blocks))
+                blocks = layout_map.get(sid, [])
+                if not blocks:
+                    skipped += 1
+                    continue
+                tasks.append((tier, idx, sid, s, ds, blocks))
 
-                remaining = len(tasks)
-                print(f"[page-ocr] {model}: total={len(all_samples)}, skipped={skipped}, to_process={remaining}", file=sys.stderr)
-                if remaining <= 0:
-                    progress_tracker.complete_task(task_id, f"{model} 所有 {len(all_samples)} 个页面已完成（跳过 {skipped}）")
-                    return
+        remaining = len(tasks)
+        if remaining <= 0:
+            progress_tracker.complete_task(ctx.task_id, f"{model} 所有 {len(all_samples)} 个页面已完成（跳过 {skipped}）")
+            return
 
-                progress_tracker.update_progress(
-                    task_id, current=skipped, total=len(all_samples),
-                    message=f"{model}: 共 {len(all_samples)} 页面（跳过 {skipped}，待处理 {remaining}）",
-                )
-
-                tmp_dir = tempfile.mkdtemp(prefix="page_ocr_")
-                processed = 0
-                errors = 0
-                save_interval = int(get_config("ocr", "save_interval", default=10))
-                max_workers = int(get_config("ocr", "page_concurrency", default=8))
-
-                from concurrent.futures import ThreadPoolExecutor, as_completed
-
-                def _ocr_one(tier, idx, sid, s, ds, blocks):
-                    """处理单个页面的 OCR 识别。
-                    
-                    Args:
-                        tier: 难度层级
-                        idx: 样本索引
-                        sid: 样本 ID
-                        s: 样本数据（字符串或字典）
-                        ds: Lance dataset（用于按需加载图片）
-                        blocks: layout block 列表
-                    """
-                    if progress_tracker.is_stopped(task_id):
-                        return None
-                    
-                    tmp_path = Path(tmp_dir) / f"{sid}.png"
-                    try:
-                        # 按需加载单张图片
-                        tbl = ds.to_table(
-                            columns=["sample_id", "image_data"],
-                            filter=f"sample_id = '{sid}'",
-                        )
-                        if tbl.num_rows == 0:
-                            return (tier, idx, sid, s, [], "Image not found")
-                        
-                        row = tbl.to_pylist()[0]
-                        img_bytes = row.get("image_data")
-                        if not img_bytes:
-                            return (tier, idx, sid, s, [], "No image data")
-                        
-                        # 保存图片到临时文件
-                        tmp_path.write_bytes(img_bytes)
-                        
-                        from PIL import Image as PILImage
-                        import io
-                        img = PILImage.open(tmp_path)
-                        block_results = []
-                        for bi, b in enumerate(blocks):
-                            bbox = b.get("bbox", [0, 0, 9999, 9999])
-                            x1, y1, x2, y2 = [int(c) for c in bbox]
-                            br = {"block_idx": bi, "block_type": b.get("block_type", "text"), "bbox": [round(c, 1) for c in bbox]}
-                            try:
-                                # 所有引擎都使用裁剪图片（SelfOCR 内部会 padding 到 1000x1000）
-                                cropped = img.crop((x1, y1, x2, y2))
-                                buf = io.BytesIO()
-                                cropped.save(buf, format="PNG")
-                                crop_path = Path(tmp_dir) / f"{sid}_{bi}.png"
-                                crop_path.write_bytes(buf.getvalue())
-                                region = LayoutBlock(block_type=b.get("block_type", "text"), bbox=[0, 0, x2-x1, y2-y1], confidence=b.get("confidence", 1.0))
-                                results = engine.recognize_regions(crop_path, [region])
-                                crop_path.unlink(missing_ok=True)
-                                
-                                r = results[0] if results else None
-                                br[text_col] = (r.text_content or "") if r else ""
-                                br[conf_col] = r.confidence if r else 0.0
-                            except Exception:
-                                br[text_col] = ""
-                                br[conf_col] = 0.0
-                            block_results.append(br)
-
-                        return (tier, idx, sid, s, block_results, None)
-                    except Exception as e:
-                        return (tier, idx, sid, s, [], e)
-                    finally:
-                        tmp_path.unlink(missing_ok=True)
-
-                try:
-                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                        futures = {pool.submit(_ocr_one, *t): t for t in tasks}
-                        for future in as_completed(futures):
-                            if progress_tracker.is_stopped(task_id):
-                                pool.shutdown(wait=False, cancel_futures=True)
-                                break
-                            result = future.result()
-                            if not result:
-                                continue
-                            tier, idx, sid, s, block_results, err = result
-                            if err:
-                                errors += 1
-                                if errors <= 5:
-                                    print(f"[page-ocr] {model} error {sid}: {err}", file=sys.stderr)
-                            else:
-                                if isinstance(s, str):
-                                    buckets[tier][idx] = {"sample_id": s, "blocks": block_results}
-                                else:
-                                    existing_blocks = s.get("blocks", [])
-                                    if existing_blocks:
-                                        for br in block_results:
-                                            bi = br.get("block_idx", 0)
-                                            if bi < len(existing_blocks):
-                                                existing_blocks[bi].update(br)
-                                            else:
-                                                existing_blocks.append(br)
-                                    else:
-                                        s["blocks"] = block_results
-
-                            done_count += 1
-                            processed += 1
-                            err_msg = f"（{errors} 错误）" if errors else ""
-                            # 每个页面处理完都更新进度（前端轮询需要）
-                            progress_tracker.update_progress(task_id, current=skipped + processed, total=len(all_samples), message=f"{model}: {processed}/{remaining} {err_msg}")
-                            # 定期保存到文件（避免频繁 IO）
-                            if processed % save_interval == 0:
-                                cached["buckets"] = buckets
-                                cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
-                                _bucket_summary_cache.invalidate(cache_path)
-
-                finally:
-                    cached["buckets"] = buckets
-                    cached[f"{prefix}_ocr_at"] = datetime.now().isoformat(timespec='seconds')
-                    cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
-                    _bucket_summary_cache.invalidate(cache_path)
-                    import shutil
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-
-                if progress_tracker.is_stopped(task_id):
-                    progress_tracker.stop_task(task_id, f"已停止（已处理 {processed}/{len(all_samples)}）")
-                else:
-                    progress_tracker.complete_task(task_id, f"{model} 完成: {processed} 页面（跳过 {skipped}{f'，{errors} 错误' if errors else ''}）")
-
-            except Exception as e:
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-                progress_tracker.fail_task(task_id, str(e))
-
-        # 在线程外注册任务，确保前端轮询时能找到
-        progress_tracker.start_task(
-            task_id=task_id, task_type="page_ocr",
-            source_id=source_id, batch_id=batch_id,
-            total=0, message=f"{model}: 启动中..."
+        progress_tracker.update_progress(
+            ctx.task_id, current=skipped, total=len(all_samples),
+            message=f"{model}: 共 {len(all_samples)} 页面（跳过 {skipped}，待处理 {remaining}）",
         )
 
-        thread = threading.Thread(target=execute, name=task_id, daemon=True)
-        thread.start()
-        return {"message": f"Page OCR {model} 已启动", "task_id": task_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        tmp_dir = tempfile.mkdtemp(prefix="page_ocr_")
+        processed = 0
+        errors = 0
+        save_interval = int(get_config("ocr", "save_interval", default=10))
+        max_workers = int(get_config("ocr", "page_concurrency", default=8))
+
+        # 批量预加载图片（避免逐页查询 Lance）
+        image_cache: dict[str, bytes] = {}
+        BATCH_SIZE = 100
+        pending_sids = [t[2] for t in tasks]  # sid 列表
+        progress_tracker.update_progress(
+            ctx.task_id, current=skipped, total=len(all_samples),
+            message=f"{model}: 预加载图片中...",
+        )
+        for i in range(0, len(pending_sids), BATCH_SIZE):
+            ctx.check_stop()
+            chunk = pending_sids[i:i + BATCH_SIZE]
+            sids_str = ",".join(f"'{sid}'" for sid in chunk)
+            try:
+                scanner = ds.scanner(
+                    columns=["sample_id", "image_data"],
+                    filter=f"sample_id IN ({sids_str})",
+                )
+                for batch in scanner.to_batches():
+                    for row in batch.to_pylist():
+                        sid = row["sample_id"]
+                        img = row.get("image_data")
+                        if img:
+                            image_cache[sid] = img
+            except Exception:
+                pass
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _ocr_one(tier, idx, sid, s, blocks):
+            if ctx.is_stopped():
+                return None
+
+            tmp_path = Path(tmp_dir) / f"{sid}.png"
+            try:
+                img_bytes = image_cache.get(sid)
+                if not img_bytes:
+                    return (tier, idx, sid, s, [], "Image not found")
+
+                tmp_path.write_bytes(img_bytes)
+
+                from PIL import Image as PILImage
+                import io
+                img = PILImage.open(tmp_path)
+                block_results = []
+                for bi, b in enumerate(blocks):
+                    bbox = b.get("bbox", [0, 0, 9999, 9999])
+                    x1, y1, x2, y2 = [int(c) for c in bbox]
+                    br = {"block_idx": bi, "block_type": b.get("block_type", "text"), "bbox": [round(c, 1) for c in bbox]}
+                    try:
+                        cropped = img.crop((x1, y1, x2, y2))
+                        buf = io.BytesIO()
+                        cropped.save(buf, format="PNG")
+                        crop_path = Path(tmp_dir) / f"{sid}_{bi}.png"
+                        crop_path.write_bytes(buf.getvalue())
+                        region = LayoutBlock(block_type=b.get("block_type", "text"), bbox=[0, 0, x2-x1, y2-y1], confidence=b.get("confidence", 1.0))
+                        results = engine.recognize_regions(crop_path, [region])
+                        crop_path.unlink(missing_ok=True)
+
+                        r = results[0] if results else None
+                        br[text_col] = (r.text_content or "") if r else ""
+                        br[conf_col] = r.confidence if r else 0.0
+                    except Exception:
+                        br[text_col] = ""
+                        br[conf_col] = 0.0
+                    block_results.append(br)
+
+                return (tier, idx, sid, s, block_results, None)
+            except Exception as e:
+                return (tier, idx, sid, s, [], e)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_ocr_one, *t): t for t in tasks}
+                for future in as_completed(futures):
+                    ctx.check_stop()
+                    result = future.result()
+                    if not result:
+                        continue
+                    tier, idx, sid, s, block_results, err = result
+                    if err:
+                        errors += 1
+                    else:
+                        if isinstance(s, str):
+                            buckets[tier][idx] = {"sample_id": s, "blocks": block_results}
+                        else:
+                            existing_blocks = s.get("blocks", [])
+                            if existing_blocks:
+                                for br in block_results:
+                                    bi = br.get("block_idx", 0)
+                                    if bi < len(existing_blocks):
+                                        existing_blocks[bi].update(br)
+                                    else:
+                                        existing_blocks.append(br)
+                            else:
+                                s["blocks"] = block_results
+
+                    done_count += 1
+                    processed += 1
+                    err_msg = f"（{errors} 错误）" if errors else ""
+                    progress_tracker.update_progress(ctx.task_id, current=skipped + processed, total=len(all_samples), message=f"{model}: {processed}/{remaining} {err_msg}")
+                    if processed % save_interval == 0:
+                        cached["buckets"] = buckets
+                        cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+                        _bucket_summary_cache.invalidate(cache_path)
+
+        finally:
+            cached["buckets"] = buckets
+            cached[f"{prefix}_ocr_at"] = datetime.now().isoformat(timespec='seconds')
+            cache_path.write_text(json.dumps(cached, ensure_ascii=False, indent=2), encoding="utf-8")
+            _bucket_summary_cache.invalidate(cache_path)
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        progress_tracker.complete_task(ctx.task_id, f"{model} 完成: {processed} 页面（跳过 {skipped}{f'，{errors} 错误' if errors else ''}）")
+
+    return task_manager.start(
+        task_id=task_id, task_type="page_ocr",
+        source_id=source_id, batch_id=batch_id,
+        target=_execute_page_ocr,
+    )
 
 
 @app.post("/api/element-ocr/{source_id}/{batch_id}")
@@ -4907,354 +4788,303 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
     force=True 时清空该模型已有结果后全部重跑。
     categories: 逗号分隔的类别列表，如 "text" 或 "text,formula,table"。
     """
-    try:
-        prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
-        prefix = prefix_map.get(model)
-        if not prefix:
-            raise HTTPException(status_code=400, detail=f"未知模型: {model}")
+    prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
+    prefix = prefix_map.get(model)
+    if not prefix:
+        raise HTTPException(status_code=400, detail=f"未知模型: {model}")
 
-        task_id = f"el_ocr_{model}_{source_id}_{batch_id}"
-        existing = progress_tracker.get_task(task_id)
-        if existing and existing.status.value in ["running", "pending"]:
-            alive_threads = [t.name for t in threading.enumerate() if t.is_alive()]
-            if task_id not in alive_threads:
-                progress_tracker.stop_task(task_id, "线程已终止，任务停止")
-            else:
-                return {"message": "任务已在运行中", "task_id": task_id, "status": "already_running"}
+    task_id = f"el_ocr_{model}_{source_id}_{batch_id}"
 
-        def execute():
+    def _execute_element_ocr(ctx: TaskContext):
+        import tempfile, shutil, lance
+
+        progress_tracker.start_task(
+            task_id=ctx.task_id, task_type="el_ocr",
+            source_id=ctx.source_id, batch_id=ctx.batch_id,
+            total=1, message=f"{model}: 启动中..."
+        )
+
+        source = registry.get(ctx.source_id)
+        batch_dir = source.resolve_batch_dir(ctx.batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        selected_cats = [c.strip() for c in categories.split(",") if c.strip()]
+        cat_paths: list[tuple[str, str]] = []
+        total_blocks = 0
+        for cat in selected_cats:
+            lp = manifests_dir / f"{cat}.lance"
+            if not lp.exists():
+                continue
             try:
-                import tempfile, shutil, lance
+                ds = _open_lance(lp)
+                if "image_data" not in ds.schema.names:
+                    continue
+                total_blocks += ds.count_rows()
+                cat_paths.append((cat, str(lp)))
+            except Exception:
+                pass
 
-                # 立即启动任务，让前端马上看到进度
-                progress_tracker.start_task(
-                    task_id=task_id, task_type="el_ocr",
-                    source_id=source_id, batch_id=batch_id,
-                    total=1, message=f"{model}: 启动中..."
-                )
+        if not cat_paths or total_blocks == 0:
+            progress_tracker.fail_task(ctx.task_id, "三个 category lance 中无可用 block")
+            return
 
-                source = registry.get(source_id)
-                batch_dir = source.resolve_batch_dir(batch_id)
-                manifests_dir = batch_dir / "manifests"
+        progress_tracker.update_progress(ctx.task_id, current=0, message=f"{model}: 扫描已完成，共 {total_blocks} blocks...")
 
-                # 阶段 1：仅读元数据统计总数（不加载 image_data）
-                selected_cats = [c.strip() for c in categories.split(",") if c.strip()]
-                cat_paths: list[tuple[str, str]] = []  # (category, lance_path)
-                total_blocks = 0
-                for cat in selected_cats:
-                    lp = manifests_dir / f"{cat}.lance"
-                    if not lp.exists():
-                        continue
-                    try:
-                        ds = _open_lance(lp)
-                        if "image_data" not in ds.schema.names:
-                            continue
-                        total_blocks += ds.count_rows()
-                        cat_paths.append((cat, str(lp)))
-                    except Exception as e:
-                        print(f"[el-ocr] 读 {cat}.lance 失败: {e}", file=sys.stderr)
+        if model == "paddleocr":
+            from data_engine.ocr.paddle_ocr import PaddleOCREngine
+            engine = PaddleOCREngine()
+        elif model == "glm_ocr":
+            from data_engine.ocr.glm_ocr import GLMOCREngine
+            engine = GLMOCREngine()
+        else:
+            from data_engine.ocr.self_ocr import SelfOCREngine
+            engine = SelfOCREngine()
 
-                if not cat_paths or total_blocks == 0:
-                    progress_tracker.fail_task(task_id, "三个 category lance 中无可用 block")
-                    return
+        text_col = f"{prefix}_text"
+        conf_col = f"{prefix}_confidence"
 
-                progress_tracker.update_progress(task_id, current=0, message=f"{model}: 扫描已完成，共 {total_blocks} blocks...")
-
-                # 初始化 OCR 引擎
-                if model == "paddleocr":
-                    from data_engine.ocr.paddle_ocr import PaddleOCREngine
-                    engine = PaddleOCREngine()
-                elif model == "glm_ocr":
-                    from data_engine.ocr.glm_ocr import GLMOCREngine
-                    engine = GLMOCREngine()
-                else:
-                    from data_engine.ocr.self_ocr import SelfOCREngine
-                    engine = SelfOCREngine()
-
-                text_col = f"{prefix}_text"
-                conf_col = f"{prefix}_confidence"
-
-                # force 模式：清空该模型在所有 category lance 中的结果列
-                if force:
-                    progress_tracker.update_progress(task_id, current=0, message=f"{model}: 强制重跑，清空已有结果...")
-                    # 按类别定义需要清空的列及重置值（SQL 表达式）
-                    _clear_map = {
-                        "text":    {text_col: "''", conf_col: "0.0"},
-                        "formula": {text_col: "''", conf_col: "0.0", f"{prefix}_formula": "''"},
-                        "table":   {text_col: "''", conf_col: "0.0", f"{prefix}_table": "''"},
-                    }
-                    for cat, lp_str in cat_paths:
-                        try:
-                            ds = lance.dataset(lp_str)
-                            updates = {c: v for c, v in _clear_map[cat].items() if c in ds.schema.names}
-                            if updates:
-                                with _lance_write_lock:
-                                    ds.update(updates)
-                                print(f"[el-ocr] force: 已清空 {cat}.lance 中 {list(updates.keys())}", file=sys.stderr)
-                        except Exception as e:
-                            print(f"[el-ocr] force: 清空 {cat} 失败: {e}", file=sys.stderr)
-
-                # 断点续跑：收集已有结果的 (sample_id, block_idx)
-                # 优化：使用 filter 下推，不读大文本列，IO 减少 90%+
-                done_keys: set[tuple[str, int]] = set()
-                for cat, lp_str in cat_paths:
-                    try:
-                        ds = lance.dataset(lp_str)
-                        if text_col in ds.schema.names:
-                            tbl = ds.to_table(
-                                columns=["sample_id", "block_idx"],
-                                filter=f"{text_col} IS NOT NULL AND {text_col} != '' AND {conf_col} > 0"
-                            )
-                            sid_col = tbl.column("sample_id")
-                            bidx_col = tbl.column("block_idx")
-                            done_keys.update(
-                                (sid_col[i].as_py(), bidx_col[i].as_py())
-                                for i in range(len(tbl))
-                            )
-                    except Exception as e:
-                        print(f"[el-ocr] resume 读 {cat} 失败: {e}", file=sys.stderr)
-
-                if done_keys:
-                    print(f"[el-ocr] resume: {model} 已有 {len(done_keys)} 个 block 完成，跳过", file=sys.stderr)
-
-                # 重新计算待处理总数
-                remaining_blocks = total_blocks - len(done_keys)
-                if remaining_blocks <= 0:
-                    progress_tracker.complete_task(task_id, f"{model} 所有 block 已完成（{len(done_keys)} 个），无需重跑")
-                    return
-
-                # 更新为实际总数和待处理信息
-                progress_tracker.update_progress(
-                    task_id, current=len(done_keys), total=total_blocks,
-                    message=f"{model}: {total_blocks} 个 block（跳过 {len(done_keys)} 已完成，待处理 {remaining_blocks}）",
-                )
-
-                from data_engine.ocr.base import LayoutBlock
-                tmp_dir = tempfile.mkdtemp(prefix="el_ocr_")
-
-                done = 0
-                errors = 0
-                skipped = 0
-                save_interval = int(get_config("ocr", "save_interval", default=20))
-                pending_rows: dict[str, list[dict]] = {"text": [], "formula": [], "table": []}
-
-                # test_mode: 预加载所有 category lance 的 paddle/glm 结果作为 ref_map
-                _test_ref_map: dict[tuple[str, int], dict] = {}
-
-                # 阶段 2：按类别流式处理，逐批读取并处理
-                for cat, lp_str in cat_paths:
-                    if progress_tracker.is_stopped(task_id):
-                        break
-                    try:
-                        ds = lance.dataset(lp_str)
-                    except Exception as e:
-                        print(f"[el-ocr] 打开 {cat}.lance 失败: {e}", file=sys.stderr)
-                        continue
-
-                    progress_tracker.update_progress(
-                        task_id, current=done,
-                        message=f"{model}: 扫描 {cat} 数据..."
-                    )
-
-                    # 单次流式读取所有列（含 image_data），小批量处理
-                    # 不依赖 _rowid，避免 merge_insert 后 rowid 失效
-                    STREAM_BATCH = 100  # 每次流式读取的行数
-                    scan_done = 0
-                    for batch in ds.to_batches(batch_size=STREAM_BATCH):
-                        if progress_tracker.is_stopped(task_id):
-                            break
-                        rows = batch.to_pylist()
-                        for row in rows:
-                            if progress_tracker.is_stopped(task_id):
-                                break
-
-                            sid = row["sample_id"]
-                            bidx = row["block_idx"]
-                            key = (sid, bidx)
-                            if key in done_keys:
-                                done += 1
-                                scan_done += 1
-                                continue
-
-                            img_bytes = row.get("image_data")
-                            if not img_bytes:
-                                skipped += 1
-                                done += 1
-                                scan_done += 1
-                                if scan_done % 50 == 0:
-                                    progress_tracker.update_progress(
-                                        task_id, current=done,
-                                        message=f"{model}: 跳过 {skipped} 无图"
-                                    )
-                                continue
-
-                            tmp_path = Path(tmp_dir) / f"{cat}_{sid}_{bidx}.png"
-                            if isinstance(img_bytes, bytes):
-                                tmp_path.write_bytes(img_bytes)
-                            elif isinstance(img_bytes, str):
-                                tmp_path.write_bytes(img_bytes.encode("latin-1"))
-                            else:
-                                tmp_path.write_bytes(bytes(img_bytes))
-
-                            # image_data 已是裁剪好的 block 图，直接用原始尺寸避免黑边填充
-                            _w, _h = 0, 0
-                            try:
-                                import struct
-                                _raw = img_bytes if isinstance(img_bytes, bytes) else bytes(img_bytes)
-                                if _raw[:8] == b'\x89PNG\r\n\x1a\n' and len(_raw) > 24:
-                                    _w, _h = struct.unpack('>II', _raw[16:24])
-                                elif _raw[:2] == b'\xff\xd8':  # JPEG
-                                    _i = 2
-                                    while _i < len(_raw) - 1:
-                                        if _raw[_i] != 0xFF: break
-                                        _m = _raw[_i+1]
-                                        if _m in (0xC0, 0xC1, 0xC2):
-                                            _h, _w = struct.unpack('>HH', _raw[_i+5:_i+9])
-                                            break
-                                        _ln = struct.unpack('>H', _raw[_i+2:_i+4])[0]
-                                        _i += 2 + _ln
-                            except Exception:
-                                pass
-                            if _w == 0 or _h == 0:
-                                _w, _h = 9999, 9999  # 足够大，让 crop 返回完整图片
-                            region = LayoutBlock(
-                                block_type=row.get("block_type", cat),
-                                bbox=[0, 0, _w, _h],
-                                confidence=row.get("layout_confidence", 1.0),
-                            )
-                            try:
-                                results = engine.recognize_regions(tmp_path, [region])
-                                r = results[0] if results else None
-                                ocr_row = {
-                                    "sample_id": sid,
-                                    "block_idx": bidx,
-                                    text_col: (r.text_content or "") if r else "",
-                                    conf_col: r.confidence if r else 0.0,
-                                }
-                                if cat == "table" and r and r.table_structure:
-                                    ocr_row[f"{prefix}_table"] = json.dumps(r.table_structure, ensure_ascii=False)
-                                if cat == "formula" and r and r.formula_latex:
-                                    ocr_row[f"{prefix}_formula"] = r.formula_latex
-                                pending_rows[cat].append(ocr_row)
-                            except Exception as e:
-                                errors += 1
-                                if errors <= 5:
-                                    print(f"[el-ocr] {model} error {sid}/{bidx}: {e}", file=sys.stderr)
-                            finally:
-                                tmp_path.unlink(missing_ok=True)
-
-                            done += 1
-                            scan_done += 1
-                            err_msg = f"（{errors} 错误）" if errors else ""
-                            pct = round(done / total_blocks * 100) if total_blocks else 0
-                            progress_tracker.update_progress(
-                                task_id, current=done,
-                                message=f"{model}: {cat} {done}/{total_blocks} ({pct}%){err_msg}"
-                            )
-
-                            if done % save_interval == 0:
-                                _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
-                                pending_rows = {"text": [], "formula": [], "table": []}
-
-                # 最终 flush
-                _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-
-                if progress_tracker.is_stopped(task_id):
-                    progress_tracker.stop_task(task_id, f"已停止（已处理 {done}/{total_blocks}）")
-                else:
-                    progress_tracker.complete_task(task_id, f"{model} 完成: {done} block（跳过 {len(done_keys)} 已完成{f'，{skipped} 无图' if skipped else ''}{f'，{errors} 错误' if errors else ''}）")
-
-                    # 自动触发 CMCV 重算
-                    try:
-                        from data_engine.ocr.cmcv import CMCVEngine
-                        print(f"[el-ocr] 自动触发 CMCV 重算...", file=sys.stderr)
-                        cmcv_engine = CMCVEngine(use_visual_cdm=True)  # Element CMCV 使用视觉渲染
-                        json_keys = ("paddle_table", "glm_table", "self_table",
-                                     "paddle_formula", "glm_formula", "self_formula")
-                        for cat in ("text", "formula", "table"):
-                            lp = manifests_dir / f"{cat}.lance"
-                            if not lp.exists():
-                                continue
-                            try:
-                                with _lance_write_lock:
-                                    ds = _open_lance(lp)
-                                    all_cols_set = set(ds.schema.names)
-                                    if "consistency_pattern" not in all_cols_set:
-                                        continue
-                                    ocr_filter = ocr_complete_filter(all_cols_set)
-                                    read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
-                                    for _pfx in ("paddle", "glm", "self"):
-                                        for suffix in ("_text", "_confidence", "_table", "_formula"):
-                                            col = f"{_pfx}{suffix}"
-                                            if col in all_cols_set:
-                                                read_cols.append(col)
-                                    cols = [c for c in read_cols if c in all_cols_set]
-                                    auto_filter = "consistency_pattern IS NULL"
-                                    if ocr_filter:
-                                        auto_filter = f"({auto_filter}) AND ({ocr_filter})"
-                                    batches = list(ds.to_batches(columns=cols, filter=auto_filter))
-                                rows = []
-                                for batch in batches:
-                                    for i in range(len(batch)):
-                                        row = {c: batch.column(c)[i].as_py() for c in cols}
-                                        for key in json_keys:
-                                            val = row.get(key)
-                                            if isinstance(val, str) and val:
-                                                try:
-                                                    row[key] = json.loads(val)
-                                                except (json.JSONDecodeError, TypeError):
-                                                    pass
-                                        rows.append(row)
-                                updated_rows, _ = cmcv_engine.process_element_batch(rows)
-                                update_map = {}
-                                for r in updated_rows:
-                                    if r.get("consistency_pattern"):
-                                        update_map.setdefault("consistency_pattern", {})[(r["sample_id"], r["block_idx"])] = r["consistency_pattern"]
-                                    if r.get("block_diff_json"):
-                                        update_map.setdefault("block_diff_json", {})[(r["sample_id"], r["block_idx"])] = r["block_diff_json"]
-                                if update_map:
-                                    with _lance_write_lock:
-                                        ds = _open_lance(lp)
-                                        t = ds.to_table(columns=["sample_id", "block_idx", "consistency_pattern", "block_diff_json"])
-                                        patterns = t.column("consistency_pattern").to_pylist() if "consistency_pattern" in t.column_names else [None] * len(t)
-                                        diffs = t.column("block_diff_json").to_pylist() if "block_diff_json" in t.column_names else [None] * len(t)
-                                        sids = t.column("sample_id").to_pylist()
-                                        bidxs = t.column("block_idx").to_pylist()
-                                        pat_map = update_map.get("consistency_pattern", {})
-                                        diff_map = update_map.get("block_diff_json", {})
-                                        new_p = [pat_map.get((sids[i], bidxs[i]), patterns[i]) for i in range(len(t))]
-                                        new_d = [diff_map.get((sids[i], bidxs[i]), diffs[i]) for i in range(len(t))]
-                                        update_table = pa.table({
-                                            "sample_id": pa.array(sids, type=pa.large_string()),
-                                            "block_idx": pa.array(bidxs, type=pa.int32()),
-                                            "consistency_pattern": pa.array(new_p, type=pa.large_string()),
-                                            "block_diff_json": pa.array(new_d, type=pa.large_string()),
-                                        })
-                                        safe_merge(ds, update_table, ["sample_id", "block_idx"], context=f"el-ocr-cmcv/{cat}")
-                                        _lance_cache.invalidate(str(lp))
-                                    print(f"[el-ocr] CMCV 重算完成 {cat}.lance", file=sys.stderr)
-                            except Exception as e:
-                                print(f"[el-ocr] CMCV 重算 {cat} 失败: {e}", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[el-ocr] CMCV 自动重算整体失败: {e}", file=sys.stderr)
-            except Exception as e:
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-                # 异常时也尝试 flush 已积累的结果，避免数据丢失
+        if force:
+            progress_tracker.update_progress(ctx.task_id, current=0, message=f"{model}: 强制重跑，清空已有结果...")
+            _clear_map = {
+                "text":    {text_col: "''", conf_col: "0.0"},
+                "formula": {text_col: "''", conf_col: "0.0", f"{prefix}_formula": "''"},
+                "table":   {text_col: "''", conf_col: "0.0", f"{prefix}_table": "''"},
+            }
+            for cat, lp_str in cat_paths:
                 try:
-                    _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
+                    ds = lance.dataset(lp_str)
+                    updates = {c: v for c, v in _clear_map[cat].items() if c in ds.schema.names}
+                    if updates:
+                        with _lance_write_lock:
+                            ds.update(updates)
                 except Exception:
                     pass
-                progress_tracker.fail_task(task_id, str(e))
 
-        thread = threading.Thread(target=execute, name=task_id, daemon=True)
-        thread.start()
-        return {"message": f"Element OCR {model} 已启动", "task_id": task_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        done_keys: set[tuple[str, int]] = set()
+        for cat, lp_str in cat_paths:
+            try:
+                ds = lance.dataset(lp_str)
+                if text_col in ds.schema.names:
+                    tbl = ds.to_table(
+                        columns=["sample_id", "block_idx"],
+                        filter=f"{text_col} IS NOT NULL AND {text_col} != '' AND {conf_col} > 0"
+                    )
+                    sid_col = tbl.column("sample_id")
+                    bidx_col = tbl.column("block_idx")
+                    done_keys.update(
+                        (sid_col[i].as_py(), bidx_col[i].as_py())
+                        for i in range(len(tbl))
+                    )
+            except Exception:
+                pass
+
+        remaining_blocks = total_blocks - len(done_keys)
+        if remaining_blocks <= 0:
+            progress_tracker.complete_task(ctx.task_id, f"{model} 所有 block 已完成（{len(done_keys)} 个），无需重跑")
+            return
+
+        progress_tracker.update_progress(
+            ctx.task_id, current=len(done_keys), total=total_blocks,
+            message=f"{model}: {total_blocks} 个 block（跳过 {len(done_keys)} 已完成，待处理 {remaining_blocks}）",
+        )
+
+        from data_engine.ocr.base import LayoutBlock
+        tmp_dir = tempfile.mkdtemp(prefix="el_ocr_")
+
+        done = 0
+        errors = 0
+        skipped = 0
+        save_interval = int(get_config("ocr", "save_interval", default=20))
+        pending_rows: dict[str, list[dict]] = {"text": [], "formula": [], "table": []}
+
+        for cat, lp_str in cat_paths:
+            ctx.check_stop()
+            try:
+                ds = lance.dataset(lp_str)
+            except Exception:
+                continue
+
+            progress_tracker.update_progress(
+                ctx.task_id, current=done,
+                message=f"{model}: 扫描 {cat} 数据..."
+            )
+
+            STREAM_BATCH = 100
+            scan_done = 0
+            for batch in ds.to_batches(batch_size=STREAM_BATCH):
+                ctx.check_stop()
+                rows = batch.to_pylist()
+                for row in rows:
+                    ctx.check_stop()
+
+                    sid = row["sample_id"]
+                    bidx = row["block_idx"]
+                    key = (sid, bidx)
+                    if key in done_keys:
+                        done += 1
+                        scan_done += 1
+                        continue
+
+                    img_bytes = row.get("image_data")
+                    if not img_bytes:
+                        skipped += 1
+                        done += 1
+                        scan_done += 1
+                        continue
+
+                    tmp_path = Path(tmp_dir) / f"{cat}_{sid}_{bidx}.png"
+                    if isinstance(img_bytes, bytes):
+                        tmp_path.write_bytes(img_bytes)
+                    elif isinstance(img_bytes, str):
+                        tmp_path.write_bytes(img_bytes.encode("latin-1"))
+                    else:
+                        tmp_path.write_bytes(bytes(img_bytes))
+
+                    _w, _h = 0, 0
+                    try:
+                        import struct
+                        _raw = img_bytes if isinstance(img_bytes, bytes) else bytes(img_bytes)
+                        if _raw[:8] == b'\x89PNG\r\n\x1a\n' and len(_raw) > 24:
+                            _w, _h = struct.unpack('>II', _raw[16:24])
+                        elif _raw[:2] == b'\xff\xd8':
+                            _i = 2
+                            while _i < len(_raw) - 1:
+                                if _raw[_i] != 0xFF: break
+                                _m = _raw[_i+1]
+                                if _m in (0xC0, 0xC1, 0xC2):
+                                    _h, _w = struct.unpack('>HH', _raw[_i+5:_i+9])
+                                    break
+                                _ln = struct.unpack('>H', _raw[_i+2:_i+4])[0]
+                                _i += 2 + _ln
+                    except Exception:
+                        pass
+                    if _w == 0 or _h == 0:
+                        _w, _h = 9999, 9999
+                    region = LayoutBlock(
+                        block_type=row.get("block_type", cat),
+                        bbox=[0, 0, _w, _h],
+                        confidence=row.get("layout_confidence", 1.0),
+                    )
+                    try:
+                        results = engine.recognize_regions(tmp_path, [region])
+                        r = results[0] if results else None
+                        ocr_row = {
+                            "sample_id": sid,
+                            "block_idx": bidx,
+                            text_col: (r.text_content or "") if r else "",
+                            conf_col: r.confidence if r else 0.0,
+                        }
+                        if cat == "table" and r and r.table_structure:
+                            ocr_row[f"{prefix}_table"] = json.dumps(r.table_structure, ensure_ascii=False)
+                        if cat == "formula" and r and r.formula_latex:
+                            ocr_row[f"{prefix}_formula"] = r.formula_latex
+                        pending_rows[cat].append(ocr_row)
+                    except Exception as e:
+                        errors += 1
+                    finally:
+                        tmp_path.unlink(missing_ok=True)
+
+                    done += 1
+                    scan_done += 1
+                    pct = round(done / total_blocks * 100) if total_blocks else 0
+                    err_msg = f"（{errors} 错误）" if errors else ""
+                    progress_tracker.update_progress(
+                        ctx.task_id, current=done,
+                        message=f"{model}: {cat} {done}/{total_blocks} ({pct}%){err_msg}"
+                    )
+
+                    if done % save_interval == 0:
+                        _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
+                        pending_rows = {"text": [], "formula": [], "table": []}
+
+        _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        progress_tracker.complete_task(ctx.task_id, f"{model} 完成: {done} block（跳过 {len(done_keys)} 已完成{f'，{skipped} 无图' if skipped else ''}{f'，{errors} 错误' if errors else ''}）")
+
+        try:
+            from data_engine.ocr.cmcv import CMCVEngine
+            cmcv_engine = CMCVEngine(use_visual_cdm=True)
+            json_keys = ("paddle_table", "glm_table", "self_table",
+                         "paddle_formula", "glm_formula", "self_formula")
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+                try:
+                    with _lance_write_lock:
+                        ds = _open_lance(lp)
+                        all_cols_set = set(ds.schema.names)
+                        if "consistency_pattern" not in all_cols_set:
+                            continue
+                        ocr_filter = ocr_complete_filter(all_cols_set)
+                        read_cols = ["sample_id", "block_idx", "block_type", "bbox_json", "layout_confidence"]
+                        for _pfx in ("paddle", "glm", "self"):
+                            for suffix in ("_text", "_confidence", "_table", "_formula"):
+                                col = f"{_pfx}{suffix}"
+                                if col in all_cols_set:
+                                    read_cols.append(col)
+                        cols = [c for c in read_cols if c in all_cols_set]
+                        auto_filter = "consistency_pattern IS NULL"
+                        if ocr_filter:
+                            auto_filter = f"({auto_filter}) AND ({ocr_filter})"
+                        batches = list(ds.to_batches(columns=cols, filter=auto_filter))
+                    rows = []
+                    for batch in batches:
+                        for i in range(len(batch)):
+                            row = {c: batch.column(c)[i].as_py() for c in cols}
+                            for key in json_keys:
+                                val = row.get(key)
+                                if isinstance(val, str) and val:
+                                    try:
+                                        row[key] = json.loads(val)
+                                    except (json.JSONDecodeError, TypeError):
+                                        pass
+                            rows.append(row)
+                    updated_rows, _ = cmcv_engine.process_element_batch(rows)
+                    update_map = {}
+                    for r in updated_rows:
+                        if r.get("consistency_pattern"):
+                            update_map.setdefault("consistency_pattern", {})[(r["sample_id"], r["block_idx"])] = r["consistency_pattern"]
+                        if r.get("block_diff_json"):
+                            update_map.setdefault("block_diff_json", {})[(r["sample_id"], r["block_idx"])] = r["block_diff_json"]
+                    if update_map:
+                        with _lance_write_lock:
+                            ds = _open_lance(lp)
+                            # 流式读取，逐批更新
+                            read_cols = ["sample_id", "block_idx", "consistency_pattern", "block_diff_json"]
+                            available = [c for c in read_cols if c in ds.schema.names]
+                            scanner = ds.scanner(columns=available)
+                            update_batches = []
+                            pat_map = update_map.get("consistency_pattern", {})
+                            diff_map = update_map.get("block_diff_json", {})
+                            for batch in scanner.to_batches():
+                                sids = batch.column("sample_id").to_pylist()
+                                bidxs = batch.column("block_idx").to_pylist()
+                                patterns = batch.column("consistency_pattern").to_pylist() if "consistency_pattern" in batch.column_names else [None] * len(batch)
+                                diffs = batch.column("block_diff_json").to_pylist() if "block_diff_json" in batch.column_names else [None] * len(batch)
+                                new_p = [pat_map.get((sids[i], bidxs[i]), patterns[i]) for i in range(len(batch))]
+                                new_d = [diff_map.get((sids[i], bidxs[i]), diffs[i]) for i in range(len(batch))]
+                                update_batches.append(pa.table({
+                                    "sample_id": pa.array(sids, type=pa.large_string()),
+                                    "block_idx": pa.array(bidxs, type=pa.int32()),
+                                    "consistency_pattern": pa.array(new_p, type=pa.large_string()),
+                                    "block_diff_json": pa.array(new_d, type=pa.large_string()),
+                                }))
+                            _lance_cache.invalidate(str(lp))
+                            if update_batches:
+                                update_table = pa.concat_tables(update_batches)
+                                safe_merge(ds, update_table, ["sample_id", "block_idx"], context=f"el-ocr-cmcv/{cat}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return task_manager.start(
+        task_id=task_id, task_type="el_ocr",
+        source_id=source_id, batch_id=batch_id,
+        target=_execute_element_ocr,
+    )
 
 
 _CAT_TEXT_COL = {"text": "_text", "formula": "_formula", "table": "_table"}
