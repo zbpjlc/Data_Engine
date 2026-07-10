@@ -2622,7 +2622,7 @@
                 const src = getSourceId();
                 const bid = getBatchId();
                 if (!src) { showToast('请先选择数据源', 'warning'); return; }
-                const task_id = `el_ocr_${model}_${src}_${bid || ''}`;
+                const task_id = `ocr_${model}_${src}_${bid || ''}`;
                 const url = `/api/stop/${encodeURIComponent(src)}?batch_id=${encodeURIComponent(bid || '')}&task_id=${encodeURIComponent(task_id)}`;
                 Request.post(url);
             });
@@ -2933,31 +2933,6 @@
                     }
             } catch (err) { console.error('[loadOcrResults] Error:', err); }
         }
-
-        // CMCV
-        DOM.elementCmcv.buttons.run.addEventListener('click', function() {
-            const batches = getSelectedOcrBatches();
-            if (batches.length === 0) { showToast('请勾选已 OCR 的批次', 'warning'); return; }
-            const btn = this;
-            btn.disabled = true;
-            btn.textContent = '一致性比较中...';
-
-            // 在 paddleocr-tasks 区域显示 CMCV 进度
-            const tasksDiv = DOM.pageOcr.paddleOcrTasks;
-
-            const v = Request.begin('page-cmcv');
-            const fullMode = document.getElementById('page-cmcv-full-mode')?.checked || false;
-            const forceMode = document.getElementById('page-cmcv-force')?.checked || false;
-            Promise.all(batches.map(async b => {
-                try {
-                    const r = await Request.post('/api/cmcv/' + b.source_id + '?batch_id=' + b.batch_id + '&full=' + fullMode + '&force=' + forceMode);
-                    if (Request.stale('page-cmcv', v)) return;
-                    if (!r.ok) throw new Error(r.error);
-                } catch (err) {
-                    console.error('[CMCV] failed:', err);
-                }
-            })).then(() => { btn.disabled = false; btn.textContent = '运行 CMCV'; });
-        });
 
         // ── pp-layout + 按类型拆分到 Lance（Page_CMCV 面板）──────────────────
         // _splitPollTimer/_splitTaskIds/_splitTargets/_splitStartTime/_etaSamples → Store.layout.* (Phase 1 migration)
@@ -3528,7 +3503,8 @@
                 const model = this.dataset.model;
                 const targets = getEoTargets();
                 targets.forEach(t => {
-                    Request.post(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`);
+                    const taskId = `el_ocr_${model}_${t.source_id}_${t.batch_id}`;
+                    Request.post(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}&task_id=${encodeURIComponent(taskId)}`);
                 });
             });
         });
@@ -3545,17 +3521,6 @@
         });
 
         // "重跑"按钮：清空该模型已有结果后全部重跑
-        document.querySelectorAll('.btn-eo-rerun').forEach(btn => {
-            btn.addEventListener('click', function() {
-                const model = this.dataset.model;
-                const targets = getEoTargets();
-                targets.forEach(t => {
-                    Request.post(`/api/stop/${encodeURIComponent(t.source_id)}?batch_id=${encodeURIComponent(t.batch_id)}`);
-                });
-            });
-        });
-
-        // “重跑”按钮：清空该模型已有结果后全部重跑
         document.querySelectorAll('.btn-eo-rerun').forEach(btn => {
             btn.addEventListener('click', function() {
                 const model = this.dataset.model;
