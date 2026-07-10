@@ -46,37 +46,36 @@ except ImportError:
         return 1.0 - prev[-1] / max_len
 
 
-# ─── TEDS（OmniDocBench 实现） ──────────────────────────────────────────────
+# ─── TEDS（OmniDocBench 容器桥接） ─────────────────────────────────────────
+
+def _table_to_full_html(table: dict | str | None) -> str:
+    if not table:
+        return ""
+    if isinstance(table, str):
+        if "<table" in table.lower():
+            if "<html" not in table.lower():
+                return f"<html><body>{table}</body></html>"
+            return table
+        try:
+            table = json.loads(table)
+        except (json.JSONDecodeError, TypeError):
+            return f"<html><body><table><tr><td>{table}</td></tr></table></body></html>"
+    rows = table.get("rows", table.get("data", []))
+    if not rows:
+        return ""
+    parts = []
+    for row in rows:
+        if isinstance(row, list):
+            cells = "".join(f"<td>{c}</td>" for c in row)
+        elif isinstance(row, dict):
+            cells = "".join(f"<td>{v}</td>" for v in row.values())
+        else:
+            cells = f"<td>{row}</td>"
+        parts.append(f"<tr>{cells}</tr>")
+    return "<html><body><table>" + "".join(parts) + "</table></body></html>"
 
 try:
-    from data_engine.ocr.omnidocbench_local.table_metric import TEDS as _OmniTEDS
-    _teds_engine = _OmniTEDS()
-
-    def _table_to_full_html(table: dict | str | None) -> str:
-        if not table:
-            return ""
-        if isinstance(table, str):
-            if "<table" in table.lower():
-                if "<html" not in table.lower():
-                    return f"<html><body>{table}</body></html>"
-                return table
-            try:
-                table = json.loads(table)
-            except (json.JSONDecodeError, TypeError):
-                return f"<html><body><table><tr><td>{table}</td></tr></table></body></html>"
-        rows = table.get("rows", table.get("data", []))
-        if not rows:
-            return ""
-        parts = []
-        for row in rows:
-            if isinstance(row, list):
-                cells = "".join(f"<td>{c}</td>" for c in row)
-            elif isinstance(row, dict):
-                cells = "".join(f"<td>{v}</td>" for v in row.values())
-            else:
-                cells = f"<td>{row}</td>"
-            parts.append(f"<tr>{cells}</tr>")
-        return "<html><body><table>" + "".join(parts) + "</table></body></html>"
+    from data_engine.ocr.omnidocbench_local.teds_bridge import compute_teds, compute_teds_batch
 
     def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> float:
         html_a = _table_to_full_html(table_a)
@@ -85,10 +84,13 @@ try:
             return 1.0
         if not html_a or not html_b:
             return 0.0
-        return _teds_engine.evaluate(html_a, html_b)
+        result = compute_teds(html_a, html_b)
+        if result is None:
+            return 0.0
+        return result.score
 
 except ImportError:
-    logger.warning("OmniDocBench TEDS not available, using fallback table comparison")
+    logger.warning("OmniDocBench TEDS container bridge not available, using fallback table comparison")
 
     def _table_to_cells(table: dict | str | None) -> list[list[str]]:
         if not table:
