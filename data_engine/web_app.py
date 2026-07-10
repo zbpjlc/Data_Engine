@@ -1270,6 +1270,21 @@ async def lancedb_view(request: Request):
     )
 
 
+@app.get("/api/batches/light")
+async def list_batches_light():
+    """轻量级批次列表（不扫描 Lance，仅返回 source_id/batch_id）。"""
+    try:
+        global_status = collect_global_status(registry)
+        return {
+            "sources": [
+                {"source_id": b.source_id, "batch_id": b.batch_id}
+                for b in global_status.batches
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/lancedb/sources")
 async def lancedb_list_sources():
     """列出所有有Lance数据的数据源和批次（ingest + element）"""

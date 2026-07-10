@@ -180,10 +180,10 @@
         let currentTier = 'all_disagree';
         let currentType = 'all';
 
-        // Init
+        // Init - 使用轻量级接口，不扫描 Lance
         async function init() {
             try {
-                const res = await fetch('/api/lancedb/sources');
+                const res = await fetch('/api/batches/light');
                 const data = await res.json();
                 allSources = data.sources || [];
                 populateSourceSelect();
