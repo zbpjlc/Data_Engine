@@ -273,11 +273,14 @@ def _safe_write_lance_inner(table: pa.Table, target_path: Path, mode: str = "ove
     try:
         tmp_lance = tmp_dir / "data.lance"
         if mode == "append" and target_path.exists():
-            # 尝试读取已有数据合并，损坏则丢弃旧数据重写
+            # 流式读取已有数据合并，避免全表加载
             try:
                 existing_ds = lance.dataset(str(target_path))
-                existing_table = existing_ds.to_table()
-                combined = pa.concat_tables([existing_table, table])
+                existing_batches = list(existing_ds.scanner().to_batches())
+                if existing_batches:
+                    combined = pa.concat_tables(existing_batches + [table])
+                else:
+                    combined = table
                 lance.write_dataset(combined, str(tmp_lance), **{**write_kwargs, "mode": "overwrite"})
             except Exception as e:
                 print(f"[Lance] 旧数据损坏({e})，丢弃重写", file=sys.stderr)
@@ -325,8 +328,12 @@ def read_manifest(path: Path, columns: list[str] | None = None) -> list[dict]:
         return []
     with _lance_write_lock:
         ds = lance.dataset(str(path))
-        table = ds.to_table(columns=columns)
-        return [_arrow_to_record(row) for row in table.to_pylist()]
+        # 流式读取，避免全表加载
+        scanner = ds.scanner(columns=columns)
+        records = []
+        for batch in scanner.to_batches():
+            records.extend([_arrow_to_record(row) for row in batch.to_pylist()])
+        return records
 
 
 def query_relative_paths(path: Path) -> set[str]:
@@ -334,8 +341,12 @@ def query_relative_paths(path: Path) -> set[str]:
         return set()
     try:
         ds = lance.dataset(str(path))
-        col = ds.to_table(columns=["relative_path"]).column("relative_path")
-        return set(col.to_pylist())
+        # 流式读取
+        result_set = set()
+        scanner = ds.scanner(columns=["relative_path"])
+        for batch in scanner.to_batches():
+            result_set.update(batch.column("relative_path").to_pylist())
+        return result_set
     except Exception as e:
         print(f"读取 Lance 数据集失败 {path}: {e}", file=sys.stderr)
         return set()
@@ -346,8 +357,12 @@ def query_sample_ids(path: Path) -> set[str]:
         return set()
     try:
         ds = lance.dataset(str(path))
-        col = ds.to_table(columns=["sample_id"]).column("sample_id")
-        return set(col.to_pylist())
+        # 流式读取
+        result_set = set()
+        scanner = ds.scanner(columns=["sample_id"])
+        for batch in scanner.to_batches():
+            result_set.update(batch.column("sample_id").to_pylist())
+        return result_set
     except Exception as e:
         print(f"读取 Lance 数据集失败 {path}: {e}", file=sys.stderr)
         return set()

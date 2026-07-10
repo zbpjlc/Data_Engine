@@ -384,9 +384,13 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
                 col_names = set(ds.schema.names)
                 if FIELD_CONSISTENCY not in col_names or FIELD_BLOCK_DIFF not in col_names:
                     continue
-                current_table = ds.to_table(
-                    columns=["sample_id", "block_idx", FIELD_CONSISTENCY, FIELD_BLOCK_DIFF]
-                )
+                # 流式读取，避免全表加载
+                read_cols = ["sample_id", "block_idx", FIELD_CONSISTENCY, FIELD_BLOCK_DIFF]
+                scanner = ds.scanner(columns=read_cols)
+                current_batches = list(scanner.to_batches())
+                if not current_batches:
+                    continue
+                current_table = pa.concat_tables(current_batches)
 
                 joined = current_table.join(
                     update_table,

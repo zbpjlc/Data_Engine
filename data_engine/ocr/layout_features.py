@@ -65,8 +65,12 @@ def _read_lance_rows(lance_path: Path, columns: list[str] | None = None) -> list
         if columns:
             available = set(ds.schema.names)
             columns = [c for c in columns if c in available]
-        table = ds.to_table(columns=columns) if columns else ds.to_table()
-        return table.to_pylist()
+        # 流式读取，避免全表加载
+        scanner = ds.scanner(columns=columns) if columns else ds.scanner()
+        records = []
+        for batch in scanner.to_batches():
+            records.extend(batch.to_pylist())
+        return records
     except Exception as e:
         logger.warning("[layout_features] 读取 %s 失败: %s", lance_path, e)
         return []
@@ -138,17 +142,18 @@ def cluster_by_type(
         ds_scan = _lance_scan.dataset(str(lance_path))
         has_emb_col = "embedding" in ds_scan.schema.names
         if has_emb_col:
-            # 找出 embedding IS NULL 的行
-            null_table = ds_scan.to_table(
+            # 流式读取缺失 embedding 的行
+            null_keys = set()
+            scanner = ds_scan.scanner(
                 columns=["sample_id", "block_idx"],
                 filter="embedding IS NULL"
             )
-            null_keys = set(
-                f"{s}:{b}" for s, b in zip(
-                    null_table.column("sample_id").to_pylist(),
-                    null_table.column("block_idx").to_pylist()
-                )
-            )
+            for batch in scanner.to_batches():
+                for s, b in zip(
+                    batch.column("sample_id").to_pylist(),
+                    batch.column("block_idx").to_pylist()
+                ):
+                    null_keys.add(f"{s}:{b}")
         else:
             null_keys = set()  # 没有 embedding 列 → 全部需要生成
     except Exception:
@@ -203,29 +208,26 @@ def cluster_by_type(
                 sids_str = ",".join(f"'{sid}'" for sid in set(chunk_sids))
                 filter_str = f"sample_id IN ({sids_str})"
                 
-                # 批量查询 image_data
-                result = ds.to_table(columns=["sample_id", "block_idx", "image_data"], filter=filter_str)
-                if result.num_rows > 0:
-                    res_sids = result.column("sample_id").to_pylist()
-                    res_bidxs = result.column("block_idx").to_pylist()
-                    res_imgs = result.column("image_data").to_pylist()
-                    
-                    # 构建 sid:bidx -> image_bytes 映射
-                    img_map: dict[tuple, bytes] = {}
+                # 流式查询 image_data
+                img_map: dict[tuple, bytes] = {}
+                scanner = ds.scanner(columns=["sample_id", "block_idx", "image_data"], filter=filter_str)
+                for batch in scanner.to_batches():
+                    res_sids = batch.column("sample_id").to_pylist()
+                    res_bidxs = batch.column("block_idx").to_pylist()
+                    res_imgs = batch.column("image_data").to_pylist()
                     for sid, bidx, img in zip(res_sids, res_bidxs, res_imgs):
                         if img:
                             img_bytes = _coerce_image_bytes(img)
                             if img_bytes:
                                 img_map[(sid, bidx)] = img_bytes
-                    
-                    # 按 row_idx 匹配
-                    for row_idx in chunk_indices:
-                        key = (rows[row_idx]["sample_id"], rows[row_idx]["block_idx"])
-                        if key in img_map:
-                            chunk_images[row_idx] = img_map[key]
-                    
-                    del img_map
-                del result
+                
+                # 按 row_idx 匹配
+                for row_idx in chunk_indices:
+                    key = (rows[row_idx]["sample_id"], rows[row_idx]["block_idx"])
+                    if key in img_map:
+                        chunk_images[row_idx] = img_map[key]
+                
+                del img_map
             except Exception as e:
                 logger.warning("[layout_features] %s: failed to load image_data chunk: %s", cat, e)
 
@@ -415,30 +417,35 @@ def _merge_embeddings_back(lance_path: Path, emb_dict: dict[str, list[float]]):
                 "[layout_features] merge_insert failed (will fallback to overwrite): %s",
                 merge_err,
             )
-            # ── fallback：全量读取 + 合并 + overwrite ───────────────────
+            # ── fallback：流式读取 + 合并 + overwrite ───────────────────
             # 如果 embedding 列是 legacy large_list，此处同时完成 schema 迁移。
-            logger.info("[layout_features] fallback: reading full table from %s ...", lance_path.name)
-            table = ds.to_table()
+            logger.info("[layout_features] fallback: streaming from %s ...", lance_path.name)
             emb_lookup = dict(zip(
                 [f"{s}:{b}" for s, b in zip(update_sids, update_bidxs)],
                 update_embs
             ))
-            sids_all = table.column("sample_id").to_pylist()
-            bidxs_all = table.column("block_idx").to_pylist()
-            try:
-                old_embs = table.column("embedding").to_pylist()
-            except (KeyError, ValueError):
-                old_embs = [None] * len(sids_all)
-            merged = []
-            for s, b, old in zip(sids_all, bidxs_all, old_embs):
-                new_emb = emb_lookup.get(f"{s}:{b}")
-                merged.append(new_emb if new_emb is not None else old)
-            new_col = pa.array(merged, type=emb_type)
-            try:
-                col_idx = table.schema.get_field_index("embedding")
-                table = table.set_column(col_idx, "embedding", new_col)
-            except (KeyError, ValueError):
-                table = table.append_column("embedding", new_col)
+            # 流式读取并合并
+            merged_batches = []
+            scanner = ds.scanner()
+            for batch in scanner.to_batches():
+                sids_all = batch.column("sample_id").to_pylist()
+                bidxs_all = batch.column("block_idx").to_pylist()
+                try:
+                    old_embs = batch.column("embedding").to_pylist()
+                except (KeyError, ValueError):
+                    old_embs = [None] * len(sids_all)
+                merged = []
+                for s, b, old in zip(sids_all, bidxs_all, old_embs):
+                    new_emb = emb_lookup.get(f"{s}:{b}")
+                    merged.append(new_emb if new_emb is not None else old)
+                new_col = pa.array(merged, type=emb_type)
+                try:
+                    col_idx = batch.schema.get_field_index("embedding")
+                    batch = batch.set_column(col_idx, "embedding", new_col)
+                except (KeyError, ValueError):
+                    batch = batch.append_column("embedding", new_col)
+                merged_batches.append(batch)
+            table = pa.concat_tables(merged_batches) if merged_batches else pa.table({})
             logger.info("[layout_features] fallback: writing %d rows to %s ...", table.num_rows, lance_path.name)
             lance.write_dataset(table, str(lance_path), mode="overwrite")
     except Exception as e:

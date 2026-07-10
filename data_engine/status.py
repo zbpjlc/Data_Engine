@@ -138,7 +138,11 @@ def _detect_stage_status(manifests_dir: Path) -> str:
             try:
                 ds = lance.dataset(str(cat_path))
                 if "consistency_pattern" in ds.schema.names:
-                    sample = ds.to_table(limit=5, columns=["consistency_pattern"]).to_pylist()
+                    # 流式读取少量数据
+                    sample = []
+                    scanner = ds.scanner(columns=["consistency_pattern"], limit=5)
+                    for batch in scanner.to_batches():
+                        sample.extend(batch.to_pylist())
                     has_cmcv = any(r.get("consistency_pattern") for r in sample) if sample else False
                     if has_cmcv:
                         return "bucketed"
@@ -151,8 +155,11 @@ def _detect_stage_status(manifests_dir: Path) -> str:
         if ingest_manifest.suffix == ".lance":
             try:
                 ds = lance.dataset(str(ingest_manifest))
-                table = ds.to_table(limit=20)
-                sample_records = table.to_pylist()
+                # 流式读取少量数据
+                sample_records = []
+                scanner = ds.scanner(limit=20)
+                for batch in scanner.to_batches():
+                    sample_records.extend(batch.to_pylist())
             except Exception:
                 return "ingested"
         else:
