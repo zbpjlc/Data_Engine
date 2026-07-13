@@ -1867,18 +1867,37 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
                             filtered_rows = [r for r in cached_data["rows"] if r.get("consistency_pattern") == tier]
                             # 重新计算 histogram
                             tier_histogram = {"easy": 0, "medium": 0, "hard": 0}
+                            tier_type_histogram = {
+                                "easy": {"text": 0, "formula": 0, "table": 0},
+                                "medium": {"text": 0, "formula": 0, "table": 0},
+                                "hard": {"text": 0, "formula": 0, "table": 0},
+                            }
                             for row in filtered_rows:
                                 pat = row.get("consistency_pattern", "")
-                                if pat == "all_agree": tier_histogram["easy"] += 1
-                                elif pat == "partial_agree": tier_histogram["medium"] += 1
-                                elif pat == "all_disagree": tier_histogram["hard"] += 1
+                                bt = row.get("block_type", "text")
+                                if pat == "all_agree":
+                                    tier_histogram["easy"] += 1
+                                    tier_type_histogram["easy"][bt] = tier_type_histogram["easy"].get(bt, 0) + 1
+                                elif pat == "partial_agree":
+                                    tier_histogram["medium"] += 1
+                                    tier_type_histogram["medium"][bt] = tier_type_histogram["medium"].get(bt, 0) + 1
+                                elif pat == "all_disagree":
+                                    tier_histogram["hard"] += 1
+                                    tier_type_histogram["hard"][bt] = tier_type_histogram["hard"].get(bt, 0) + 1
                             return {
                                 "total_blocks": len(filtered_rows),
                                 "total_pages": len(set(r["sample_id"] for r in filtered_rows)),
                                 "tier_histogram": tier_histogram,
+                                "tier_type_histogram": tier_type_histogram,
                                 "pages": list({r["sample_id"]: r for r in filtered_rows}.values())[:100],
                             }
-                        return cached_data
+                        return {
+                            "total_blocks": cached_data["total_blocks"],
+                            "total_pages": cached_data["total_pages"],
+                            "tier_histogram": cached_data["tier_histogram"],
+                            "tier_type_histogram": cached_data.get("tier_type_histogram"),
+                            "pages": cached_data["pages"],
+                        }
                 except Exception:
                     pass
 
@@ -1900,12 +1919,7 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             try:
                 ds = _open_lance(lp)
                 col_names = set(ds.schema.names)
-                read_cols = ["sample_id", "block_idx", "block_type",
-                             "consistency_pattern", "block_diff_json"]
-                for prefix in ("paddle", "glm", "self"):
-                    col = f"{prefix}_text"
-                    if col in col_names:
-                        read_cols.append(col)
+                read_cols = ["sample_id", "block_idx", "block_type", "consistency_pattern", "block_diff_json"]
                 # 流式读取，避免全表加载
                 available = [c for c in read_cols if c in col_names]
                 scanner = ds.scanner(columns=available)
@@ -1918,14 +1932,23 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             rows = [r for r in rows if r.get("consistency_pattern") == tier]
 
         tier_histogram = {"easy": 0, "medium": 0, "hard": 0}
+        tier_type_histogram = {
+            "easy": {"text": 0, "formula": 0, "table": 0},
+            "medium": {"text": 0, "formula": 0, "table": 0},
+            "hard": {"text": 0, "formula": 0, "table": 0},
+        }
         for row in rows:
             pat = row.get("consistency_pattern", "")
+            bt = row.get("block_type", "text")
             if pat == "all_agree":
                 tier_histogram["easy"] += 1
+                tier_type_histogram["easy"][bt] = tier_type_histogram["easy"].get(bt, 0) + 1
             elif pat == "partial_agree":
                 tier_histogram["medium"] += 1
+                tier_type_histogram["medium"][bt] = tier_type_histogram["medium"].get(bt, 0) + 1
             elif pat == "all_disagree":
                 tier_histogram["hard"] += 1
+                tier_type_histogram["hard"][bt] = tier_type_histogram["hard"].get(bt, 0) + 1
 
         page_stats: dict[str, dict] = {}
         for row in rows:
@@ -1943,6 +1966,7 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             "total_blocks": len(rows),
             "total_pages": len(page_stats),
             "tier_histogram": tier_histogram,
+            "tier_type_histogram": tier_type_histogram,
             "pages": list(page_stats.values())[:100],
             "rows": rows,  # 用于缓存
         }
@@ -1961,6 +1985,7 @@ async def get_cmcv_results(source_id: str, batch_id: str, tier: str = None):
             "total_blocks": result["total_blocks"],
             "total_pages": result["total_pages"],
             "tier_histogram": result["tier_histogram"],
+            "tier_type_histogram": result.get("tier_type_histogram"),
             "pages": result["pages"],
         }
     except HTTPException:
@@ -2738,6 +2763,8 @@ async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_di
         safe_limit = min(limit, 1000)
 
         for cat in ("text", "formula", "table"):
+            if block_type != "all" and cat != block_type:
+                continue
             lp = manifests_dir / f"{cat}.lance"
             if not lp.exists():
                 continue
@@ -2754,7 +2781,8 @@ async def get_hard_cases_list(source_id: str, batch_id: str, tier: str = "all_di
                 if remaining <= 0:
                     continue
                 light_cols = [c for c in ("sample_id", "block_idx", "block_type",
-                                          "consistency_pattern", "judged", "corrected",
+                                          "consistency_pattern", "block_diff_json",
+                                          "judged", "corrected",
                                           "needs_expert", "judge_confidence") if c in cols]
                 scanner = ds.scanner(
                     columns=light_cols,
@@ -4226,6 +4254,8 @@ async def page_cmcv_classify(
         PATTERN_TIER = {"all_agree": "easy", "partial_agree": "medium", "all_disagree": "hard"}
         page_tiers = {}  # sid -> "easy"/"medium"/"hard"
         block_details = {}  # sid -> [{"block_idx", "pattern", "similarities"}, ...]
+        page_high = float(get_config("ocr", "cmcv", "page_high_threshold", default=0.8))
+        page_low = float(get_config("ocr", "cmcv", "page_low_threshold", default=0.4))
 
         def _pick_sim_fn(block_type: str):
             """根据 block 类型选择相似度函数（Page CMCV 用 token fallback）"""
@@ -4261,12 +4291,13 @@ async def page_cmcv_classify(
                     sims = []
                     for i in range(len(texts)):
                         for j in range(i + 1, len(texts)):
-                            sims.append(sim_fn(texts[i], texts[j]))
+                            s = sim_fn(texts[i], texts[j])
+                            sims.append(s if s is not None else 0.0)
                     avg_sim = sum(sims) / len(sims) if sims else 1.0
 
-                    if avg_sim >= 0.8:
+                    if avg_sim >= page_high:
                         pattern = "all_agree"
-                    elif avg_sim >= 0.4:
+                    elif avg_sim >= page_low:
                         pattern = "partial_agree"
                     else:
                         pattern = "all_disagree"
@@ -4388,6 +4419,9 @@ async def page_cmcv_sample(
 
         from data_engine.ocr.cmcv import text_similarity
 
+        page_high = float(get_config("ocr", "cmcv", "page_high_threshold", default=0.8))
+        page_low = float(get_config("ocr", "cmcv", "page_low_threshold", default=0.4))
+
         page_tiers = {}
         for tier_name, tier_samples in buckets.items():
             for s in tier_samples:
@@ -4405,9 +4439,9 @@ async def page_cmcv_sample(
                         for j in range(i + 1, len(texts)):
                             sims.append(text_similarity(texts[i], texts[j]))
                     avg_sim = sum(sims) / len(sims) if sims else 1.0
-                    if avg_sim >= 0.8:
+                    if avg_sim >= page_high:
                         block_patterns.append("all_agree")
-                    elif avg_sim >= 0.4:
+                    elif avg_sim >= page_low:
                         block_patterns.append("partial_agree")
                     else:
                         block_patterns.append("all_disagree")
