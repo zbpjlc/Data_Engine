@@ -60,6 +60,12 @@ def _table_to_full_html(table: dict | str | None) -> str:
             table = json.loads(table)
         except (json.JSONDecodeError, TypeError):
             return f"<html><body><table><tr><td>{table}</td></tr></table></body></html>"
+    # OCR 引擎存 {"html": "..."} 格式，优先提取
+    if "html" in table:
+        html = table["html"]
+        if "<table" in html.lower():
+            return f"<html><body>{html}</body></html>" if "<html" not in html.lower() else html
+        return ""
     rows = table.get("rows", table.get("data", []))
     if not rows:
         return ""
