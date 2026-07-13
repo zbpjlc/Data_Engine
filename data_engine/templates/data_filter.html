@@ -457,7 +457,8 @@
                             <div class="w-28 flex-shrink-0">
                                 <span class="font-medium text-blue-700">PaddleOCR VL</span>
                             </div>
-                            <div id="eo-paddleocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div id="eo-paddleocr-status" class="flex-1 min-w-0"></div>
+                            <div id="eo-paddleocr-tasks" class="flex-1 min-w-0 space-y-1 hidden"></div>
                             <div class="flex gap-1 flex-shrink-0">
                                 <button class="btn-eo-run px-3 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" data-model="paddleocr">运行</button>
                                 <button class="btn-eo-rerun px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600" data-model="paddleocr">重跑</button>
@@ -468,7 +469,8 @@
                             <div class="w-28 flex-shrink-0">
                                 <span class="font-medium text-green-700">GLM OCR</span>
                             </div>
-                            <div id="eo-glm_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div id="eo-glm_ocr-status" class="flex-1 min-w-0"></div>
+                            <div id="eo-glm_ocr-tasks" class="flex-1 min-w-0 space-y-1 hidden"></div>
                             <div class="flex gap-1 flex-shrink-0">
                                 <button class="btn-eo-run px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700" data-model="glm_ocr">运行</button>
                                 <button class="btn-eo-rerun px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600" data-model="glm_ocr">重跑</button>
@@ -479,7 +481,8 @@
                             <div class="w-28 flex-shrink-0">
                                 <span class="font-medium text-purple-700">自研 OCR</span>
                             </div>
-                            <div id="eo-self_ocr-tasks" class="flex-1 min-w-0 space-y-1"></div>
+                            <div id="eo-self_ocr-status" class="flex-1 min-w-0"></div>
+                            <div id="eo-self_ocr-tasks" class="flex-1 min-w-0 space-y-1 hidden"></div>
                             <div class="flex gap-1 flex-shrink-0">
                                 <button class="btn-eo-run px-3 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700" data-model="self_ocr">运行</button>
                                 <button class="btn-eo-rerun px-3 py-1 text-xs bg-orange-500 text-white rounded hover:bg-orange-600" data-model="self_ocr">重跑</button>
@@ -1096,7 +1099,7 @@
                     for (const [taskId, cbs] of [...this._subs]) {
                         const task = tasks[taskId];
                         if (!task) continue;
-                        const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+                        const pct = task.total > 0 ? Math.min(Math.round(task.current / task.total * 100), 100) : 0;
                         if (cbs.onProgress) cbs.onProgress({...task, pct});
                         if (task.status === 'completed') {
                             if (cbs.onComplete) cbs.onComplete(task);
@@ -1579,6 +1582,7 @@
                     // 切换到 Element OCR Tab 时加载已有任务状态
                     if (this.dataset.panel === 'el-ocr') {
                         loadExistingEoTasks();
+                        loadEoStatus();
                     }
                 }
             });
@@ -2774,7 +2778,7 @@
             if (curBid && taskBid && curBid !== taskBid) return;
 
             let taskEl = document.getElementById(`task-${taskId}`);
-            const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+            const pct = task.total > 0 ? Math.min(Math.round(task.current / task.total * 100), 100) : 0;
             const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
             const batchLabel = taskId.split('_').slice(2).join('_');
 
@@ -3418,9 +3422,76 @@
             }).catch(() => {});
         }
 
+        function loadEoStatus() {
+            const src = getSourceId();
+            const bid = getBatchId();
+            const models = ['paddleocr', 'glm_ocr', 'self_ocr'];
+            const barClasses = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'};
+
+            // 确定要查询的批次列表
+            let targets = [];
+            if (src && bid) {
+                targets = [{source_id: src, batch_id: bid}];
+            } else if (Store.batchData.length > 0) {
+                targets = Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
+            }
+            if (targets.length === 0) return;
+
+            // 并行查询所有批次
+            Promise.all(targets.map(t =>
+                fetch(`/api/element-ocr-status/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}`)
+                    .then(r => r.ok ? r.json() : {})
+                    .catch(() => {})
+            )).then(results => {
+                // 聚合各批次结果
+                const agg = {};
+                for (const model of models) {
+                    agg[model] = {total: 0, done: 0};
+                }
+                for (const data of results) {
+                    for (const model of models) {
+                        if (data[model]) {
+                            agg[model].total += data[model].total;
+                            agg[model].done += data[model].done;
+                        }
+                    }
+                }
+
+                for (const model of models) {
+                    const el = document.getElementById(`eo-${model}-status`);
+                    if (!el) continue;
+                    const s = agg[model];
+                    if (s.total === 0) {
+                        el.innerHTML = '<span class="text-xs text-gray-400">无数据</span>';
+                        continue;
+                    }
+                    const pct = Math.round(s.done / s.total * 100);
+                    const barClass = barClasses[model];
+                    el.innerHTML = `<div class="flex items-center gap-2">
+                        <div class="flex-1 bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                            <div class="${barClass} h-1.5 rounded-full transition-all" style="width: ${pct}%"></div>
+                        </div>
+                        <span class="text-xs text-gray-500 whitespace-nowrap">${s.done}/${s.total} (${pct}%)</span>
+                    </div>`;
+                }
+            }).catch(() => {});
+        }
+
         function renderEoTaskBar(model, taskId, task, barColor) {
             const tasksDiv = document.getElementById(`eo-${model}-tasks`);
+            const statusDiv = document.getElementById(`eo-${model}-status`);
             if (!tasksDiv) return;
+
+            // 运行时：隐藏 status，显示 tasks；完成后：显示 status，隐藏 tasks
+            if (task.status === 'running') {
+                tasksDiv.classList.remove('hidden');
+                if (statusDiv) statusDiv.classList.add('hidden');
+            } else if (['completed', 'failed', 'stopped'].includes(task.status)) {
+                tasksDiv.classList.add('hidden');
+                if (statusDiv) statusDiv.classList.remove('hidden');
+                loadEoStatus();
+            }
+
             let taskEl = document.getElementById(`eo-task-${taskId}`);
             if (!taskEl) {
                 taskEl = document.createElement('div');
@@ -3428,7 +3499,7 @@
                 taskEl.className = 'text-xs';
                 tasksDiv.appendChild(taskEl);
             }
-            const pct = task.total > 0 ? Math.round(task.current / task.total * 100) : 0;
+            const pct = task.total > 0 ? Math.min(Math.round(task.current / task.total * 100), 100) : 0;
             const statusIcon = {running: '⏳', completed: '✅', failed: '❌', stopped: '⏹'}[task.status] || '';
             const batchLabel = taskId.split('_').slice(3).join('_');
 
@@ -3445,7 +3516,7 @@
             }
 
             const _barInner = pct > 0
-                ? `${barColor} h-2 rounded-full transition-all duration-300` 
+                ? `${barColor} h-2 rounded-full transition-all duration-300`
                 : `${barColor} h-2 rounded-full animate-pulse`;
             const _barWidth = pct > 0 ? `${pct}%` : '30%';
 
@@ -3831,7 +3902,7 @@
                     tasks.push(loadEcResultsAggregated(toFetch).catch(() => {}));
                 }
 
-                // 2. Element OCR 任务状态
+                // 2. Element OCR 任务状态 + 各模型完成进度
                 tasks.push(
                     fetch('/api/progress').then(r => r.json()).then(data => {
                         const tasks = data.tasks || {};
@@ -3854,6 +3925,10 @@
                         }
                     }).catch(() => {})
                 );
+                // 加载各模型完成进度（不依赖任务运行）
+                if (Store.batchData.length > 0) {
+                    tasks.push(loadEoStatus().catch(() => {}));
+                }
 
                 // 3. Element CMCV
                 if (Store.batchData.length > 0) {

@@ -4595,7 +4595,11 @@ async def page_ocr(source_id: str, model: str = "paddleocr", batch_id: str = "",
             progress_tracker.fail_task(ctx.task_id, "无抽样样本")
             return
 
-        progress_tracker.update_progress(ctx.task_id, current=0, total=len(all_samples), message=f"{model}: 共 {len(all_samples)} 页面，准备中...")
+        progress_tracker.start_task(
+            task_id=ctx.task_id, task_type="page_ocr",
+            source_id=ctx.source_id, batch_id=ctx.batch_id,
+            message=f"{model}: 扫描中..."
+        )
 
         ingest_dir = batch_dir / "manifests"
         ingest_path = find_stage_manifest(ingest_dir, "ingest")
@@ -4850,7 +4854,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
         progress_tracker.start_task(
             task_id=ctx.task_id, task_type="el_ocr",
             source_id=ctx.source_id, batch_id=ctx.batch_id,
-            total=1, message=f"{model}: 启动中..."
+            message=f"{model}: 启动中..."
         )
 
         source = registry.get(ctx.source_id)
@@ -4868,16 +4872,14 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                 ds = _open_lance(lp)
                 if "image_data" not in ds.schema.names:
                     continue
-                total_blocks += ds.count_rows()
                 cat_paths.append((cat, str(lp)))
+                total_blocks += ds.count_rows()
             except Exception:
                 pass
 
         if not cat_paths or total_blocks == 0:
             progress_tracker.fail_task(ctx.task_id, "三个 category lance 中无可用 block")
             return
-
-        progress_tracker.update_progress(ctx.task_id, current=0, message=f"{model}: 扫描已完成，共 {total_blocks} blocks...")
 
         if model == "paddleocr":
             from data_engine.ocr.paddle_ocr import PaddleOCREngine
@@ -4893,7 +4895,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
         conf_col = f"{prefix}_confidence"
 
         if force:
-            progress_tracker.update_progress(ctx.task_id, current=0, message=f"{model}: 强制重跑，清空已有结果...")
+            progress_tracker.update_progress(ctx.task_id, current=0, total=total_blocks, message=f"{model}: 强制重跑，清空已有结果...")
             _clear_map = {
                 "text":    {text_col: "''", conf_col: "0.0"},
                 "formula": {text_col: "''", conf_col: "0.0", f"{prefix}_formula": "''"},
@@ -4913,17 +4915,18 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
         for cat, lp_str in cat_paths:
             try:
                 ds = lance.dataset(lp_str)
-                if text_col in ds.schema.names:
-                    tbl = ds.to_table(
+                cat_text_col = f"{prefix}{_CAT_TEXT_COL.get(cat, '_text')}"
+                check_col = cat_text_col if cat_text_col in ds.schema.names else text_col
+                if check_col in ds.schema.names:
+                    scanner = ds.scanner(
                         columns=["sample_id", "block_idx"],
-                        filter=f"{text_col} IS NOT NULL AND {text_col} != '' AND {conf_col} > 0"
+                        filter=f"{check_col} IS NOT NULL AND {check_col} != '' AND {conf_col} > 0"
                     )
-                    sid_col = tbl.column("sample_id")
-                    bidx_col = tbl.column("block_idx")
-                    done_keys.update(
-                        (sid_col[i].as_py(), bidx_col[i].as_py())
-                        for i in range(len(tbl))
-                    )
+                    for batch in scanner.to_batches():
+                        sids = batch.column("sample_id").to_pylist()
+                        bidxs = batch.column("block_idx").to_pylist()
+                        for i in range(len(batch)):
+                            done_keys.add((sids[i], bidxs[i]))
             except Exception:
                 pass
 
@@ -4969,15 +4972,19 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     sid = row["sample_id"]
                     bidx = row["block_idx"]
                     key = (sid, bidx)
+                    done += 1
+                    if done % 10 == 0 or done == total_blocks:
+                        progress_tracker.update_progress(
+                            ctx.task_id, current=done,
+                            message=f"{model}: {cat} {done}/{total_blocks} ({round(done/total_blocks*100) if total_blocks else 0}%)"
+                        )
                     if key in done_keys:
-                        done += 1
                         scan_done += 1
                         continue
 
                     img_bytes = row.get("image_data")
                     if not img_bytes:
                         skipped += 1
-                        done += 1
                         scan_done += 1
                         continue
 
@@ -5033,14 +5040,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
                     finally:
                         tmp_path.unlink(missing_ok=True)
 
-                    done += 1
                     scan_done += 1
-                    pct = round(done / total_blocks * 100) if total_blocks else 0
-                    err_msg = f"（{errors} 错误）" if errors else ""
-                    progress_tracker.update_progress(
-                        ctx.task_id, current=done,
-                        message=f"{model}: {cat} {done}/{total_blocks} ({pct}%){err_msg}"
-                    )
 
                     if done % save_interval == 0:
                         _flush_el_ocr_rows(manifests_dir, pending_rows, text_col, conf_col, prefix)
@@ -5134,6 +5134,56 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
         source_id=source_id, batch_id=batch_id,
         target=_execute_element_ocr,
     )
+
+
+@app.get("/api/element-ocr-status/{source_id}/{batch_id}")
+async def get_element_ocr_status(source_id: str, batch_id: str):
+    """获取各 OCR 模型在该批次的完成状态（无需运行任务）"""
+    try:
+        source = registry.get(source_id)
+        batch_dir = source.resolve_batch_dir(batch_id)
+        manifests_dir = batch_dir / "manifests"
+
+        results = {}
+        prefix_map = {"paddleocr": "paddle", "glm_ocr": "glm", "self_ocr": "self"}
+
+        for model, prefix in prefix_map.items():
+            text_col = f"{prefix}_text"
+            conf_col = f"{prefix}_confidence"
+            total_blocks = 0
+            done_blocks = 0
+
+            for cat in ("text", "formula", "table"):
+                lp = manifests_dir / f"{cat}.lance"
+                if not lp.exists():
+                    continue
+                try:
+                    ds = _open_lance(lp)
+                    if "image_data" not in ds.schema.names:
+                        continue
+                    cat_total = ds.count_rows()
+                    total_blocks += cat_total
+
+                    if text_col in ds.schema.names:
+                        scanner = ds.scanner(
+                            columns=["sample_id"],
+                            filter=f"{text_col} IS NOT NULL AND {text_col} != '' AND {conf_col} > 0"
+                        )
+                        for batch in scanner.to_batches():
+                            done_blocks += len(batch)
+                except Exception:
+                    pass
+
+            results[model] = {
+                "total": total_blocks,
+                "done": done_blocks,
+                "remaining": total_blocks - done_blocks,
+                "percentage": round(done_blocks / total_blocks * 100) if total_blocks > 0 else 0,
+            }
+
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 _CAT_TEXT_COL = {"text": "_text", "formula": "_formula", "table": "_table"}
