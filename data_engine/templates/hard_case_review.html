@@ -54,10 +54,11 @@
             </div>
 
             <!-- Stats -->
-            <div id="stats-panel" class="grid grid-cols-4 gap-4 mb-6 hidden">
+            <div id="stats-panel" class="grid grid-cols-5 gap-4 mb-6 hidden">
                 <div id="stat-total-card" class="bg-red-50 rounded-lg shadow p-4 text-center">
                     <div id="stat-total-label" class="text-xs text-red-600">Hard 总数</div>
                     <div id="stat-total" class="text-2xl font-bold text-red-800">-</div>
+                    <div id="stat-type-detail" class="text-xs text-red-600 mt-1"></div>
                 </div>
                 <div class="bg-green-50 rounded-lg shadow p-4 text-center">
                     <div class="text-xs text-green-600">已纠正</div>
@@ -70,6 +71,10 @@
                 <div class="bg-red-50 rounded-lg shadow p-4 text-center">
                     <div class="text-xs text-red-600">需专家</div>
                     <div id="stat-expert" class="text-2xl font-bold text-red-800">-</div>
+                </div>
+                <div class="bg-blue-50 rounded-lg shadow p-4 text-center">
+                    <div class="text-xs text-blue-600">Block 类型</div>
+                    <div id="stat-types" class="text-xs text-blue-800 mt-1"></div>
                 </div>
             </div>
 
@@ -144,6 +149,11 @@
                                         <div id="detail-self" class="text-gray-700 break-words max-h-[120px] overflow-y-auto"></div>
                                     </div>
                                 </div>
+                            </div>
+                            <!-- CMCV Result -->
+                            <div id="cmcv-section" class="hidden">
+                                <h4 class="text-xs font-medium text-gray-500 mb-2">CMCV 一致性验证</h4>
+                                <div id="cmcv-content" class="bg-gray-50 border rounded p-3 text-xs space-y-1"></div>
                             </div>
                             <!-- Judge Result -->
                             <div id="judge-result" class="hidden">
@@ -282,6 +292,39 @@
                 document.getElementById('stat-judged').textContent = stats.judged;
                 document.getElementById('stat-expert').textContent = stats.needs_expert;
                 document.getElementById('stats-panel').classList.remove('hidden');
+
+                // Block type 统计：跟随 currentType 过滤
+                {
+                    const typeCounts = {};
+                    const types = currentType === 'all' ? ['text', 'formula', 'table'] : [currentType];
+                    if (val) {
+                        const [sid, bid] = val.split('/');
+                        await Promise.all(types.map(async (bt) => {
+                            try {
+                                const r = await fetch(`/api/hard-cases/${encodeURIComponent(sid)}/${encodeURIComponent(bid)}?tier=${currentTier}&block_type=${bt}&limit=0`);
+                                if (r.ok) { const d = await r.json(); typeCounts[bt] = d.total || 0; }
+                            } catch {}
+                        }));
+                    } else {
+                        const srcVal = src || '';
+                        const batches = srcVal ? allSources.filter(s => s.source_id === srcVal) : allSources;
+                        const grouped = {};
+                        batches.forEach(s => { const k = `${s.source_id}/${s.batch_id}`; if (!grouped[k]) grouped[k] = s; });
+                        for (const bt of types) {
+                            for (const g of Object.values(grouped)) {
+                                try {
+                                    const r = await fetch(`/api/hard-cases/${encodeURIComponent(g.source_id)}/${encodeURIComponent(g.batch_id)}?tier=${currentTier}&block_type=${bt}&limit=0`);
+                                    if (r.ok) { const d = await r.json(); typeCounts[bt] = (typeCounts[bt] || 0) + (d.total || 0); }
+                                } catch {}
+                            }
+                        }
+                    }
+                    const typeParts = [];
+                    for (const [bt, cnt] of Object.entries(typeCounts)) {
+                        if (cnt) typeParts.push(`${bt}: ${cnt}`);
+                    }
+                    document.getElementById('stat-types').textContent = typeParts.join(' / ') || '-';
+                }
                 if (currentTier === 'all_disagree') {
                     document.getElementById('btn-run').classList.remove('hidden');
                 } else {
@@ -314,6 +357,11 @@
             }
 
             const visible = filtered.slice(0, renderLimit);
+            const PAT_BADGE = {
+                all_agree: '<span class="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">Easy</span>',
+                partial_agree: '<span class="text-xs px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">Medium</span>',
+                all_disagree: '<span class="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">Hard</span>',
+            };
             list.innerHTML = visible.map((b, i) => {
                 const statusBadge = b.corrected
                     ? '<span class="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">已纠正</span>'
@@ -322,10 +370,11 @@
                     : b.judged
                     ? '<span class="text-xs px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">已审核</span>'
                     : '<span class="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">待处理</span>';
+                const tierBadge = PAT_BADGE[b.consistency_pattern] || '';
                 return `<div class="px-3 py-2 hover:bg-gray-50 cursor-pointer block-item" data-idx="${i}">
                     <div class="flex justify-between items-center">
                         <span class="text-xs text-gray-700 truncate">${b.sample_id}:${b.block_idx}</span>
-                        ${statusBadge}
+                        <div class="flex gap-1">${tierBadge}${statusBadge}</div>
                     </div>
                     <div class="text-xs text-gray-400">${b.block_type}</div>
                 </div>`;
@@ -347,6 +396,26 @@
                     el.classList.add('bg-blue-50');
                 });
             });
+        }
+
+        function renderCmcvSection(data) {
+            const section = document.getElementById('cmcv-section');
+            const content = document.getElementById('cmcv-content');
+            const diffJson = data.block_diff_json;
+            if (!diffJson) { section.classList.add('hidden'); return; }
+            const d = typeof diffJson === 'string' ? JSON.parse(diffJson) : diffJson;
+            let html = '';
+            if (d.error) {
+                html = `<div class="text-red-600">引擎不可用: ${d.error}</div>`;
+            } else if (d.method) {
+                html = `<div><span class="font-medium">方法:</span> ${d.method}</div>`;
+                if (d.sim_paddle_glm != null) html += `<div><span class="font-medium">Paddle↔GLM:</span> ${Number(d.sim_paddle_glm).toFixed(4)}</div>`;
+                if (d.sim_paddle_self != null) html += `<div><span class="font-medium">Paddle↔Self:</span> ${Number(d.sim_paddle_self).toFixed(4)}</div>`;
+                if (d.sim_glm_self != null) html += `<div><span class="font-medium">GLM↔Self:</span> ${Number(d.sim_glm_self).toFixed(4)}</div>`;
+                if (d.threshold != null) html += `<div class="text-gray-500">阈值: ${d.threshold}</div>`;
+            }
+            content.innerHTML = html;
+            section.classList.remove('hidden');
         }
 
         async function selectBlock(block) {
@@ -379,6 +448,9 @@
 
             loadBlockImage(block);
 
+            // CMCV: 优先用列表数据里的 block_diff_json
+            renderCmcvSection(block);
+
             try {
                 const srcVal = document.getElementById('source-select').value;
                 const batchVal = document.getElementById('batch-select').value;
@@ -390,6 +462,8 @@
                     document.getElementById('detail-glm').textContent = detail[`glm_${cat}`] || '(无)';
                     document.getElementById('detail-self').textContent = detail[`self_${cat}`] || '(无)';
                     selectedBlock = detail;
+                    // 用 detail API 的完整数据刷新 CMCV
+                    if (detail.block_diff_json) renderCmcvSection(detail);
                 } else {
                     document.getElementById('detail-paddle').textContent = block[`paddle_${cat}`] || '(无)';
                     document.getElementById('detail-glm').textContent = block[`glm_${cat}`] || '(无)';
