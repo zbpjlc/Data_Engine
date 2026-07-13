@@ -76,71 +76,26 @@ def _table_to_full_html(table: dict | str | None) -> str:
 
 try:
     from data_engine.ocr.omnidocbench_local.teds_bridge import compute_teds, compute_teds_batch
-
-    def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> float:
-        html_a = _table_to_full_html(table_a)
-        html_b = _table_to_full_html(table_b)
-        if not html_a and not html_b:
-            return 1.0
-        if not html_a or not html_b:
-            return 0.0
-        result = compute_teds(html_a, html_b)
-        if result is None:
-            return 0.0
-        return result.score
-
 except ImportError:
-    logger.warning("OmniDocBench TEDS container bridge not available, using fallback table comparison")
+    compute_teds = None
+    compute_teds_batch = None
+    logger.warning("OmniDocBench TEDS container bridge not available")
 
-    def _table_to_cells(table: dict | str | None) -> list[list[str]]:
-        if not table:
-            return []
-        if isinstance(table, str):
-            try:
-                table = json.loads(table)
-            except (json.JSONDecodeError, TypeError):
-                return [[table]]
-        if isinstance(table, dict):
-            rows = table.get("rows", table.get("data", table.get("cells", [])))
-        elif isinstance(table, list):
-            rows = table
-        else:
-            return [[str(table)]]
-        result = []
-        for row in rows:
-            if isinstance(row, list):
-                result.append([str(c).strip() for c in row])
-            elif isinstance(row, dict):
-                result.append([str(v).strip() for v in row.values()])
-            else:
-                result.append([str(row).strip()])
-        return result
 
-    def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> float:
-        cells_a = _table_to_cells(table_a)
-        cells_b = _table_to_cells(table_b)
-        if not cells_a and not cells_b:
-            return 1.0
-        if not cells_a or not cells_b:
-            return 0.0
-        max_rows = max(len(cells_a), len(cells_b))
-        if max_rows == 0:
-            return 1.0
-        total_cells = 0
-        match_cells = 0.0
-        for i in range(max_rows):
-            row_a = cells_a[i] if i < len(cells_a) else []
-            row_b = cells_b[i] if i < len(cells_b) else []
-            max_cols = max(len(row_a), len(row_b))
-            for j in range(max_cols):
-                total_cells += 1
-                val_a = row_a[j] if j < len(row_a) else ""
-                val_b = row_b[j] if j < len(row_b) else ""
-                if val_a == val_b:
-                    match_cells += 1.0
-                else:
-                    match_cells += text_similarity(val_a, val_b)
-        return match_cells / total_cells if total_cells > 0 else 0.0
+def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> float | None:
+    """TEDS 表格相似度。容器不可用时返回 None。"""
+    if compute_teds is None:
+        return None
+    html_a = _table_to_full_html(table_a)
+    html_b = _table_to_full_html(table_b)
+    if not html_a and not html_b:
+        return 1.0
+    if not html_a or not html_b:
+        return 0.0
+    result = compute_teds(html_a, html_b)
+    if result is None:
+        return 0.0
+    return result.score
 
 
 # ─── CDM（Character Detection Matching） ─────────────────────────────────────
@@ -413,15 +368,7 @@ def compare_block(
     sim_gs = sim_fn(b_val, c_val)
 
     if sim_pg is None or sim_ps is None or sim_gs is None:
-        diff_detail = {
-            "method": method,
-            "sim_paddle_glm": None,
-            "sim_paddle_self": None,
-            "sim_glm_self": None,
-            "threshold": thr,
-            "error": "cdm_visual_unavailable",
-        }
-        return "all_disagree", diff_detail
+        return None, None
 
     diff_detail = {
         "method": method,
@@ -478,10 +425,10 @@ class CMCVEngine:
                 details.append({
                     "block_idx": block.get("block_idx", 0),
                     "type": block_type,
-                    "pattern": "",
-                    "diff": {},
+                    "pattern": None,
+                    "diff": None,
                 })
-                patterns.append("")
+                patterns.append(None)
                 continue
 
             pattern, diff = compare_block(
@@ -504,7 +451,7 @@ class CMCVEngine:
                 "pattern": pattern,
                 "diff": diff,
             })
-            patterns.append(pattern)
+            patterns.append(pattern)  # None = skipped (engine unavailable)
 
         if formula_blocks and self._use_visual_cdm:
             formula_pairs: list[tuple[str, str]] = []
@@ -558,10 +505,11 @@ class CMCVEngine:
         }
 
     @staticmethod
-    def _assign_tier(block_patterns: list[str]) -> str:
-        if "all_disagree" in block_patterns:
+    def _assign_tier(block_patterns: list[str | None]) -> str:
+        effective = [p for p in block_patterns if p]  # skip None (engine unavailable)
+        if "all_disagree" in effective:
             return "hard"
-        if "partial_agree" in block_patterns:
+        if "partial_agree" in effective:
             return "medium"
         return "easy"
 
@@ -580,6 +528,8 @@ class CMCVEngine:
             page_result = self.compare_page(blocks_sorted)
 
             for block, detail in zip(blocks_sorted, page_result["details"]):
+                if not detail.get("pattern"):
+                    continue  # skip: engine unavailable, retry next run
                 updated_rows.append({
                     "sample_id": block["sample_id"],
                     "block_idx": block.get("block_idx", 0),
