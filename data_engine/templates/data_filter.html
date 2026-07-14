@@ -642,8 +642,8 @@
             ecPollCancelled: false,
             ecsBatches: [],
           },
-          elementOcr: { intervals: {} },
-          elementCmcv: {},
+          elementOcr: { intervals: {}, running: false },
+          elementCmcv: { running: false },
           partition: { currentPage: 1, source: '', batch: '', partitionId: 0 },
         };
 
@@ -1195,8 +1195,8 @@
             // 不再自动加载 bucket 缓存，由 DOM.selection.batch change 事件处理
             // loadAllCachedBuckets(sourceId, filtered, signal);
 
-            // 刷新 CMCV 结果
-            if (!DOM.elementCmcv.results.classList.contains('hidden')) {
+            // 刷新 CMCV 结果（运行中不刷新）
+            if (!DOM.elementCmcv.results.classList.contains('hidden') && !Store.elementCmcv.running) {
                 const bid = DOM.selection.batch.value;
                 if (bid && sourceId) {
                     loadElemCmcvResults(sourceId, bid);
@@ -1475,8 +1475,8 @@
                 if (toFetch.length > 0) loadEcResultsAggregated(toFetch);
             }
             updateOcrBatchSelect();
-            // 刷新 CMCV 结果
-            if (!DOM.elementCmcv.results.classList.contains('hidden')) {
+            // 刷新 CMCV 结果（运行中不刷新）
+            if (!DOM.elementCmcv.results.classList.contains('hidden') && !Store.elementCmcv.running) {
                 if (batchId && sourceId) {
                     loadElemCmcvResults(sourceId, batchId);
                 } else {
@@ -3415,6 +3415,7 @@
                         
                         // running 状态订阅轮询
                         if (task.status === 'running') {
+                            Store.elementOcr.running = true;
                             pollElementOcrModel(realModel, taskId);
                         }
                     }
@@ -3423,27 +3424,31 @@
         }
 
         function loadEoStatus() {
+            const models = ['paddleocr', 'glm_ocr', 'self_ocr'];
+            if (Store.elementOcr.running) {
+                for (const model of models) {
+                    const el = document.getElementById(`eo-${model}-status`);
+                    if (el) el.innerHTML = '<span class="text-xs text-gray-400">运行中...</span>';
+                }
+                return Promise.resolve();
+            }
             const src = getSourceId();
             const bid = getBatchId();
-            const models = ['paddleocr', 'glm_ocr', 'self_ocr'];
             const barClasses = {paddleocr: 'bg-blue-500', glm_ocr: 'bg-green-500', self_ocr: 'bg-purple-500'};
 
-            // 确定要查询的批次列表
             let targets = [];
             if (src && bid) {
                 targets = [{source_id: src, batch_id: bid}];
             } else if (Store.batchData.length > 0) {
                 targets = Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}));
             }
-            if (targets.length === 0) return;
+            if (targets.length === 0) return Promise.resolve();
 
-            // 并行查询所有批次
-            Promise.all(targets.map(t =>
+            return Promise.all(targets.map(t =>
                 fetch(`/api/element-ocr-status/${encodeURIComponent(t.source_id)}/${encodeURIComponent(t.batch_id)}`)
                     .then(r => r.ok ? r.json() : {})
-                    .catch(() => {})
+                    .catch(() => ({}))
             )).then(results => {
-                // 聚合各批次结果
                 const agg = {};
                 for (const model of models) {
                     agg[model] = {total: 0, done: 0};
@@ -3482,14 +3487,13 @@
             const statusDiv = document.getElementById(`eo-${model}-status`);
             if (!tasksDiv) return;
 
-            // 运行时：隐藏 status，显示 tasks；完成后：显示 status，隐藏 tasks
+            // 运行时：隐藏 status，显示 tasks
             if (task.status === 'running') {
                 tasksDiv.classList.remove('hidden');
                 if (statusDiv) statusDiv.classList.add('hidden');
             } else if (['completed', 'failed', 'stopped'].includes(task.status)) {
-                tasksDiv.classList.add('hidden');
-                if (statusDiv) statusDiv.classList.remove('hidden');
-                loadEoStatus();
+                // 完成后保持 task 进度条（数字与 task.total 一致），不调 loadEoStatus 避免跳数
+                // loadEoStatus 在切换 Tab 或刷新时会自动触发
             }
 
             let taskEl = document.getElementById(`eo-task-${taskId}`);
@@ -3558,10 +3562,12 @@
                     delete Store.elementOcr.intervals[taskId];
                     renderEoTaskBar(model, taskId, task, barColor);
                     setTabBadge('el-ocr', '✅');
+                    Store.elementOcr.running = false;
                 },
                 onFail(task) {
                     delete Store.elementOcr.intervals[taskId];
                     renderEoTaskBar(model, taskId, task, barColor);
+                    Store.elementOcr.running = false;
                 }
             });
         }
@@ -3589,10 +3595,17 @@
                 const targets = getEoTargets();
                 if (targets.length === 0) { showToast('请先完成 Layout 拆分', 'warning'); return; }
 
+                Store.elementOcr.running = true;
                 this.textContent = '启动中...';
                 const selectedCats = document.querySelector('.eo-cat-btn.bg-purple-500')?.dataset.cats || 'text,formula,table';
                 const params = new URLSearchParams({model, categories: selectedCats});
                 const v = Request.begin('eo-run');
+
+                // 立即显示进度条（从进度条 div 显示占位）
+                const tasksDiv = document.getElementById(`eo-${model}-tasks`);
+                const statusDiv = document.getElementById(`eo-${model}-status`);
+                if (tasksDiv) tasksDiv.classList.remove('hidden');
+                if (statusDiv) statusDiv.classList.add('hidden');
 
                 Promise.all(targets.map(async t => {
                     try {
@@ -3601,6 +3614,10 @@
                         if (!r.ok) throw new Error(r.error);
                         if (r.data.task_id) pollElementOcrModel(model, r.data.task_id);
                     } catch (err) {
+                        Store.elementOcr.running = false;
+                        if (tasksDiv) tasksDiv.classList.add('hidden');
+                        if (statusDiv) statusDiv.classList.remove('hidden');
+                        loadEoStatus();
                         console.error('[el-ocr] 启动失败:', err);
                     }
                 })).then(() => { btn.textContent = '运行'; });
@@ -3639,10 +3656,17 @@
                 const modelName = {paddleocr: 'PaddleOCR', glm_ocr: 'GLM OCR', self_ocr: '自研 OCR'}[model] || model;
                 if (!confirm(`确定要清空 ${modelName} 已有结果并全部重跑吗？\n\n这将删除该模型在 text/formula/table.lance 中的所有 OCR 结果。`)) return;
 
+                Store.elementOcr.running = true;
                 this.textContent = '启动中...';
                 const selectedCats = document.querySelector('.eo-cat-btn.bg-purple-500')?.dataset.cats || 'text,formula,table';
                 const params = new URLSearchParams({model, force: 'true', categories: selectedCats});
                 const v = Request.begin('eo-rerun');
+
+                // 立即显示进度条
+                const tasksDiv = document.getElementById(`eo-${model}-tasks`);
+                const statusDiv = document.getElementById(`eo-${model}-status`);
+                if (tasksDiv) tasksDiv.classList.remove('hidden');
+                if (statusDiv) statusDiv.classList.add('hidden');
 
                 Promise.all(targets.map(async t => {
                     try {
@@ -3651,6 +3675,10 @@
                         if (!r.ok) throw new Error(r.error);
                         if (r.data.task_id) pollElementOcrModel(model, r.data.task_id);
                     } catch (err) {
+                        Store.elementOcr.running = false;
+                        if (tasksDiv) tasksDiv.classList.add('hidden');
+                        if (statusDiv) statusDiv.classList.remove('hidden');
+                        loadEoStatus();
                         console.error('[el-ocr] 重跑启动失败:', err);
                     }
                 })).then(() => { btn.textContent = '重跑'; });
@@ -3668,6 +3696,7 @@
             const bid = Store.elementCluster.ecsBatches[0]?.batch_id || getBatchId();
             if (!src || !bid) { showToast('请先完成 Element-Type 聚类，或选择数据源和批次', 'warning'); return; }
             DOM.elementCmcv.buttons.run.disabled = true;
+            Store.elementCmcv.running = true;
             DOM.elementCmcv.progress.container.classList.remove('hidden');
             DOM.elementCmcv.progress.msg.textContent = '启动 CMCV...';
             try {
@@ -3678,7 +3707,6 @@
                 const data = resp.data;
                 if (data.task_id) {
                     const ecmcvBar = DOM.elementCmcv.progress.bar;
-                    // 使用 TaskPoller 替代手动 setInterval
                     new TaskPoller(`/api/tasks/${data.task_id}`, {
                         onProgress: (d) => {
                             const prog = d.progress || {};
@@ -3690,18 +3718,21 @@
                             DOM.elementCmcv.progress.container.classList.add('hidden');
                             ecmcvBar.style.width = '0%';
                             DOM.elementCmcv.buttons.run.disabled = false;
+                            Store.elementCmcv.running = false;
                             loadElemCmcvResults(src, bid);
                         },
                         onFail: () => {
                             DOM.elementCmcv.progress.container.classList.add('hidden');
                             ecmcvBar.style.width = '0%';
                             DOM.elementCmcv.buttons.run.disabled = false;
+                            Store.elementCmcv.running = false;
                         }
                     }, 3000).start();
                 }
             } catch (e) {
                 DOM.elementCmcv.progress.container.classList.add('hidden');
                 DOM.elementCmcv.buttons.run.disabled = false;
+                Store.elementCmcv.running = false;
                 showToast(`CMCV 启动失败: ${e.message}`, 'error');
             }
         });
@@ -3920,7 +3951,10 @@
                                 const barColor = barColors[realModel] || 'bg-gray-500';
                                 renderEoTaskBar(realModel, taskId, task, barColor);
                                 if (task.status === 'completed') setTabBadge('el-ocr', '✅');
-                                else pollElementOcrModel(realModel, taskId);
+                                else {
+                                    Store.elementOcr.running = true;
+                                    pollElementOcrModel(realModel, taskId);
+                                }
                             }
                         }
                     }).catch(() => {})
@@ -3930,9 +3964,22 @@
                     tasks.push(loadEoStatus().catch(() => {}));
                 }
 
-                // 3. Element CMCV
+                // 3. Element CMCV（运行中不加载结果卡片，避免显示部分数据）
                 if (Store.batchData.length > 0) {
-                    tasks.push(loadElemCmcvResultsAggregated(Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id}))).catch(() => {}));
+                    tasks.push(
+                        fetch('/api/progress').then(r => r.json()).then(data => {
+                            const tasks = data.tasks || {};
+                            const hasRunning = Object.entries(tasks).some(([tid, t]) =>
+                                tid.startsWith('cmcv_') && t.status === 'running'
+                            );
+                            if (hasRunning) {
+                                Store.elementCmcv.running = true;
+                                return;
+                            }
+                            Store.elementCmcv.running = false;
+                            return loadElemCmcvResultsAggregated(Store.batchData.map(b => ({source_id: b.source_id, batch_id: b.batch_id})));
+                        }).catch(() => {})
+                    );
                 }
 
                 // 4. Per-Cluster Sampling
