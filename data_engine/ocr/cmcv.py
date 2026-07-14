@@ -48,14 +48,35 @@ except ImportError:
 
 # ─── TEDS（OmniDocBench 容器桥接） ─────────────────────────────────────────
 
+_FULLWIDTH_OFFSET = 0xFEE0
+
+def _fullwidth_to_ascii(s: str) -> str:
+    """全角 → 半角（ASCII 范围 0xFF01-0xFF5E → 0x0021-0x007E）"""
+    return "".join(chr(ord(c) - _FULLWIDTH_OFFSET) if "\uff01" <= c <= "\uff5e" else c for c in s)
+
+
+def _normalize_table_html(html_str: str) -> str:
+    """统一表格 HTML：th→td、全角→半角、去空格"""
+    html_str = re.sub(r'<th(\s|>)', r'<td\1', html_str, flags=re.IGNORECASE)
+    html_str = re.sub(r'</th>', '</td>', html_str, flags=re.IGNORECASE)
+    # 提取 <td> 内容做标准化，保留标签结构
+    def _norm_cell(m):
+        content = m.group(1)
+        content = _fullwidth_to_ascii(content)
+        content = re.sub(r"\s+", "", content)  # 去掉所有空格
+        return f"<td>{content}</td>"
+    html_str = re.sub(r'<td>(.*?)</td>', _norm_cell, html_str, flags=re.DOTALL)
+    return html_str
+
+
 def _table_to_full_html(table: dict | str | None) -> str:
     if not table:
         return ""
     if isinstance(table, str):
         if "<table" in table.lower():
             if "<html" not in table.lower():
-                return f"<html><body>{table}</body></html>"
-            return table
+                return f"<html><body>{_normalize_table_html(table)}</body></html>"
+            return _normalize_table_html(table)
         try:
             table = json.loads(table)
         except (json.JSONDecodeError, TypeError):
@@ -64,7 +85,8 @@ def _table_to_full_html(table: dict | str | None) -> str:
     if "html" in table:
         html = table["html"]
         if "<table" in html.lower():
-            return f"<html><body>{html}</body></html>" if "<html" not in html.lower() else html
+            normalized = _normalize_table_html(html)
+            return f"<html><body>{normalized}</body></html>" if "<html" not in html.lower() else normalized
         return ""
     rows = table.get("rows", table.get("data", []))
     if not rows:
@@ -89,7 +111,7 @@ except ImportError:
 
 
 def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> float | None:
-    """TEDS 表格相似度。容器不可用时返回 None。"""
+    """TEDS 表格相似度。容器不可用或调用失败时返回 None（跳过该 block）。"""
     if compute_teds is None:
         return None
     html_a = _table_to_full_html(table_a)
@@ -100,7 +122,7 @@ def teds_similarity(table_a: dict | str | None, table_b: dict | str | None) -> f
         return 0.0
     result = compute_teds(html_a, html_b)
     if result is None:
-        return 0.0
+        return None
     return result.score
 
 
@@ -341,7 +363,6 @@ def compare_block(
     glm_formula: str | None = None,
     self_formula: str | None = None,
     agreement_threshold: float | None = None,
-    use_visual_cdm: bool = False,
 ) -> tuple[str, dict]:
     threshold = agreement_threshold or float(
         get_config("ocr", "cmcv", "agreement_threshold", default=0.9)
@@ -352,15 +373,19 @@ def compare_block(
         a_val = normalize_table(paddle_table)
         b_val = normalize_table(glm_table)
         c_val = normalize_table(self_table)
+        if not a_val or not b_val or not c_val:
+            return None, None
         thr = get_config("ocr", "cmcv", "table_threshold", default=None) or threshold
         method = "teds"
     elif block_type == "formula":
-        sim_fn = cdm_similarity_visual if use_visual_cdm else cdm_similarity
+        sim_fn = cdm_similarity_visual
         a_val = normalize_formula(paddle_formula)
         b_val = normalize_formula(glm_formula)
         c_val = normalize_formula(self_formula)
+        if not a_val or not b_val or not c_val:
+            return None, None
         thr = get_config("ocr", "cmcv", "formula_threshold", default=None) or threshold
-        method = "cdm_visual" if use_visual_cdm else "cdm_token"
+        method = "cdm_visual"
     else:
         sim_fn = text_similarity
         a_val = normalize_text(paddle_text)
@@ -405,17 +430,10 @@ def compare_block(
 
 class CMCVEngine:
 
-    def __init__(self, use_visual_cdm: bool = False) -> None:
-        """
-        Args:
-            use_visual_cdm: 是否使用 OmniDocBench 视觉渲染评估公式相似度
-                - False（默认）: token fallback，快，用于 Page CMCV
-                - True: 视觉渲染，准但慢，用于 Element CMCV
-        """
+    def __init__(self) -> None:
         self._threshold = float(
             get_config("ocr", "cmcv", "agreement_threshold", default=0.9)
         )
-        self._use_visual_cdm = use_visual_cdm
 
     def compare_page(self, blocks: list[dict]) -> dict:
         details: list[dict] = []
@@ -425,7 +443,7 @@ class CMCVEngine:
 
         for idx, block in enumerate(blocks):
             block_type = block.get("block_type", "text")
-            if block_type == "formula" and self._use_visual_cdm:
+            if block_type == "formula":
                 formula_blocks.append(block)
                 formula_indices.append(idx)
                 details.append({
@@ -449,7 +467,6 @@ class CMCVEngine:
                 glm_formula=block.get("glm_formula"),
                 self_formula=block.get("self_formula"),
                 agreement_threshold=self._threshold,
-                use_visual_cdm=self._use_visual_cdm,
             )
             details.append({
                 "block_idx": block.get("block_idx", 0),
@@ -459,7 +476,7 @@ class CMCVEngine:
             })
             patterns.append(pattern)  # None = skipped (engine unavailable)
 
-        if formula_blocks and self._use_visual_cdm:
+        if formula_blocks:
             formula_pairs: list[tuple[str, str]] = []
             for block in formula_blocks:
                 a = normalize_formula(block.get("paddle_formula")) or ""
@@ -579,12 +596,20 @@ class CMCVEngine:
         out_diffs: list[str | None] = []
         page_tiers: dict[str, str] = {}
 
+        json_keys = {"paddle_table", "glm_table", "self_table",
+                     "paddle_formula", "glm_formula", "self_formula"}
         for sample_id, indices in by_sample.items():
             blocks = []
             for i in indices:
                 row = {"sample_id": sid_col[i].as_py(), "block_idx": bidx_col[i].as_py()}
                 for k in ocr_keys:
-                    row[k] = ocr_cols[k][i].as_py()
+                    val = ocr_cols[k][i].as_py()
+                    if k in json_keys and isinstance(val, str) and val:
+                        try:
+                            val = json.loads(val)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    row[k] = val
                 blocks.append(row)
             blocks_sorted = sorted(blocks, key=lambda b: b.get("block_idx", 0))
             page_result = self.compare_page(blocks_sorted)

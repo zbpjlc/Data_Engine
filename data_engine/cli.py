@@ -354,7 +354,7 @@ def cmd_cmcv(args: argparse.Namespace, registry: SourceRegistry) -> int:
         f"开始一致性比较: {total_rows} 个 block",
     )
 
-    cmcv = CMCVEngine(use_visual_cdm=True)
+    cmcv = CMCVEngine()
 
     def _cmcv_progress(cur, tot, msg):
         progress_tracker.update_progress(task_id=task_id, current=cur, message=f"[{cur}/{tot}] {msg}", total=tot)
