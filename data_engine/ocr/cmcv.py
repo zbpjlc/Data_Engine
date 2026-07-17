@@ -56,16 +56,28 @@ def _fullwidth_to_ascii(s: str) -> str:
 
 
 def _normalize_table_html(html_str: str) -> str:
-    """统一表格 HTML：th→td、全角→半角、去空格"""
-    html_str = re.sub(r'<th(\s|>)', r'<td\1', html_str, flags=re.IGNORECASE)
+    """统一表格 HTML：强力剥离所有属性，th→td、全角→半角、去空格"""
+    if not html_str:
+        return ""
+    # 1. <th> → <td>，剥离 th 上可能残留的属性
+    html_str = re.sub(r'<th[^>]*>', '<td>', html_str, flags=re.IGNORECASE)
     html_str = re.sub(r'</th>', '</td>', html_str, flags=re.IGNORECASE)
-    # 提取 <td> 内容做标准化，保留标签结构
+    # 2. 剥离 <table> 和 <tr> 上的所有属性（border, style 等）
+    html_str = re.sub(r'<table[^>]*>', '<table>', html_str, flags=re.IGNORECASE)
+    html_str = re.sub(r'<tr[^>]*>', '<tr>', html_str, flags=re.IGNORECASE)
+    # 3. 匹配所有 <td> 标签（不论是否带属性），标准化单元格内容
     def _norm_cell(m):
         content = m.group(1)
         content = _fullwidth_to_ascii(content)
+        # 剥离 LaTeX 语法：$^{...}$ → ...，$...$ → ...，\cmd{...} → ...
+        content = re.sub(r'\$\s*\^\s*\{([^}]*)\}\s*\$', r'\1', content)
+        content = re.sub(r'\$([^$]*)\$', r'\1', content)
+        content = re.sub(r'\\[a-zA-Z]+\s*\{([^}]*)\}', r'\1', content)
         content = re.sub(r"\s+", "", content)  # 去掉所有空格
         return f"<td>{content}</td>"
-    html_str = re.sub(r'<td>(.*?)</td>', _norm_cell, html_str, flags=re.DOTALL)
+    html_str = re.sub(r'<td[^>]*>(.*?)</td>', _norm_cell, html_str, flags=re.DOTALL)
+    # 4. 去掉标签之间的换行符和无用空格
+    html_str = re.sub(r'>\s+<', '><', html_str)
     return html_str
 
 
