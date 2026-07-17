@@ -13,7 +13,9 @@
         button:disabled { opacity: 0.5; cursor: not-allowed; }
         /* 动态 Tailwind 类安全网（保证 CDN 模式下动态类名可用） */
         .bg-green-500, .bg-red-500, .bg-teal-500, .bg-yellow-500, .bg-orange-500, .bg-gray-500,
-        .text-green-800, .text-red-800, .text-teal-800, .text-yellow-800, .text-orange-800, .text-gray-800,
+        .text-green-700, .text-green-800, .text-red-700, .text-red-800,
+        .text-teal-700, .text-teal-800, .text-yellow-700, .text-yellow-800,
+        .text-orange-700, .text-orange-800, .text-gray-700, .text-gray-800,
         .bg-green-100, .bg-red-100, .bg-teal-100, .bg-yellow-100, .bg-orange-100, .bg-gray-100,
         .bg-blue-500, .bg-purple-500, .bg-rose-500 { display: initial; }
         /* Element-Level Accordion 折叠面板 */
@@ -221,15 +223,6 @@
                     </div>
 
                     <!-- 三个模型按列显示 -->
-                    <div class="flex items-center gap-2 mb-3">
-                        <span class="text-xs text-gray-500">类别：</span>
-                        <div class="flex rounded-lg bg-gray-100 p-0.5">
-                            <button class="ocr-cat-btn text-xs py-1 px-2.5 rounded-md font-medium bg-purple-500 text-white shadow-sm" data-cats="text,formula,table">全部</button>
-                            <button class="ocr-cat-btn text-xs py-1 px-2.5 rounded-md font-medium text-gray-500 hover:text-gray-700" data-cats="text">Text</button>
-                            <button class="ocr-cat-btn text-xs py-1 px-2.5 rounded-md font-medium text-gray-500 hover:text-gray-700" data-cats="formula">Formula</button>
-                            <button class="ocr-cat-btn text-xs py-1 px-2.5 rounded-md font-medium text-gray-500 hover:text-gray-700" data-cats="table">Table</button>
-                        </div>
-                    </div>
                     <div class="grid grid-cols-1 gap-3 mb-4">
                         <div class="flex items-center gap-4 border rounded-lg p-3">
                             <div class="w-28 flex-shrink-0">
@@ -304,14 +297,6 @@
                             </div>
                             <div class="flex items-center gap-2">
                                 <button id="btn-page-cmcv" class="flex-1 px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 font-medium">CMCV 分类</button>
-                                <label class="flex items-center gap-1 text-xs text-gray-500 whitespace-nowrap">
-                                    <input type="checkbox" id="page-cmcv-full-mode" class="rounded">
-                                    全量
-                                </label>
-                                <label class="flex items-center gap-1 text-xs text-gray-500 whitespace-nowrap">
-                                    <input type="checkbox" id="page-cmcv-force" class="rounded">
-                                    覆盖
-                                </label>
                             </div>
                             <button id="btn-page-cmcv-sample" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 font-medium hidden">按比例抽样</button>
                             <button id="btn-page-cmcv-layout" class="w-full px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 font-medium hidden">对抽样结果运行 pp-layout</button>
@@ -509,6 +494,12 @@
                             <input type="checkbox" id="ecmcv-force" class="rounded">
                             强制覆盖
                         </label>
+                        <div class="flex items-center gap-1.5 text-xs text-gray-500">
+                            <span>类型:</span>
+                            <label class="flex items-center gap-1"><input type="checkbox" id="ecmcv-cat-text" class="rounded" checked>text</label>
+                            <label class="flex items-center gap-1"><input type="checkbox" id="ecmcv-cat-formula" class="rounded" checked>formula</label>
+                            <label class="flex items-center gap-1"><input type="checkbox" id="ecmcv-cat-table" class="rounded" checked>table</label>
+                        </div>
                     </div>
                     <div id="ecmcv-progress" class="hidden mb-4">
                         <div class="flex items-center gap-3 mb-1">
@@ -702,7 +693,6 @@
               runLayout: document.getElementById('btn-run-layout'),
               pageCmcvSample: document.getElementById('btn-page-cmcv-sample'),
               pageCmcvLayout: document.getElementById('btn-page-cmcv-layout'),
-              pageCmcv: document.getElementById('btn-page-cmcv'),
             },
           };
           DOM.layout = {
@@ -1331,8 +1321,10 @@
         }
 
         function restorePageCmcvDisplay(data) {
+            console.log('[restorePageCmcvDisplay] called, data.page_cmcv:', !!data.page_cmcv);
             const cmcvResult = data.page_cmcv;
             if (cmcvResult && cmcvResult.tier_summary) {
+                console.log('[restorePageCmcvDisplay] showing results');
                 const tier_summary = cmcvResult.tier_summary || {};
                 const block_details = cmcvResult.block_details || {};
                 const allTierCounts = {easy: tier_summary.easy || 0, medium: tier_summary.medium || 0, hard: tier_summary.hard || 0};
@@ -1353,7 +1345,10 @@
 
                 if (DOM.pageCmcv.empty) DOM.pageCmcv.empty.classList.add('hidden');
                 if (DOM.pageCmcv.summary) DOM.pageCmcv.summary.classList.remove('hidden');
-                if (DOM.pageCmcv.stats) DOM.pageCmcv.stats.innerHTML = `
+                if (DOM.bucket.buttons.pageCmcvSample) DOM.bucket.buttons.pageCmcvSample.classList.remove('hidden');
+                // 只在 stats 为空时写入分类结果，避免覆盖已有内容
+                if (DOM.pageCmcv.stats && !DOM.pageCmcv.stats.dataset.cmcvDone) {
+                    DOM.pageCmcv.stats.innerHTML = `
                     <div class="col-span-3 text-sm text-gray-600 mb-2">
                         基于 <strong>多模型 OCR</strong> 的 block 级一致性分析
                     </div>
@@ -1375,11 +1370,14 @@
                         <div class="text-xl font-bold text-red-800">${allTierCounts.hard}</div>
                         <div class="text-xs text-gray-400">${blockCounts.hard} blocks</div>
                     </div>`;
+                    DOM.pageCmcv.stats.dataset.cmcvDone = '1';
+                }
                 if (DOM.pageCmcv.detail) DOM.pageCmcv.detail.innerHTML = `
                     <div class="text-xs text-gray-400 mt-1">分类已缓存，可调整比例后点击「按比例抽样」</div>`;
                 DOM.bucket.buttons.pageCmcvSample.classList.remove('hidden');
             }
             const sampleResult = data.page_cmcv_sample;
+            console.log('[restorePageCmcvDisplay] sampleResult:', sampleResult ? {total: sampleResult.total_sampled, bucketsKeys: Object.keys(sampleResult.buckets || {})} : null);
             if (sampleResult && sampleResult.total_sampled > 0) {
                 const allSampledCounts = {easy: 0, medium: 0, hard: 0};
                 const sampledIds = [];
@@ -1388,6 +1386,7 @@
                     allSampledCounts[tier] += Array.isArray(v) ? v.length : 0;
                     safePushAll(sampledIds, v);
                 }
+                console.log('[restorePageCmcvDisplay] allSampledCounts:', allSampledCounts);
                 const ps = sampleResult.partition_stats || {};
                 let estEasy = 0, estMed = 0, estHard = 0;
                 for (const p of Object.values(ps)) {
@@ -1402,9 +1401,8 @@
                 const ratios = sampleResult.ratios || {};
                 Store.pageCmcv.sampling = { allSampledCounts, estEasy, estMed, estHard, easyPct, medPct, hardPct, sampledIds, blockCounts: Store.pageCmcv.classification?.blockCounts || {easy:0, medium:0, hard:0} };
 
-                if (DOM.pageCmcv.stats) {
-                    const existingStats = DOM.pageCmcv.stats.innerHTML;
-                    DOM.pageCmcv.stats.innerHTML = existingStats + `
+                if (DOM.pageCmcv.stats && !DOM.pageCmcv.stats.dataset.samplingDone) {
+                    DOM.pageCmcv.stats.innerHTML += `
                     <div class="col-span-3 text-xs text-gray-500 mt-3 mb-2 border-b pb-2">
                         <strong>按分区抽样结果</strong>（缓存）：按 easy:${ratios.easy || 0}% medium:${ratios.medium || 0}% hard:${ratios.hard || 0}% 从各分区抽样
                     </div>
@@ -1423,6 +1421,7 @@
                         <div class="text-xl font-bold text-red-800">${allSampledCounts.hard.toLocaleString()} 页</div>
                         <div class="text-xs text-gray-400">估算 ${estHard.toLocaleString()} 页 · ${hardPct}%</div>
                     </div>`;
+                    DOM.pageCmcv.stats.dataset.samplingDone = '1';
                 }
                 DOM.bucket.buttons.pageCmcvLayout.classList.remove('hidden');
             }
@@ -2321,7 +2320,7 @@
             let done = 0;
             targets.forEach(t => {
                 const url = '/api/layout-batch';
-                const body = { source_id: t.source_id, batch_id: t.batch_id, write_lance: false };
+                const body = { source_id: t.source_id, batch_id: t.batch_id, write_lance: true };
                 console.log('[layout] POST', url, body);
                 Request.post(url, body)
                 .then(r => {
@@ -2923,15 +2922,20 @@
                         const PAT_LABELS = { all_agree: 'Easy', partial_agree: 'Medium', all_disagree: 'Hard' };
 
                         let currentIdx = 0;
-                        function showSample() {
+                        async function showSample() {
                             const page = pages[currentIdx];
                             const blocks = page.blocks;
                             let html = `<div class="mb-2 text-sm font-medium">${page.sample_id} — ${blocks.length} blocks <span class="text-gray-400">(${page.tier})</span></div>`;
-                            html += '<div class="space-y-2 max-h-[60vh] overflow-y-auto">';
+
+                            // 加载页面图片
+                            html += `<div id="ocr-page-image" class="mb-3 text-center"><div class="text-xs text-gray-400">加载图片中...</div></div>`;
+
+                            html += '<div class="space-y-2 max-h-[50vh] overflow-y-auto">';
                             blocks.forEach(b => {
-                                const pt = (b.paddle_text || '').substring(0, 100);
-                                const gt = (b.glm_text || '').substring(0, 100);
-                                const st = (b.self_text || '').substring(0, 100);
+                                const isTable = b.block_type === 'table';
+                                const pt = b.paddle_text || '';
+                                const gt = b.glm_text || '';
+                                const st = b.self_text || '';
                                 const cmcv = cmcvMap[`${page.sample_id}:${b.block_idx}`];
                                 const pat = cmcv?.consistency_pattern;
                                 const cColor = pat ? (PAT_COLORS[pat] || 'gray') : '';
@@ -2945,15 +2949,44 @@
                                         else if (d.method) diffLine = `<div class="text-gray-400 mt-1">${d.method} pg=${d.sim_paddle_glm} ps=${d.sim_paddle_self} gs=${d.sim_glm_self}</div>`;
                                     } catch {}
                                 }
+
+                                const renderCell = (text) => {
+                                    if (!text) return '<i class="text-gray-400">空</i>';
+                                    const esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                                    return esc.length > 300 ? esc.substring(0, 300) + '...' : esc;
+                                };
+
+                                // 表格 block: 解析完整 HTML 并安全渲染
+                                const tableDisplay = (text, blockId) => {
+                                    if (!text) return '<i class="text-gray-400">空</i>';
+                                    if (text.includes('<table')) {
+                                        let html = text;
+                                        const openTags = (html.match(/<(table|tr|td|th|thead|tbody)[^>]*>/gi) || []).length;
+                                        const closeTags = (html.match(/<\/(table|tr|td|th|thead|tbody)>/gi) || []).length;
+                                        for (let i = closeTags; i < openTags; i++) {
+                                            if (html.includes('<td') && !html.endsWith('</td>')) html += '</td>';
+                                            else if (html.includes('<tr') && !html.endsWith('</tr>')) html += '</tr>';
+                                            else if (html.includes('<table') && !html.endsWith('</table>')) html += '</table>';
+                                        }
+                                        const tid = `tbl-${blockId}`;
+                                        setTimeout(() => {
+                                            const el = document.getElementById(tid);
+                                            if (el) { el.innerHTML = html; }
+                                        }, 0);
+                                        return `<div id="${tid}" class="overflow-auto max-h-[150px] border rounded bg-white p-0.5 text-[10px]"></div>`;
+                                    }
+                                    return renderCell(text);
+                                };
+
                                 html += `<div class="border rounded p-2 bg-white text-xs">
                                     <div class="flex justify-between mb-1">
                                         <span class="font-medium">${b.block_type || 'text'} #${b.block_idx}${badge}</span>
                                         <span class="text-gray-400">${b.bbox ? b.bbox.map(v=>Math.round(v)).join(',') : ''}</span>
                                     </div>
                                     <div class="grid grid-cols-3 gap-2">
-                                        <div><span class="text-blue-600">Paddle:</span> ${pt || '<i>空</i>'}</div>
-                                        <div><span class="text-green-600">GLM:</span> ${gt || '<i>空</i>'}</div>
-                                        <div><span class="text-purple-600">Self:</span> ${st || '<i>空</i>'}</div>
+                                        <div><span class="text-blue-600 font-medium">Paddle:</span> ${isTable ? tableDisplay(pt, `${page.sample_id}-paddle-${b.block_idx}`) : renderCell(pt)}</div>
+                                        <div><span class="text-green-600 font-medium">GLM:</span> ${isTable ? tableDisplay(gt, `${page.sample_id}-glm-${b.block_idx}`) : renderCell(gt)}</div>
+                                        <div><span class="text-purple-600 font-medium">Self:</span> ${isTable ? tableDisplay(st, `${page.sample_id}-self-${b.block_idx}`) : renderCell(st)}</div>
                                     </div>
                                     ${diffLine}
                                 </div>`;
@@ -2963,6 +2996,19 @@
                             DOM.pageOcr.nav.pageInfo.textContent = `${currentIdx + 1} / ${pages.length}`;
                             DOM.pageOcr.nav.prev.disabled = currentIdx <= 0;
                             DOM.pageOcr.nav.next.disabled = currentIdx >= pages.length - 1;
+
+                            // 异步加载页面图片
+                            const imgEl = document.getElementById('ocr-page-image');
+                            if (imgEl) {
+                                try {
+                                    const imgR = await Request.get(`/api/page-image/${encodeURIComponent(sourceId)}/${encodeURIComponent(batchId)}/${encodeURIComponent(page.sample_id)}`);
+                                    if (imgR.ok && imgR.data.image) {
+                                        imgEl.innerHTML = `<img src="data:${imgR.data.mime};base64,${imgR.data.image}" class="max-h-[30vh] mx-auto border rounded shadow-sm" />`;
+                                    } else {
+                                        imgEl.innerHTML = '<div class="text-xs text-gray-400">图片不可用</div>';
+                                    }
+                                } catch { imgEl.innerHTML = '<div class="text-xs text-gray-400">图片加载失败</div>'; }
+                            }
                         }
 
                         DOM.pageOcr.nav.prev.onclick = () => { if (currentIdx > 0) { currentIdx--; showSample(); } };
@@ -3702,7 +3748,9 @@
             try {
                 const fullMode = document.getElementById('ecmcv-full-mode')?.checked || false;
                 const forceMode = document.getElementById('ecmcv-force')?.checked || false;
-                const resp = await Request.post(`/api/cmcv/${src}?batch_id=${bid}&full=${fullMode}&force=${forceMode}`);
+                const selectedCats = ['text','formula','table'].filter(c => document.getElementById(`ecmcv-cat-${c}`)?.checked);
+                if (selectedCats.length === 0) { showToast('请至少选择一个 block 类型', 'warning'); return; }
+                const resp = await Request.post(`/api/cmcv/${src}?batch_id=${bid}&full=${fullMode}&force=${forceMode}&block_types=${selectedCats.join(',')}`);
                 if (!resp.ok) throw new Error(resp.error);
                 const data = resp.data;
                 if (data.task_id) {
@@ -3828,6 +3876,91 @@
             DOM.pageCmcv.buttons.runEds.classList.toggle('hidden', !show);
             DOM.pageCmcv.eds.empty.classList.toggle('hidden', show);
         }
+
+        // Page CMCV 分类按钮
+        document.getElementById('btn-page-cmcv')?.addEventListener('click', async () => {
+            const src = getSourceId();
+            const bid = getBatchId();
+            if (!src) { showToast('请先选择数据源', 'warning'); return; }
+            try {
+                DOM.pageCmcv.empty.textContent = 'CMCV 分类中...';
+                DOM.pageCmcv.empty.classList.remove('hidden');
+                DOM.pageCmcv.summary?.classList.add('hidden');
+                const batches = bid ? [{source_id: src, batch_id: bid}] : Store.batchData.filter(b => b.source_id === src);
+                if (batches.length === 0) { showToast('无可用批次', 'warning'); return; }
+                for (const b of batches) {
+                    const r = await Request.get(`/api/page-cmcv/${encodeURIComponent(b.source_id)}/${encodeURIComponent(b.batch_id)}`);
+                    if (!r.ok) throw new Error(`${b.batch_id}: ${r.error}`);
+                }
+                const bid2 = bid || (batches[0] && batches[0].batch_id);
+                if (src && bid2) {
+                    const sr = await Request.post(`/api/bucket-samples-batch?full=true`, [{ source_id: src, batch_id: bid2 }]);
+                    if (sr.ok && sr.data) {
+                        const batchData = sr.data[`${src}/${bid2}`] || sr.data;
+                        restorePageCmcvDisplay(batchData);
+                        // 分类完成后显示「按比例抽样」按钮
+                        DOM.bucket.buttons.pageCmcvSample?.classList.remove('hidden');
+                    }
+                }
+            } catch (err) {
+                DOM.pageCmcv.empty.textContent = '分类失败: ' + err.message;
+                console.error('[page-cmcv]', err);
+            }
+        });
+
+        // Page CMCV 按比例抽样按钮
+        DOM.bucket.buttons.pageCmcvSample?.addEventListener('click', async () => {
+            const src = getSourceId();
+            const bid = getBatchId();
+            if (!src || !bid) { showToast('请先选择数据源和批次', 'warning'); return; }
+            const easy = DOM.pageCmcv.ratios?.easy?.value || 0.5;
+            const medium = DOM.pageCmcv.ratios?.medium?.value || 1.0;
+            const hard = DOM.pageCmcv.ratios?.hard?.value || 2.0;
+            try {
+                DOM.bucket.buttons.pageCmcvSample.disabled = true;
+                DOM.bucket.buttons.pageCmcvSample.textContent = '抽样中...';
+                const r = await Request.get(`/api/page-cmcv-sample/${encodeURIComponent(src)}/${encodeURIComponent(bid)}?easy_ratio=${easy}&medium_ratio=${medium}&hard_ratio=${hard}&force=true`);
+                if (!r.ok) throw new Error(r.error);
+                // 刷新显示
+                const sr = await Request.post(`/api/bucket-samples-batch?full=true`, [{ source_id: src, batch_id: bid }]);
+                if (sr.ok && sr.data) {
+                    const batchData = sr.data[`${src}/${bid}`] || sr.data;
+                    restorePageCmcvDisplay(batchData);
+                }
+                DOM.bucket.buttons.pageCmcvSample.disabled = false;
+                DOM.bucket.buttons.pageCmcvSample.textContent = '按比例抽样';
+            } catch (err) {
+                DOM.bucket.buttons.pageCmcvSample.disabled = false;
+                DOM.bucket.buttons.pageCmcvSample.textContent = '按比例抽样';
+                showToast('抽样失败: ' + err.message, 'error');
+                console.error('[page-cmcv-sample]', err);
+            }
+        });
+
+        // Page CMCV 对抽样结果运行 pp-layout
+        DOM.bucket.buttons.pageCmcvLayout?.addEventListener('click', async () => {
+            const src = getSourceId();
+            const bid = getBatchId();
+            if (!src || !bid) { showToast('请先选择数据源和批次', 'warning'); return; }
+            try {
+                DOM.bucket.buttons.pageCmcvLayout.disabled = true;
+                DOM.bucket.buttons.pageCmcvLayout.textContent = 'Layout 启动中...';
+                const r = await Request.post('/api/layout-batch', { source_id: src, batch_id: bid, write_lance: true });
+                if (!r.ok) throw new Error(r.error);
+                const data = r.data;
+                if (data.task_id) {
+                    pollLayoutBatch(data.task_id, 0, DOM.bucket.buttons.pageCmcvLayout);
+                } else {
+                    DOM.bucket.buttons.pageCmcvLayout.disabled = false;
+                    DOM.bucket.buttons.pageCmcvLayout.textContent = '对抽样结果运行 pp-layout';
+                }
+            } catch (err) {
+                DOM.bucket.buttons.pageCmcvLayout.disabled = false;
+                DOM.bucket.buttons.pageCmcvLayout.textContent = '对抽样结果运行 pp-layout';
+                showToast('Layout 失败: ' + err.message, 'error');
+                console.error('[page-cmcv-layout]', err);
+            }
+        });
 
         DOM.pageCmcv.buttons.runEds.addEventListener('click', async () => {
             const targets = getEoTargets();

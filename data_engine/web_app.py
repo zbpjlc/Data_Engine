@@ -5183,7 +5183,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
 
         try:
             from data_engine.ocr.cmcv import CMCVEngine
-            cmcv_engine = CMCVEngine(use_visual_cdm=True)
+            cmcv_engine = CMCVEngine()
             json_keys = ("paddle_table", "glm_table", "self_table",
                          "paddle_formula", "glm_formula", "self_formula")
             for cat in ("text", "formula", "table"):
