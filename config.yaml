@@ -45,7 +45,7 @@ layout:
   query_batch: 200               # 每次从 ingest.lance 加载 N 张图片
 
 ocr:
-  page_concurrency: 32
+  page_concurrency: 8
   save_interval: 10
 
   layout:
