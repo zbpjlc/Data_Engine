@@ -971,10 +971,19 @@
                 }
                 _activeTimers.clear();
                 PollManager._timer = null;
+                // 暂停所有 TaskPoller
+                for (const p of _activePollers) p._paused = true;
             } else {
                 // 页面恢复可见时重启 PollManager
                 if (PollManager._subs.size > 0) {
                     PollManager._start();
+                }
+                // 恢复所有 TaskPoller
+                for (const p of _activePollers) {
+                    if (p._paused && p._timer === null) {
+                        p._paused = false;
+                        p.start();
+                    }
                 }
             }
         });
@@ -998,6 +1007,8 @@
             else clearTimeout(id);
             _activeTimers.delete([..._activeTimers].find(t => t.id === id && t.type === type));
         }
+
+        const _activePollers = new Set();
 
         // ── 轻量级 Fetch 缓存层（可一键禁用）──────────────────────────────
         const CACHE_ENABLED = true;
@@ -1113,11 +1124,14 @@
             }
             start() {
                 if (this._timer) return;
+                this._poll();
                 this._timer = setInterval(() => this._poll(), this.interval);
                 _registerTimer(this._timer, 'interval');
+                _activePollers.add(this);
             }
             stop() {
                 if (this._timer) { _unregisterTimer(this._timer, 'interval'); this._timer = null; }
+                _activePollers.delete(this);
             }
             async _poll() {
                 try {
@@ -1132,7 +1146,9 @@
                         if (d.status === 'completed' && this.cbs.onComplete) this.cbs.onComplete(d);
                         else if (this.cbs.onFail) this.cbs.onFail(d);
                     }
-                } catch {}
+                } catch (e) {
+                    console.warn('[TaskPoller] poll error:', e.message);
+                }
             }
         }
 
@@ -3755,10 +3771,9 @@
                 const data = resp.data;
                 if (data.task_id) {
                     const ecmcvBar = DOM.elementCmcv.progress.bar;
-                    new TaskPoller(`/api/tasks/${data.task_id}`, {
+                    PollManager.subscribe(data.task_id, {
                         onProgress: (d) => {
-                            const prog = d.progress || {};
-                            const pctVal = prog.total > 0 ? Math.round(prog.current / prog.total * 100) : 0;
+                            const pctVal = d.total > 0 ? Math.round(d.current / d.total * 100) : 0;
                             DOM.elementCmcv.progress.msg.textContent = `${d.message || '...'} (${pctVal}%)`;
                             ecmcvBar.style.width = `${pctVal}%`;
                         },
@@ -3775,7 +3790,7 @@
                             DOM.elementCmcv.buttons.run.disabled = false;
                             Store.elementCmcv.running = false;
                         }
-                    }, 3000).start();
+                    });
                 }
             } catch (e) {
                 DOM.elementCmcv.progress.container.classList.add('hidden');
