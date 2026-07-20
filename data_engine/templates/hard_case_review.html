@@ -263,7 +263,8 @@
                             const res = await fetch(`/api/hard-cases/${encodeURIComponent(g.source_id)}/${encodeURIComponent(g.batch_id)}?tier=${currentTier}&block_type=${currentType}`);
                             const data = await res.json();
                             const remaining = HARD_LIMIT - allBlocks.length;
-                            allBlocks = allBlocks.concat((data.blocks || []).slice(0, remaining));
+                            const tagged = (data.blocks || []).slice(0, remaining).map(b => ({...b, _source_id: g.source_id, _batch_id: g.batch_id}));
+                            allBlocks = allBlocks.concat(tagged);
                             stats.total += data.total || 0;
                             stats.corrected += data.corrected || 0;
                             stats.judged += data.judged || 0;
@@ -454,7 +455,9 @@
             try {
                 const srcVal = document.getElementById('source-select').value;
                 const batchVal = document.getElementById('batch-select').value;
-                const [sid, bid] = batchVal ? batchVal.split('/') : [srcVal, ''];
+                const [sid, bid] = batchVal
+                    ? batchVal.split('/')
+                    : [block._source_id || srcVal, block._batch_id || ''];
                 const res = await fetch(`/api/hard-cases/${encodeURIComponent(sid)}/${encodeURIComponent(bid)}/${cat}/${encodeURIComponent(block.sample_id)}/${block.block_idx}`);
                 if (res.ok) {
                     const detail = await res.json();
@@ -517,8 +520,8 @@
             img.src = '';
             img.alt = '加载中...';
             try {
-                const src = document.getElementById('source-select').value;
-                const batch = document.getElementById('batch-select').value.split('/')[1];
+                const src = block._source_id || document.getElementById('source-select').value;
+                const batch = block._batch_id || document.getElementById('batch-select').value.split('/')[1] || '';
                 const cat = block.block_type === 'table' ? 'table' : block.block_type === 'formula' ? 'formula' : 'text';
                 const url = `/api/lancedb/${encodeURIComponent(src)}/${encodeURIComponent(batch)}/image/${block.sample_id}?dataset=${cat}&block_idx=${block.block_idx}`;
                 img.src = url;
