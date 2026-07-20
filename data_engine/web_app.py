@@ -1646,6 +1646,7 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
         cats_to_process = allowed_cats
 
     def _execute_cmcv(ctx: TaskContext):
+        import sys
         from data_engine.ocr.cmcv import CMCVEngine
 
         global_status = collect_global_status(registry)
@@ -1789,13 +1790,88 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
             total=len(element_rows), message="开始一致性比较",
         )
 
+        def _flush_cmcv_rows(rows: list[dict], g_status, write_lock, open_fn, cache_fn):
+            """将 CMCV 结果批量写入 lance 文件"""
+            for b in g_status.batches:
+                b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
+                for cat in ("text", "formula", "table"):
+                    lp = b_manifests / f"{cat}.lance"
+                    if not lp.exists():
+                        continue
+                    try:
+                        with write_lock:
+                            ds = open_fn(lp)
+                            col_names = set(ds.schema.names)
+                            if "consistency_pattern" not in col_names or "block_diff_json" not in col_names:
+                                continue
+                        update_map: dict[str, dict] = {}
+                        for r in rows:
+                            key = (r["sample_id"], r["block_idx"])
+                            if r.get("consistency_pattern"):
+                                update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
+                            if r.get("block_diff_json"):
+                                update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
+                        if not update_map:
+                            continue
+                        with write_lock:
+                            ds = open_fn(lp)
+                            read_cols = ["sample_id", "block_idx", "consistency_pattern", "block_diff_json"]
+                            scanner = ds.scanner(columns=[c for c in read_cols if c in ds.schema.names])
+                            update_batches = []
+                            pat_map = update_map.get("consistency_pattern", {})
+                            diff_map = update_map.get("block_diff_json", {})
+                            for batch in scanner.to_batches():
+                                sids = batch.column("sample_id").to_pylist()
+                                bidxs = batch.column("block_idx").to_pylist()
+                                patterns = batch.column("consistency_pattern").to_pylist() if "consistency_pattern" in batch.column_names else [None] * len(batch)
+                                diffs = batch.column("block_diff_json").to_pylist() if "block_diff_json" in batch.column_names else [None] * len(batch)
+                                new_patterns = []
+                                new_diffs = []
+                                for i in range(len(batch)):
+                                    key = (sids[i], bidxs[i])
+                                    new_patterns.append(pat_map.get(key, patterns[i]))
+                                    new_diffs.append(diff_map.get(key, diffs[i]))
+                                update_batches.append(pa.table({
+                                    "sample_id": pa.array(sids, type=pa.large_string()),
+                                    "block_idx": pa.array(bidxs, type=pa.int32()),
+                                    "consistency_pattern": pa.array(new_patterns, type=pa.large_string()),
+                                    "block_diff_json": pa.array(new_diffs, type=pa.large_string()),
+                                }))
+                            cache_fn.invalidate(str(lp))
+                        if update_batches:
+                            update_table = pa.concat_tables(update_batches)
+                            safe_merge(ds, update_table, ["sample_id", "block_idx"], context=f"cmcv/{cat}")
+                    except Exception as e:
+                        print(f"[CMCV] flush {cat}.lance 失败: {e}", file=sys.stderr)
+
         cmcv = CMCVEngine()  # token fallback，快；视觉渲染由 cli/full 模式按需启用
+
+        FLUSH_INTERVAL = int(get_config("ocr", "cmcv", "flush_interval", default=200))
+        pending_rows: list[dict] = []
 
         def _cmcv_step_cb(cur, tot, msg):
             progress_tracker.update_progress(task_id=ctx.task_id, current=cur, message=f"[{cur}/{tot}] {msg}", total=tot)
 
-        updated_rows, page_tiers = cmcv.process_element_batch(element_rows, progress_callback=_cmcv_step_cb)
+        def _cmcv_flush_cb(rows_batch, page_tiers_batch):
+            """每 200 个 block 写入一次 lance 文件"""
+            pending_rows.extend(rows_batch)
+            if len(pending_rows) >= FLUSH_INTERVAL:
+                _flush_cmcv_rows(pending_rows, global_status, _lance_write_lock, _open_lance, _lance_cache)
+                print(f"[CMCV] flush {len(pending_rows)} rows to lance", file=sys.stderr)
+                pending_rows.clear()
+
+        updated_rows, page_tiers = cmcv.process_element_batch(
+            element_rows,
+            progress_callback=_cmcv_step_cb,
+            flush_callback=_cmcv_flush_cb,
+        )
         print(f"[CMCV] updated_rows={len(updated_rows)}, page_tiers={len(page_tiers)}", file=sys.stderr)
+
+        # 写入剩余未 flush 的行
+        if pending_rows:
+            _flush_cmcv_rows(pending_rows, global_status, _lance_write_lock, _open_lance, _lance_cache)
+            print(f"[CMCV] final flush {len(pending_rows)} rows", file=sys.stderr)
+            pending_rows.clear()
 
         for b in global_status.batches:
             b_manifests = registry.get(b.source_id).resolve_batch_dir(b.batch_id) / "manifests"
@@ -1816,7 +1892,6 @@ async def start_cmcv(source_id: str, batch_id: str = None, full: bool = False, f
                             update_map.setdefault("consistency_pattern", {})[key] = r["consistency_pattern"]
                         if r.get("block_diff_json"):
                             update_map.setdefault("block_diff_json", {})[key] = r["block_diff_json"]
-                    import sys
                     if not update_map:
                         print(f"[CMCV DEBUG] update_map 为空，跳过写入", file=sys.stderr)
                         continue
@@ -5183,7 +5258,7 @@ async def element_ocr(source_id: str, batch_id: str, request: Request,
 
         try:
             from data_engine.ocr.cmcv import CMCVEngine
-            cmcv_engine = CMCVEngine()
+            cmcv_engine = CMCVEngine(use_visual_cdm=True)
             json_keys = ("paddle_table", "glm_table", "self_table",
                          "paddle_formula", "glm_formula", "self_formula")
             for cat in ("text", "formula", "table"):

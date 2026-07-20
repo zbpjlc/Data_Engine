@@ -421,16 +421,16 @@ def compare_block(
         "threshold": thr,
     }
 
-    # Plan §6.6:
-    # easy   — paddle 和 glm 一致，且 self 与其中至少一个一致
-    # medium — paddle 和 glm 一致，但 self 与两者都不一致
-    # hard   — paddle 和 glm 不一致
-    external_agree = sim_pg >= thr  # paddle 与 glm 一致
-    self_agree_with_any = sim_ps >= thr or sim_gs >= thr  # self 与至少一个一致
+    # 分类逻辑：
+    # easy   — self 与至少一个模型一致
+    # medium — self 与两个模型都不一致，但另外两个一致
+    # hard   — 三者全部不一致
+    self_agree_with_any = sim_ps >= thr or sim_gs >= thr
+    other_agree = sim_pg >= thr
 
-    if external_agree and self_agree_with_any:
+    if self_agree_with_any:
         pattern = "all_agree"
-    elif external_agree:
+    elif other_agree:
         pattern = "partial_agree"
     else:
         pattern = "all_disagree"
@@ -505,11 +505,11 @@ class CMCVEngine:
                     sim_gs = batch_scores[offset * 3 + 2]
 
                     thr = get_config("ocr", "cmcv", "formula_threshold", default=None) or self._threshold
-                    external_agree = sim_pg >= thr
-                    self_agree_with_external = sim_ps >= thr and sim_gs >= thr
-                    if external_agree and self_agree_with_external:
+                    self_agree_with_any = sim_ps >= thr or sim_gs >= thr
+                    other_agree = sim_pg >= thr
+                    if self_agree_with_any:
                         pattern = "all_agree"
-                    elif external_agree:
+                    elif other_agree:
                         pattern = "partial_agree"
                     else:
                         pattern = "all_disagree"
@@ -548,7 +548,7 @@ class CMCVEngine:
             return "medium"
         return "easy"
 
-    def process_element_batch(self, element_rows: list[dict], progress_callback=None) -> tuple[list[dict], dict[str, str]]:
+    def process_element_batch(self, element_rows: list[dict], progress_callback=None, flush_callback=None) -> tuple[list[dict], dict[str, str]]:
         by_sample: dict[str, list[dict]] = defaultdict(list)
         for row in element_rows:
             by_sample[row["sample_id"]].append(row)
@@ -557,6 +557,7 @@ class CMCVEngine:
         processed_pages = 0
         updated_rows: list[dict] = []
         page_tiers: dict[str, str] = {}
+        flush_batch: list[dict] = []
 
         for sample_id, blocks in by_sample.items():
             blocks_sorted = sorted(blocks, key=lambda b: b.get("block_idx", 0))
@@ -565,12 +566,14 @@ class CMCVEngine:
             for block, detail in zip(blocks_sorted, page_result["details"]):
                 if not detail.get("pattern"):
                     continue  # skip: engine unavailable, retry next run
-                updated_rows.append({
+                row = {
                     "sample_id": block["sample_id"],
                     "block_idx": block.get("block_idx", 0),
                     "consistency_pattern": detail["pattern"],
                     "block_diff_json": json.dumps(detail["diff"], ensure_ascii=False) if detail.get("diff") else None,
-                })
+                }
+                updated_rows.append(row)
+                flush_batch.append(row)
 
             page_tiers[sample_id] = page_result["tier"]
 
@@ -580,6 +583,14 @@ class CMCVEngine:
                     progress_callback(processed_pages, total_pages, f"对比页面 {sample_id}")
                 except Exception:
                     pass
+
+            # 定期 flush
+            if flush_callback and flush_batch:
+                try:
+                    flush_callback(flush_batch, {sample_id: page_result["tier"]})
+                except Exception:
+                    pass
+                flush_batch.clear()
 
         return updated_rows, page_tiers
 
