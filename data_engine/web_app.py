@@ -444,7 +444,19 @@ from data_engine.registry import SourceRegistry
 from data_engine.status import collect_global_status, format_status_report, invalidate_status_cache
 from data_engine.progress_tracker import progress_tracker
 
-app = FastAPI(title="Data Engine Web Console", version="1.0.0")
+
+# Lifespan: 替代 on_event("startup") / on_event("shutdown")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    # startup
+    yield
+    # shutdown
+    task_manager.shutdown(timeout=30.0)
+
+
+app = FastAPI(title="Data Engine Web Console", version="1.0.0", lifespan=lifespan)
 
 # 启动时清理 stale 任务（重启后线程已不存在）
 for _tid, _task in progress_tracker.get_all_tasks().items():
@@ -452,11 +464,6 @@ for _tid, _task in progress_tracker.get_all_tasks().items():
         progress_tracker.stop_task(_tid, "服务重启，任务已中断")
         print(f"[startup] marked stale task {_tid} as stopped", file=__import__('sys').stderr)
 
-
-@app.on_event("shutdown")
-def _on_shutdown():
-    """服务关闭时优雅终止所有后台任务，确保 Lance 写入不中断。"""
-    task_manager.shutdown(timeout=30.0)
 
 # Static files and templates
 static_dir = Path(__file__).parent / "static"
@@ -2740,11 +2747,11 @@ async def get_difficulty_aware_samples(
                         labels_map = cat_info.get("labels", {})
                         ckey = f"{row['sample_id']}:{row['block_idx']}"
                         cid = labels_map.get(ckey)
-                    if cid is None:
-                        continue
-                    cluster_key = (cat, cid)
-                    cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
-                    cluster_diff_map[cluster_key][tier] += 1
+                        if cid is None:
+                            continue
+                        cluster_key = (cat, cid)
+                        cluster_diff_map.setdefault(cluster_key, {"easy": 0, "medium": 0, "hard": 0})
+                        cluster_diff_map[cluster_key][tier] += 1
             except Exception as e:
                 print(f"[difficulty-samples] 读取 {cat}.lance 失败: {e}", file=sys.stderr)
                 continue
