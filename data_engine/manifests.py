@@ -452,7 +452,7 @@ def ocr_complete_filter(existing_cols: set[str]) -> str | None:
         engine_cols = [f"{prefix}{s}" for s in ("_text", "_table", "_formula") if f"{prefix}{s}" in existing_cols]
         if not engine_cols:
             return "1 = 0"
-        or_parts = " OR ".join(f"{c} IS NOT NULL" for c in engine_cols)
+        or_parts = " OR ".join(f"({c} IS NOT NULL AND {c} != '')" for c in engine_cols)
         engines.append(f"({or_parts})")
     return " AND ".join(engines)
 
