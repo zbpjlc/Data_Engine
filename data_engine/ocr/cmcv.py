@@ -308,16 +308,44 @@ def _cdm_visual_similarity(formula_a: str, formula_b: str) -> float | None:
 
 
 def _cdm_visual_similarity_batch(formula_pairs: list[tuple[str, str]]) -> list[float] | None:
-    """批量 CDM 视觉渲染，减少 docker exec 开销。"""
+    """批量 CDM 视觉渲染，按配置分批调用 docker exec。"""
     if not formula_pairs:
         return []
+    batch_size = int(get_config("ocr", "cmcv", "teds_batch_size", default=1000))
     try:
         from data_engine.ocr.omnidocbench_local.cdm_bridge import compute_cdm_visual_batch
-        batch_results = compute_cdm_visual_batch(formula_pairs)
-        if batch_results is not None:
-            return [r.score for r in batch_results]
+        all_scores: list[float] = []
+        for i in range(0, len(formula_pairs), batch_size):
+            chunk = formula_pairs[i:i + batch_size]
+            batch_results = compute_cdm_visual_batch(chunk)
+            if batch_results is not None:
+                all_scores.extend([r.score for r in batch_results])
+            else:
+                all_scores.extend([0.0] * len(chunk))
+        return all_scores
     except Exception as exc:
         logger.debug(f"CDM 批量容器执行失败: {exc}")
+    return None
+
+
+def teds_similarity_batch(table_pairs: list[tuple[str, str]]) -> list[float] | None:
+    """批量 TEDS 表格比较，按配置分批调用 docker exec。"""
+    if not table_pairs:
+        return []
+    batch_size = int(get_config("ocr", "cmcv", "teds_batch_size", default=1000))
+    try:
+        from data_engine.ocr.omnidocbench_local.teds_bridge import compute_teds_batch
+        all_scores: list[float] = []
+        for i in range(0, len(table_pairs), batch_size):
+            chunk = table_pairs[i:i + batch_size]
+            batch_results = compute_teds_batch(chunk)
+            if batch_results is not None:
+                all_scores.extend([r.score for r in batch_results])
+            else:
+                all_scores.extend([0.0] * len(chunk))
+        return all_scores
+    except Exception as exc:
+        logger.debug(f"TEDS 批量容器执行失败: {exc}")
     return None
 
 
@@ -447,47 +475,98 @@ class CMCVEngine:
             get_config("ocr", "cmcv", "agreement_threshold", default=0.9)
         )
 
-    def compare_page(self, blocks: list[dict]) -> dict:
+    def compare_page(self, blocks: list[dict], table_scores: dict[int, tuple] | None = None) -> dict:
+        """比较一页的所有 block。table_scores: {block_idx: (sim_pg, sim_ps, sim_gs)} 预计算值。"""
         details: list[dict] = []
         patterns: list[str] = []
+        table_blocks: list[dict] = []
+        table_indices: list[int] = []
         formula_blocks: list[dict] = []
         formula_indices: list[int] = []
 
+        # Phase 1: text block 直接处理，table/formula 延迟
         for idx, block in enumerate(blocks):
             block_type = block.get("block_type", "text")
+
             if block_type == "formula":
                 formula_blocks.append(block)
                 formula_indices.append(idx)
-                details.append({
-                    "block_idx": block.get("block_idx", 0),
-                    "type": block_type,
-                    "pattern": None,
-                    "diff": None,
-                })
+                details.append({"block_idx": block.get("block_idx", 0), "type": block_type, "pattern": None, "diff": None})
                 patterns.append(None)
                 continue
 
+            if block_type == "table":
+                bidx = block.get("block_idx", 0)
+                if table_scores and bidx in table_scores:
+                    # 使用预计算的全局 TEDS 分数
+                    sim_pg, sim_ps, sim_gs = table_scores[bidx]
+                    thr = get_config("ocr", "cmcv", "table_threshold", default=None) or self._threshold
+                    pattern = self._classify_table_from_scores(sim_pg, sim_ps, sim_gs, thr)
+                    details.append({
+                        "block_idx": bidx, "type": "table", "pattern": pattern,
+                        "diff": {"method": "teds_batch", "sim_paddle_glm": round(sim_pg, 4), "sim_paddle_self": round(sim_ps, 4), "sim_glm_self": round(sim_gs, 4), "threshold": thr},
+                    })
+                    patterns.append(pattern)
+                else:
+                    table_blocks.append(block)
+                    table_indices.append(idx)
+                    details.append({"block_idx": bidx, "type": block_type, "pattern": None, "diff": None})
+                    patterns.append(None)
+                continue
+
+            # text block: 纯 Python Levenshtein，无 Docker
             pattern, diff = compare_block(
                 paddle_text=block.get("paddle_text"),
                 glm_text=block.get("glm_text"),
                 self_text=block.get("self_text"),
                 block_type=block_type,
-                paddle_table=block.get("paddle_table"),
-                glm_table=block.get("glm_table"),
-                self_table=block.get("self_table"),
-                paddle_formula=block.get("paddle_formula"),
-                glm_formula=block.get("glm_formula"),
-                self_formula=block.get("self_formula"),
                 agreement_threshold=self._threshold,
             )
-            details.append({
-                "block_idx": block.get("block_idx", 0),
-                "type": block_type,
-                "pattern": pattern,
-                "diff": diff,
-            })
-            patterns.append(pattern)  # None = skipped (engine unavailable)
+            details.append({"block_idx": block.get("block_idx", 0), "type": block_type, "pattern": pattern, "diff": diff})
+            patterns.append(pattern)
 
+        # Phase 2: 如果没有预计算的 table scores，按页处理 table pairs
+        if table_blocks:
+            table_pairs: list[tuple[str, str]] = []
+            for block in table_blocks:
+                a = _table_to_full_html(block.get("paddle_table"))
+                b = _table_to_full_html(block.get("glm_table"))
+                c = _table_to_full_html(block.get("self_table"))
+                table_pairs.extend([(a, b), (a, c), (b, c)])
+
+            batch_scores = teds_similarity_batch(table_pairs)
+            if batch_scores is not None:
+                for offset, idx in enumerate(table_indices):
+                    block = table_blocks[offset]
+                    sim_pg = batch_scores[offset * 3]
+                    sim_ps = batch_scores[offset * 3 + 1]
+                    sim_gs = batch_scores[offset * 3 + 2]
+
+                    thr = get_config("ocr", "cmcv", "table_threshold", default=None) or self._threshold
+                    self_agree_with_any = sim_ps >= thr or sim_gs >= thr
+                    other_agree = sim_pg >= thr
+                    if self_agree_with_any:
+                        pattern = "all_agree"
+                    elif other_agree:
+                        pattern = "partial_agree"
+                    else:
+                        pattern = "all_disagree"
+
+                    patterns[idx] = pattern
+                    details[idx] = {
+                        "block_idx": block.get("block_idx", 0),
+                        "type": "table",
+                        "pattern": pattern,
+                        "diff": {
+                            "method": "teds_batch",
+                            "sim_paddle_glm": round(sim_pg, 4),
+                            "sim_paddle_self": round(sim_ps, 4),
+                            "sim_glm_self": round(sim_gs, 4),
+                            "threshold": thr,
+                        },
+                    }
+
+        # Phase 3: 批量 CDM（1 次 docker exec 处理所有 formula pair）
         if formula_blocks:
             formula_pairs: list[tuple[str, str]] = []
             for block in formula_blocks:
@@ -517,7 +596,7 @@ class CMCVEngine:
                     patterns[idx] = pattern
                     details[idx] = {
                         "block_idx": block.get("block_idx", 0),
-                        "type": block.get("block_type", "formula"),
+                        "type": "formula",
                         "pattern": pattern,
                         "diff": {
                             "method": "cdm_visual_batch",
@@ -540,6 +619,17 @@ class CMCVEngine:
         }
 
     @staticmethod
+    def _classify_table_from_scores(sim_pg, sim_ps, sim_gs, threshold):
+        """从预计算的 TEDS 分数分类 table block。"""
+        self_agree_with_any = sim_ps >= threshold or sim_gs >= threshold
+        other_agree = sim_pg >= threshold
+        if self_agree_with_any:
+            return "all_agree"
+        elif other_agree:
+            return "partial_agree"
+        return "all_disagree"
+
+    @staticmethod
     def _assign_tier(block_patterns: list[str | None]) -> str:
         effective = [p for p in block_patterns if p]  # skip None (engine unavailable)
         if "all_disagree" in effective:
@@ -559,9 +649,46 @@ class CMCVEngine:
         page_tiers: dict[str, str] = {}
         flush_batch: list[dict] = []
 
+        # Phase 0: 全局收集所有 table pairs，一次性批量 TEDS
+        table_pair_map: dict[tuple[str, int], tuple[float, float, float]] = {}  # (sample_id, block_idx) → (sim_pg, sim_ps, sim_gs)
+        all_table_pairs: list[tuple[str, str]] = []
+        all_table_keys: list[tuple[str, int]] = []
+        for sample_id, blocks in by_sample.items():
+            for block in blocks:
+                if block.get("block_type") != "table":
+                    continue
+                a = _table_to_full_html(block.get("paddle_table"))
+                b = _table_to_full_html(block.get("glm_table"))
+                c = _table_to_full_html(block.get("self_table"))
+                all_table_pairs.extend([(a, b), (a, c), (b, c)])
+                all_table_keys.append((sample_id, block.get("block_idx", 0)))
+
+        if all_table_pairs:
+            import sys as _sys
+            import time as _time
+            print(f"[CMCV DEBUG] 全局 TEDS: {len(all_table_pairs)} pairs ({len(all_table_keys)} blocks)", file=_sys.stderr, flush=True)
+            t0 = _time.time()
+            batch_scores = teds_similarity_batch(all_table_pairs)
+            print(f"[CMCV DEBUG] 全局 TEDS 完成: {_time.time()-t0:.1f}s", file=_sys.stderr, flush=True)
+            if batch_scores:
+                for i, key in enumerate(all_table_keys):
+                    table_pair_map[key] = (batch_scores[i*3], batch_scores[i*3+1], batch_scores[i*3+2])
+
+        import sys as _sys
         for sample_id, blocks in by_sample.items():
             blocks_sorted = sorted(blocks, key=lambda b: b.get("block_idx", 0))
-            page_result = self.compare_page(blocks_sorted)
+
+            # 为该页构建 table_scores
+            page_table_scores = {}
+            for b in blocks_sorted:
+                if b.get("block_type") == "table":
+                    key = (sample_id, b.get("block_idx", 0))
+                    if key in table_pair_map:
+                        page_table_scores[b.get("block_idx", 0)] = table_pair_map[key]
+
+            print(f"[CMCV DEBUG] start page {processed_pages+1}/{total_pages}: {sample_id}, {len(blocks_sorted)} blocks", file=_sys.stderr, flush=True)
+            page_result = self.compare_page(blocks_sorted, table_scores=page_table_scores if page_table_scores else None)
+            print(f"[CMCV DEBUG] done page {processed_pages+1}: {sample_id}", file=_sys.stderr, flush=True)
 
             for block, detail in zip(blocks_sorted, page_result["details"]):
                 if not detail.get("pattern"):
@@ -580,17 +707,23 @@ class CMCVEngine:
             processed_pages += 1
             if progress_callback:
                 try:
+                    import sys as _sys
+                    print(f"[CMCV DEBUG]   callback page {processed_pages}", file=_sys.stderr, flush=True)
                     progress_callback(processed_pages, total_pages, f"对比页面 {sample_id}")
+                    print(f"[CMCV DEBUG]   callback done", file=_sys.stderr, flush=True)
                 except Exception:
                     pass
 
             # 定期 flush
             if flush_callback and flush_batch:
                 try:
+                    print(f"[CMCV DEBUG]   flush {len(flush_batch)} rows", file=_sys.stderr, flush=True)
                     flush_callback(flush_batch, {sample_id: page_result["tier"]})
-                except Exception:
-                    pass
+                    print(f"[CMCV DEBUG]   flush done, pending={len(flush_batch)}", file=_sys.stderr, flush=True)
+                except Exception as e:
+                    print(f"[CMCV DEBUG]   flush error: {e}", file=_sys.stderr, flush=True)
                 flush_batch.clear()
+            print(f"[CMCV DEBUG]   iteration done, moving to next", file=_sys.stderr, flush=True)
 
         return updated_rows, page_tiers
 
