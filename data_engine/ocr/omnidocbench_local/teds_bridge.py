@@ -78,7 +78,7 @@ def _ensure_container() -> tuple[bool, str]:
     return False, f"container {_CONTAINER_NAME} unavailable"
 
 
-def _run_in_container(payload: dict, *, timeout_sec: int = 120) -> Any | None:
+def _run_in_container(payload: dict, *, timeout_sec: int = 300) -> Any | None:
     ok, _ = _ensure_container()
     if not ok:
         return None
@@ -113,7 +113,7 @@ def _run_in_container(payload: dict, *, timeout_sec: int = 120) -> Any | None:
         return None
 
 
-def compute_teds(html_a: str, html_b: str, *, structure_only: bool = False, timeout_sec: int = 120) -> TEDSScore | None:
+def compute_teds(html_a: str, html_b: str, *, structure_only: bool = False, timeout_sec: int = 300) -> TEDSScore | None:
     payload = {
         "pairs": [{"html_a": html_a or "", "html_b": html_b or ""}],
         "structure_only": structure_only,
@@ -129,7 +129,7 @@ def compute_teds(html_a: str, html_b: str, *, structure_only: bool = False, time
     return TEDSScore(score=float(item.get("score", 0.0)), source="container_teds", stderr=item.get("error"))
 
 
-def compute_teds_batch(pairs: list[tuple[str, str]], *, structure_only: bool = False, timeout_sec: int = 120) -> list[TEDSScore] | None:
+def compute_teds_batch(pairs: list[tuple[str, str]], *, structure_only: bool = False, timeout_sec: int = 300) -> list[TEDSScore] | None:
     payload = {
         "pairs": [{"html_a": a or "", "html_b": b or ""} for a, b in pairs],
         "structure_only": structure_only,

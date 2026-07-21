@@ -78,7 +78,7 @@ def _ensure_container() -> tuple[bool, str]:
     return False, f"container {_CONTAINER_NAME} unavailable"
 
 
-def _run_in_container(payload: dict, *, timeout_sec: int = 120) -> Any | None:
+def _run_in_container(payload: dict, *, timeout_sec: int = 300) -> Any | None:
     ok, _ = _ensure_container()
     if not ok:
         return None
@@ -113,7 +113,7 @@ def _run_in_container(payload: dict, *, timeout_sec: int = 120) -> Any | None:
         return None
 
 
-def compute_cdm_visual(latex_a: str, latex_b: str, *, timeout_sec: int = 120) -> CDMVisualScore | None:
+def compute_cdm_visual(latex_a: str, latex_b: str, *, timeout_sec: int = 300) -> CDMVisualScore | None:
     payload = {
         "pairs": [{"latex_a": latex_a or "", "latex_b": latex_b or ""}],
         "timeout_sec": timeout_sec,
@@ -128,7 +128,7 @@ def compute_cdm_visual(latex_a: str, latex_b: str, *, timeout_sec: int = 120) ->
     return CDMVisualScore(score=float(item.get("score", 0.0)), source="container_cdm", stderr=item.get("error"))
 
 
-def compute_cdm_visual_batch(pairs: list[tuple[str, str]], *, timeout_sec: int = 120) -> list[CDMVisualScore] | None:
+def compute_cdm_visual_batch(pairs: list[tuple[str, str]], *, timeout_sec: int = 300) -> list[CDMVisualScore] | None:
     payload = {
         "pairs": [{"latex_a": a or "", "latex_b": b or ""} for a, b in pairs],
         "timeout_sec": timeout_sec,
