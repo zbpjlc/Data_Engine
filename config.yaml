@@ -84,7 +84,7 @@ ocr:
     formula_threshold: null
     page_high_threshold: 0.8   # avg_sim >= 此值 → all_agree
     page_low_threshold: 0.4    # avg_sim >= 此值 → partial_agree，否则 all_disagree
-    flush_interval: 200   # 每处理 N 个 block 写入一次 lance 文件
+    flush_interval: 10000  # 每处理 N 个 block 写入一次 lance 文件
     teds_batch_size: 1000  # TEDS 批量比较每批最大 pair 数
 
   sampling:
